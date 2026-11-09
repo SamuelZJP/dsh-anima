@@ -1,0 +1,19 @@
+{
+  "name": "dsh-anima",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.28.5",
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "dsh": "dsh"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh": "0.2.2-rc.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

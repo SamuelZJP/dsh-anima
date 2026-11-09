@@ -1,0 +1,12 @@
+packages:
+  - packages/*
+  - bundle
+
+# Install scripts of DSH's own runtime dependencies (native addons for shells
+# and subprocesses). Same code `npx @deepseek-ai/dsh` would run.
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': true
+  koffi: true
+  node-pty: true
+  protobufjs: true

@@ -1,0 +1,5 @@
+# Anima bundle layer. Root-level rows register into DSH's global layer, so
+# every agent preset in the profile sees their tools.
+- insert:
+    - id: anima-core
+      name: '@anima/core'
