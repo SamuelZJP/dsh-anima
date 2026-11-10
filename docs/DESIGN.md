@@ -38,7 +38,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 
 ## 3. Core concepts
 
-Six concepts carry the whole design; every later section is built from them.
+Seven concepts carry the whole design; every later section is built from them.
 
 | Concept | What it is | Owned by |
 | --- | --- | --- |
@@ -48,6 +48,7 @@ Six concepts carry the whole design; every later section is built from them.
 | **Person** | A human she knows, possibly with accounts on several platforms (linked manually in settings), plus trust level and relationship notes. | Memory |
 | **Conversation session** | A DSH session bound to one channel. Holds the history with that person or group. | Life loop |
 | **Self session** | Her single long-lived inner-life session. Autonomous stimuli land here; she decides what to do next. | Life loop |
+| **Triage session** | One short-lived session per day of hers that runs the cheap heartbeat decision: rest, or wake the Self session to act. | Life loop |
 
 She also has **self state**: a small set of numbers (needs, energy, circadian phase, mood) that change over time and with behavior outcomes. It is shown to her, never acted on by code directly.
 
@@ -109,7 +110,7 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 | `message` (group) | Adapter | Group's conversation session | Only after group triage (below) |
 | `mention` / `reply-to-her` / `poke` | Adapter | Conversation session | Yes |
 | `platform-event` (new follower, comment reply, friend request) | Adapter | Self session | Batched, at next heartbeat |
-| `heartbeat` | Life loop timer | Self session | Yes, cheap triage turn |
+| `heartbeat` | Life loop timer | Triage session of her day; escalates to Self | Yes, cheap triage turn |
 | `alarm` | DSH `schedule` task she created | Self or the named session | Yes |
 | `intent` | Self session via `open_conversation` | Target conversation session | Yes |
 | `owner-command` | Owner's bound account or DSH UI | Handled by command, no model turn | No |
@@ -117,7 +118,10 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 ### Session identity
 
 - Conversation session id = a deterministic hash of `characterId + channel key`. The same channel always maps to the same session; no mapping table to corrupt.
-- Sessions are created on first stimulus and use the `conversation` preset. The Self session uses the `self` preset.
+- Sessions are created on first stimulus and use the `conversation` preset. The Self session uses the `self` preset; triage sessions use the `triage` preset, with id = hash of `characterId + day`, so each of her days (wake to wake) gets a fresh, short triage history.
+- The Self session id = hash of `characterId` plus a `selfGeneration` number (config, default 1). Raising it starts a fresh Self session when the old one cannot continue. The old one stays in the sidebar; her state, goals and memory live in the data directory and carry over.
+- Anima sessions hide global tools that do not belong to her (`working_directory`, `anima_ping`) through the persona row's `hideTools`.
+- Every stimulus Anima delivers starts with the time on her clock (`[Tue 2026-11-10 08:12] …`). Anima presets do not use DSH's time context, which reads only the real clock.
 - Long histories are handled by DSH compaction; durable facts move to memory during consolidation. Start with compaction only; add a daily Self-session rollover only if cost becomes a problem.
 
 ### Intent handoff (how she starts a chat)
@@ -125,8 +129,8 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 1. In the Self session she decides to talk to someone and calls `open_conversation(channel, intent, context?)`.
 2. The policy gate checks quota, quiet hours and consent for that channel.
 3. The life loop delivers an `intent` message into the target conversation session's inbox. It is logged there, so the conversation history explains why she spoke first.
-4. The conversation session, which holds the history with that person, writes the actual words and calls `say`.
-5. The outcome (sent, failed, later reply) returns to the Self session as a short notice and updates her needs.
+4. The conversation session, which holds the history with that person, writes the actual words and calls `say`, or declines by calling `stay_silent(reason)`.
+5. The outcome (sent, failed, declined, later reply) returns to the Self session as a short notice that does not wake it, and appears in the next heartbeat report. Needs move only through the `say` itself. A declined intent still counts against the daily initiate budget.
 
 This keeps the reason (Self) apart from the wording (conversation), and keeps each chat's history complete in one place.
 
@@ -145,11 +149,14 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 | `id` | Tool name | `qq_say` |
 | `platform` | Owning platform, or none for core behaviors | `qq` |
 | `effect` | Effect class (table below) | `express` |
-| `satisfies` | Needs it feeds when it succeeds | `connect: 0.3` |
+| `satisfies` | Needs it feeds when it succeeds. Kept in the needs settings (`needs[].satisfiedBy`), not on the behavior, so the owner retunes it without code | `connect: local_say 0.3` |
 | `cost` | Rough weight against her daily budget | `1` |
 | `rateKey` | What quota it counts against | `channel`, `platform`, `global` |
 | `audience` | Who will see the output, for memory scoping | derived from the channel |
-| `sessions` | Which session kinds may call it | `conversation`, `self` |
+| `sessions` | Which session kinds may call it | `conversation`, `self`, `triage` |
+| `modes` | Heartbeat modes it works in (all by default) | `day` |
+| `target` | For `initiate`: which channel the call targets, read from its arguments, for consent | `args.channel` |
+| `constraint` | Owner rule on arguments | schedule target must be `this_session` |
 
 ### Effect classes
 
@@ -166,13 +173,14 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 ### Core behavior set (platform-independent)
 
 - `<platform>_say(text, replyTo?)` — speak in the current conversation. Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
-- `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged.
-- `open_conversation(channel, intent)` — start or resume a chat (Self session only).
+- `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged. `stay_silent` also declines an intent from Self.
+- `open_conversation(channel, intent, context?)` — start or resume a chat (Self session only).
 - `channels_find(filter)` — list reachable channels with relationship notes, last contact, typical active hours.
 - `memory_recall(query)`, `memory_remember(text, scope)`, `memory_forget(id)`.
 - `self_note(text)` (self-model), `self_feel(adjustments)` (state), `goals_*`.
 - `schedule_create` / `schedule_edit` (DSH built-ins) — her own alarms.
-- `rest(until?)` — end the current turn and suggest the next heartbeat time.
+- `rest(until?)` — end the current turn and suggest the next heartbeat time (triage and Self).
+- `heartbeat_act(reason)` — triage only, by day: wake the Self session to act.
 
 Platform adapters add platform behaviors (`qq_poke`, `bili_post_dynamic`, `bili_comment`, …) with the same metadata.
 
@@ -190,7 +198,7 @@ Settings define her workspace root directory and the exact DSH tool set she gets
 
 ## 7. Autonomy and purpose
 
-Autonomy comes from one loop: a heartbeat wakes the Self session with a situation report, she picks a behavior or rests, and the outcome updates her state. Purpose is the pressure of her needs and goals inside that report, not a script that picks a topic for her.
+Autonomy comes from one loop: a heartbeat wakes her with a situation report, she picks a behavior or rests, and the outcome updates her state. Purpose is the pressure of her needs and goals inside that report, not a script that picks a topic for her.
 
 ### Self state (kept by code)
 
@@ -199,6 +207,10 @@ Autonomy comes from one loop: a heartbeat wakes the Self session with a situatio
 - **Energy** 0–1: spent by turns, restored by rest and night.
 - **Circadian phase**: `asleep`, `waking`, `day`, `evening`, `winding down`, from her configured day rhythm (e.g. wake 07:30, sleep 23:30).
 - **Mood**: a few numbers (valence, arousal) that drift back to a baseline. She adjusts them herself with `self_feel` after something happens.
+- **Clock**: all time-based logic (phase, drift, heartbeat timers, quiet hours, daily budgets) reads one injectable clock. `clock.speed` (default 1) speeds it up, and `clock.start` sets a simulated start, so a test day runs in about 1.5 hours.
+- **Her day** runs from one wake to the next; the night belongs to the day before it. Daily budgets reset at wake.
+
+Starting values (all settings): needs drift 0.01–0.05 per awake hour; energy drains 0.04 per awake hour and 0.03 per action turn, and restores 0.15 per sleeping hour; mood returns to baseline with a 3-hour half-life; a night's sleep resets `rest`. State lives in `~/.anima/state.json`.
 
 Code only updates these numbers by time and by declared behavior effects. It never maps message words to needs.
 
@@ -208,33 +220,37 @@ She creates, updates and closes goals with tools: "finish reading that series", 
 
 ### The heartbeat
 
-1. A timer fires at the interval she last chose with `rest(until)`, within configured bounds (e.g. 20 min–4 h by day, one wake-up at night).
-2. The life loop builds a short **situation report**: time and phase, energy and top needs, open goals due soon, salient events since last time (replies, platform events, alarms), remaining budgets, and a one-line summary of reachable channels.
-3. A **triage turn** runs on a cheap model with only the report and her persona summary. Most heartbeats end in `rest`.
-4. If she wants to act, the turn escalates to the full model in the Self session with complete tools and context.
+1. A timer fires at the time she last chose with `rest(until)`, clamped into configured bounds (default 20 min–4 h by day). A time that falls in the night moves to her wake time, unless she asked for that night time and the night still has its one wake-up. Without a choice, the default interval (1 h) applies.
+2. The life loop builds a short **situation report**: time and phase, energy, needs with their descriptions, open goals due soon, events since last time (intent outcomes, owner messages, alarms), remaining budgets, and the reachable channels with consent and last contact.
+3. A **triage turn** runs in the day's triage session on the triage model with only the report and her persona. It must call `rest(until?)` or `heartbeat_act(reason)`. Most heartbeats end in `rest`.
+4. `heartbeat_act` escalates: the Self session gets the same report and her reason, on the action model, with complete tools and context. It ends with `rest(until?)`; if it ends without one, the default interval applies.
 5. Outcomes feed back into needs, goals and memory.
+
+Heartbeats are skipped and rescheduled while paused, while the triage or Self session is busy, when the mode's token budget is spent (until the next wake), and at night once the night's wake-up is used.
 
 ### Day and night
 
-Heartbeats differ by phase: daytime heartbeats are **activity** (she may act on the world), night heartbeats are **dreaming** (internal only, no outward behaviors). Dreaming is a separate idea from memory consolidation and is deferred; for now night heartbeats only run consolidation and otherwise rest.
+Heartbeats differ by phase: daytime heartbeats are **activity** (she may act on the world), night heartbeats are **dreaming** (internal only, no outward behaviors). Dreaming is a separate idea from memory consolidation and is deferred. Until Phase 3 adds consolidation, a night heartbeat (at most one per night) can only `rest`: `heartbeat_act` is day-only.
 
 Each mode has its own settings block, so the model and budget can be tuned without code changes:
 
 | Setting | Day (activity) | Night (dreaming) |
 | --- | --- | --- |
-| Triage model | configurable | configurable |
-| Action model | configurable | configurable (internal behaviors only) |
-| Interval bounds | e.g. 20 min–4 h, she chooses within | e.g. 1–2 wakes per night |
-| Token budget | per day | per night |
+| Triage model | configurable (default DeepSeek-V4.1-Flash) | configurable (default the same) |
+| Action model | configurable (default the same) | configurable (internal behaviors only) |
+| Interval bounds | default 20 min–4 h, she chooses within | default 1 wake per night |
+| Token budget | per day (default 300,000) | per night (default 20,000) |
 | Allowed effect classes | per policy (section 10) | `observe`, `internal` |
 
 ### Example: good morning, without a script
 
 At 07:40 her phase becomes `waking` and a heartbeat fires. The report shows `connect` at 0.8, the owner unseen for 10 hours, and a memory that he usually replies around 08:00 on weekdays. She may decide to send him a good-morning message through `open_conversation`, choose the platform where he was active last night, or decide he had a late night and wait. Nothing in code names "good morning".
 
+Token budgets count billable tokens: input and output tokens that are not cache hits. Heartbeat sessions are prefix-stable and mostly hit the cache, so totals would overstate cost about tenfold. Past the budget, the gate lets only `internal` behaviors run, so she can still rest.
+
 ### Self-scheduling
 
-She uses DSH's built-in `schedule_create` to set her own alarms ("remind me at 21:00 to ask about the exam", "wake me at 07:30 tomorrow"). DSH delivers the latest missed occurrence after a restart, which fixes the missed-greeting problem surfcore patched by hand.
+She uses DSH's built-in `schedule_create` to set her own alarms ("remind me at 21:00 to ask about the exam", "wake me at 07:30 tomorrow"). DSH delivers the latest missed occurrence after a restart, which fixes the missed-greeting problem surfcore patched by hand. The gate governs the schedule tools like her own behaviors: Self only, `target` must be `this_session`, at most 20 new alarms per day. DSH's schedule runs on the real clock only, so under a sped-up test clock alarms keep real time (her report says so).
 
 ### Freedom within limits
 
@@ -300,12 +316,14 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 ### What the gate checks
 
 1. **Session kind**: the behavior is allowed in this session (e.g. `open_conversation` only from Self).
-2. **Effect class**: `public` and `irreversible` go to approval unless an owner rule whitelists them.
-3. **Quotas**: per channel, per platform, per day, and a global cost budget.
-4. **Time**: quiet hours per channel or person; her own sleep phase.
-5. **Consent**: channels and people she may initiate with (owner, opted-in friends); never strangers by default.
-6. **Trust of the trigger**: the trust level of whoever caused this turn limits which classes are reachable. A group member cannot cause a public post.
-7. **Group health**: skip unprompted speech in groups dominated by other bots (surfcore's fish-guard idea, as a rule).
+2. **Mode**: at night only `observe` and `internal` behaviors run (settable per mode); day-only behaviors such as `heartbeat_act` are refused (`anima/night`).
+3. **Effect class**: `public` and `irreversible` go to approval unless an owner rule whitelists them.
+4. **Quotas and budgets**: per channel, per platform, per day; the daily token budget (`anima/over-budget`); self-initiated conversations per day (default 3).
+5. **Time**: quiet hours; her own sleep phase (`anima/quiet-hours`).
+6. **Consent**: channels and people she may initiate with (default: the owner's channels only); never strangers by default (`anima/no-consent`).
+7. **Arguments**: owner rules on a behavior's arguments, e.g. alarm targets (`anima/not-allowed`).
+8. **Trust of the trigger**: the trust level of whoever caused this turn limits which classes are reachable. A group member cannot cause a public post.
+9. **Group health**: skip unprompted speech in groups dominated by other bots (surfcore's fish-guard idea, as a rule).
 
 A refused call returns a structured reason to her (`code`, `hint`), so she can adapt instead of retrying blindly. DSH shows the model only the deny reason text, so the gate writes it as `<code>: <hint>` and also records `code` in the structured error info for the log and UI.
 
@@ -366,7 +384,7 @@ Unloading the plugin removes all of the above through Cordis effects.
 Everything she does is already a DSH session event, so the owner's view is mostly DSH's own session UI plus a few owner commands; no custom console in the first version.
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
-- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (state, needs, budgets, next heartbeat), `/anima pause` and `/resume`, `/anima outbox` (pending messages, cancel), `/anima approve <id>`, `/anima memory <query>` (inspect, edit, forget), `/anima selfmodel` (recent self-model diffs, revert).
+- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox` (pending messages, cancel), `/anima approve <id>`, `/anima memory <query>` (inspect, edit, forget), `/anima selfmodel` (recent self-model diffs, revert).
 - **Audit trail**: every gated call records behavior, decision, reason and trigger.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
@@ -412,12 +430,19 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Package scope | `@anima/*`, all `private: true`; one `@anima/bundle` installs them | 4 |
 | Tool names | `snake_case` with a platform or area prefix (`qq_say`, `memory_recall`); no dots | 6 |
 | DSH pin | `@deepseek-ai/dsh@0.2.2-rc.1`; details in `docs/DSH-INTEGRATION.md` | 14 |
+| Intent handoff | The conversation may decline an intent with `stay_silent`; Self hears "declined"; it still counts against the initiate budget | 5 |
+| Triage | A separate triage session per day of hers, cheap model, tools `rest` and `heartbeat_act` only | 5, 7 |
+| Clock | One injectable clock; `clock.speed` for accelerated test days | 7 |
+| Token budget | Daily cap in the gate on billable (non-cached) tokens; default 300,000 by day, 20,000 at night | 7, 10 |
+| Night (until Phase 3) | At most one wake-up per night, and it can only rest | 7 |
+| Owner goals | `/anima goal add|list|close`; she uses `goals_add|update|close` | 7, 12 |
 
 ### Still open
 
-- [ ] **Intent handoff**: may the conversation session decline an intent from Self?
+- [x] **Intent handoff**: yes; see decisions (Phase 2).
 - [ ] **Dreaming**: what night heartbeats do beyond consolidation; deferred until after Phase 3.
-- [ ] **Default need tuning**: drift rates and baselines; tune from Phase 2 test runs.
+- [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tune from Phase 2 test runs.
+- [ ] **Outbox delay** for `initiate` messages (section 10) is not built yet; add it with QQ (Phase 4), where it matters.
 
 ### Phased roadmap
 

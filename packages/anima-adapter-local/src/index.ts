@@ -38,7 +38,7 @@ export const Config: z<Config> = z.object({
 
 /** The single local channel: a private chat with the owner. */
 export const OWNER_CHANNEL: PublishedChannel = {
-  platform: PLATFORM, account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)',
+  platform: PLATFORM, account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)', isOwner: true,
 }
 
 /**
@@ -72,7 +72,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
         additionalProperties: false,
         properties: {
           sent: { type: 'boolean', required: true, description: 'Whether the message was delivered.' },
-          at: { type: 'string', required: true, description: 'Send time, ISO 8601.' },
+          at: { type: 'string', required: true, description: 'Send time on her clock, ISO 8601.' },
         },
       },
       render: () => [{ type: 'text', text: 'sent' }],
@@ -83,8 +83,8 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
       if (session?.kind !== 'conversation' || session.channel.platform !== PLATFORM) {
         throw new AnimaError('anima/no-channel', 'this session is not bound to a local channel.')
       }
-      if (args.text.trim() === '') throw new AnimaError('anima/empty-message', 'text is empty; to stay silent, simply do not call local_say.')
-      const at = new Date().toISOString()
+      if (args.text.trim() === '') throw new AnimaError('anima/empty-message', 'text is empty; to stay silent, call stay_silent instead.')
+      const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
       appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text: args.text })}\n`)
       return { sent: true, at }
@@ -101,7 +101,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
         channel: OWNER_CHANNEL,
         sender: { platformUserId: 'owner', displayName: ownerName, isOwner: true },
         text: args,
-        ts: Date.now(),
+        ts: ctx.anima.clock.now(),
       })
       return { kind: 'success', text: `Delivered to "Anima · ${OWNER_CHANNEL.display}" (${sessionId}). Open it in the sidebar to watch her reply; you can also type there directly.` }
     },

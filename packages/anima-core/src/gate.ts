@@ -5,18 +5,40 @@
  */
 
 import type { AllowRule, QuotaRule } from './config.ts'
-import type { BehaviorMeta, SessionInfo } from './types.ts'
+import type { Mode } from './rhythm.ts'
+import type { BehaviorMeta, EffectClass, SessionInfo } from './types.ts'
 
 /** Gate outcome. A refusal carries a stable `code` and a hint she can act on. */
 export type Verdict =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly code: string; readonly hint: string }
 
-/** Policy the gate applies. */
+/** Policy the gate applies. Fields beyond quotas and allow rules are optional (tests). */
 export interface Policy {
   readonly quotas: readonly QuotaRule[]
   readonly allow: readonly AllowRule[]
+  /** Effect classes allowed per mode; all when omitted. */
+  readonly allowedEffects?: Readonly<Record<Mode, readonly EffectClass[]>>
+  /** Self-initiated conversations per day; unlimited when omitted. */
+  readonly initiatePerDay?: number
 }
+
+/** Time and budget facts of the moment, computed from her clock by the service. */
+export interface GateMoment {
+  /** Current heartbeat mode. */
+  readonly mode: Mode
+  /** Why initiating is not allowed now (sleep, quiet hours), or undefined. */
+  readonly quiet?: string | undefined
+  /** Whether the current mode's token budget is spent. */
+  readonly overBudget: boolean
+  /** Conversations she initiated today. */
+  readonly initiatesUsed: number
+  /** Whether she may initiate in a channel (consent). */
+  readonly mayInitiate: (channelKey: string) => boolean
+}
+
+/** Moment used when the caller gives none: day, nothing spent, consent everywhere. */
+export const OPEN_MOMENT: GateMoment = { mode: 'day', overBudget: false, initiatesUsed: 0, mayInitiate: () => true }
 
 /** One gated behavior call. */
 export interface GateCall {
@@ -27,6 +49,8 @@ export interface GateCall {
   readonly session: SessionInfo | undefined
   /** Epoch milliseconds. */
   readonly now: number
+  /** Parsed call arguments. */
+  readonly args?: Readonly<Record<string, unknown>>
 }
 
 /** Refusal codes the gate emits. */
@@ -37,6 +61,11 @@ export const GateCode = {
   needsApproval: 'anima/needs-approval',
   overQuota: 'anima/over-quota',
   paused: 'anima/paused',
+  night: 'anima/night',
+  overBudget: 'anima/over-budget',
+  quietHours: 'anima/quiet-hours',
+  noConsent: 'anima/no-consent',
+  notAllowed: 'anima/not-allowed',
 } as const
 
 /**
@@ -55,8 +84,9 @@ function platformFits(meta: BehaviorMeta, session: SessionInfo): boolean {
  * @param session - the session, or `undefined` for a non-Anima session.
  * @returns true when the tool should be visible for this step.
  */
-export function visibleIn(meta: BehaviorMeta, session: SessionInfo | undefined): boolean {
+export function visibleIn(meta: BehaviorMeta, session: SessionInfo | undefined, mode?: Mode): boolean {
   return session !== undefined && meta.sessions.includes(session.kind) && platformFits(meta, session)
+    && (mode === undefined || meta.modes === undefined || meta.modes.includes(mode))
 }
 
 /** Counter key of one quota rule for a call. */
@@ -156,15 +186,18 @@ export class QuotaBook {
 
 /**
  * Decide one behavior call. Checks, in order: Anima session, session kind,
- * platform, approval-class effects, quotas (DESIGN §10 items 1–3; time, consent
- * and trust arrive in later phases). Does not record usage.
+ * platform, mode (night), approval-class effects, argument constraints, token
+ * budget, initiate rules (daily count, quiet hours, consent), quotas
+ * (DESIGN §10 items 1–5; trust arrives with real platforms). Does not record usage.
  * @param call - the call.
  * @param policy - owner policy.
  * @param book - quota counters.
+ * @param moment - time and budget facts; open by default.
  * @returns the verdict.
  */
-export function decide(call: GateCall, policy: Policy, book: QuotaBook): Verdict {
+export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: GateMoment = OPEN_MOMENT): Verdict {
   const { meta, session, name } = call
+  const args = call.args ?? {}
   if (session === undefined) {
     return deny(GateCode.notAnimaSession, `${name} only works in Anima sessions.`)
   }
@@ -174,8 +207,28 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook): Verdict
   if (!platformFits(meta, session)) {
     return deny(GateCode.wrongPlatform, `${name} belongs to platform "${meta.platform}", which this session cannot use directly.`)
   }
+  const allowed = policy.allowedEffects?.[moment.mode]
+  if ((meta.modes !== undefined && !meta.modes.includes(moment.mode)) || (allowed !== undefined && !allowed.includes(meta.effect))) {
+    return deny(GateCode.night, `${name} is not available while you are ${moment.mode === 'night' ? 'asleep' : 'awake'}${allowed === undefined ? '' : `; now only ${allowed.join(', ')} behaviors work`}.`)
+  }
   if ((meta.effect === 'public' || meta.effect === 'irreversible') && !policy.allow.some(rule => rule.behavior === name)) {
     return deny(GateCode.needsApproval, `${name} is a ${meta.effect} action and the owner has not allowed it. You can tell the owner what you wanted to do.`)
+  }
+  const constraint = meta.constraint?.(args)
+  if (constraint !== undefined) return deny(GateCode.notAllowed, constraint)
+  if (moment.overBudget && meta.effect !== 'internal') {
+    return deny(GateCode.overBudget, `today's token budget for ${moment.mode === 'night' ? 'the night' : 'the day'} is used up. Only rest and other internal behaviors work until it renews.`)
+  }
+  if (meta.effect === 'initiate') {
+    const limit = policy.initiatePerDay
+    if (limit !== undefined && moment.initiatesUsed + (meta.cost ?? 1) > limit) {
+      return deny(GateCode.overQuota, `you already started ${moment.initiatesUsed} of ${limit} conversations allowed today. Wait until tomorrow, or wait for others to reach out.`)
+    }
+    if (moment.quiet !== undefined) return deny(GateCode.quietHours, `${moment.quiet}; you cannot start conversations now.`)
+    const target = meta.target?.(args)
+    if (target !== undefined && !moment.mayInitiate(target)) {
+      return deny(GateCode.noConsent, `the owner has not allowed you to start conversations in ${target}.`)
+    }
   }
   const over = book.exceeded(call, policy.quotas)
   if (over !== undefined) {

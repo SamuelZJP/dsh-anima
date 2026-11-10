@@ -23,6 +23,9 @@ class RecordingHost implements SessionHost {
   isArchived() { return false }
   rename() {}
   async deliver(agent: { id: string }, text: string) { this.delivered.push({ id: agent.id, text }) }
+  async inject() {}
+  selectModel() {}
+  isBusy() { return false }
 }
 
 async function setup() {
@@ -32,7 +35,7 @@ async function setup() {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir })
+  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new RecordingHost()
   await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
   const fiber = await ctx.plugin(local, { ownerName: 'Sam' })
@@ -84,7 +87,7 @@ describe('/anima chat', () => {
     const { ctx, host } = await setup()
     const result = await chat(ctx, 'chat good morning')
     expect(result.kind).toBe('success')
-    expect(host.delivered).toEqual([{ id: ownerSession, text: '[local private "Owner (local)"] Sam (owner): good morning' }])
+    expect(host.delivered).toEqual([{ id: ownerSession, text: expect.stringMatching(/^\[\w{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] \[local private "Owner \(local\)"\] Sam \(owner\): good morning$/) }])
   })
 
   it('needs text', async () => {

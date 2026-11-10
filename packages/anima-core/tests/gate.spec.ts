@@ -111,3 +111,54 @@ describe('quotas', () => {
     expect(book.usage(policy.quotas, T0)).toEqual(['express: 2 per 10 min per channel — channel:local:owner:private:owner 1'])
   })
 })
+
+describe('Phase 2 gate checks', () => {
+  const policy: Policy = { quotas: [], allow: [], allowedEffects: { day: ['observe', 'internal', 'express', 'initiate'], night: ['observe', 'internal'] }, initiatePerDay: 3 }
+  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
+  const act: BehaviorMeta = { effect: 'internal', sessions: ['triage'], modes: ['day'] }
+  const triage: SessionInfo = { kind: 'triage' }
+  const day = { mode: 'day' as const, overBudget: false, initiatesUsed: 0, mayInitiate: (key: string) => key === 'local:owner:private:owner' }
+  const book = new QuotaBook()
+  const withArgs = (c: GateCall, args: Record<string, unknown>): GateCall => ({ ...c, args })
+  const toOwner = withArgs(call('open_conversation', openConversation, self), { channel: 'local:owner:private:owner' })
+
+  it('allows initiating with the owner by day within budget', () => {
+    expect(decide(toOwner, policy, book, day)).toEqual({ allowed: true })
+  })
+
+  it('refuses the fourth conversation of the day', () => {
+    expect(decide(toOwner, policy, book, { ...day, initiatesUsed: 3 })).toMatchObject({ allowed: false, code: GateCode.overQuota })
+  })
+
+  it('refuses initiating in quiet hours', () => {
+    const verdict = decide(toOwner, policy, book, { ...day, quiet: 'it is quiet hours' })
+    expect(verdict).toMatchObject({ allowed: false, code: GateCode.quietHours })
+  })
+
+  it('refuses initiating without consent', () => {
+    const stranger = withArgs(call('open_conversation', openConversation, self), { channel: 'qq:1:private:99' })
+    expect(decide(stranger, policy, book, day)).toMatchObject({ allowed: false, code: GateCode.noConsent })
+  })
+
+  it('allows only observe and internal at night, and day-only behaviors by day', () => {
+    const night = { ...day, mode: 'night' as const }
+    expect(decide(toOwner, policy, book, night)).toMatchObject({ allowed: false, code: GateCode.night })
+    expect(decide(call('heartbeat_act', act, triage), policy, book, night)).toMatchObject({ allowed: false, code: GateCode.night })
+    expect(decide(call('heartbeat_act', act, triage), policy, book, day).allowed).toBe(true)
+    expect(decide(call('rest', { effect: 'internal', sessions: ['triage'] }, triage), policy, book, night).allowed).toBe(true)
+    expect(visibleIn(act, triage, 'night')).toBe(false)
+    expect(visibleIn(act, triage, 'day')).toBe(true)
+  })
+
+  it('lets only internal behaviors run past the token budget', () => {
+    const spent = { ...day, overBudget: true }
+    expect(decide(call('local_say', say, localChat), policy, book, spent)).toMatchObject({ allowed: false, code: GateCode.overBudget })
+    expect(decide(call('rest', remember, self), policy, book, spent).allowed).toBe(true)
+  })
+
+  it('applies argument constraints', () => {
+    const schedule: BehaviorMeta = { effect: 'internal', sessions: ['self'], constraint: args => args.target === 'this_session' ? undefined : 'use this_session' }
+    expect(decide(withArgs(call('schedule_create', schedule, self), { target: 'new' }), policy, book, day)).toMatchObject({ allowed: false, code: GateCode.notAllowed, hint: 'use this_session' })
+    expect(decide(withArgs(call('schedule_create', schedule, self), { target: 'this_session' }), policy, book, day).allowed).toBe(true)
+  })
+})

@@ -23,7 +23,8 @@
       "patch": [
         "./cordis.patch.yml",
         "./presets/conversation.patch.yml",
-        "./presets/self.patch.yml"
+        "./presets/self.patch.yml",
+        "./presets/triage.patch.yml"
       ]
     }
   },

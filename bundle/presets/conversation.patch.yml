@@ -1,6 +1,8 @@
 # Agent preset anima-conversation. Anima creates these sessions itself; the persona
 # row makes her constitution the complete system prompt. Tools come from root
-# Anima behaviors, scoped per session by their metadata (DESIGN §6).
+# Anima behaviors, scoped per session by their metadata (DESIGN §6). No
+# dsh-time-context: it reads the real clock, and every Anima stimulus already
+# starts with the time on her own (possibly sped-up) clock.
 - insert:
     - id: anima-preset-conversation
       name: '@deepseek-ai/dsh-agent-preset'
@@ -14,8 +16,6 @@
             name: '@anima/core/persona'
             config:
               kind: conversation
-          - id: time-context
-            name: '@deepseek-ai/dsh-time-context'
           - id: compaction
             name: cordis:group
             group: true

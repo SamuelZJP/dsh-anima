@@ -46,6 +46,9 @@ class FakeHost implements SessionHost<FakeAgent> {
   isArchived(id: string) { return this.archived.has(id) }
   rename(agent: FakeAgent, title: string) { this.sessions.get(agent.id)!.title = title }
   async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
+  async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
+  selectModel() {}
+  isBusy() { return false }
 }
 
 describe('session identity', () => {
@@ -61,6 +64,10 @@ describe('session identity', () => {
     expect(selfSessionId('anima')).toMatch(/^anima-self-[0-9a-f]{24}$/)
     expect(selfSessionId('anima')).not.toBe(selfSessionId('mio'))
     expect(selfSessionId('anima')).not.toBe(conversationSessionId('anima', ''))
+    expect(selfSessionId('anima', 1)).toBe('anima-self-9ab12293373718feef7e5704')
+    expect(selfSessionId('anima', 2)).toMatch(/^anima-self-[0-9a-f]{24}$/)
+    expect(selfSessionId('anima', 2)).not.toBe(selfSessionId('anima'))
+    expect(route('anima', { type: 'notice', text: 'x', ts: 0 }, 2)).toEqual({ kind: 'self', sessionId: selfSessionId('anima', 2) })
   })
 })
 
@@ -155,6 +162,7 @@ describe('AnimaLife service', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
     await ctx.plugin(animaCore, { dataDir: tempDir() })
+    ctx.anima.setClock(() => new Date('2026-11-10T10:00').getTime())
     const host = new FakeHost()
     const fiber = await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
     return { ctx, host, fiber }
@@ -175,7 +183,7 @@ describe('AnimaLife service', () => {
     const { ctx, host } = await setup()
     const invocation = { rawInput: 'self how are you?', agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation
     expect(await ctx.anima.dispatchCommand(invocation)).toMatchObject({ kind: 'success' })
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[notice] The owner says: how are you?'])
+    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [notice] The owner says: how are you?'])
   })
 
   it('withdraws the resolver and subcommand on unload', async () => {

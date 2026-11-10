@@ -24,7 +24,8 @@ export async function setupCore(config: Partial<animaCore.Config> = {}): Promise
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir: tempDataDir(), ...config })
+  // A fixed daytime clock, so gate tests do not depend on the hour they run at.
+  await ctx.plugin(animaCore, { dataDir: tempDataDir(), clock: { speed: 1, start: '2026-11-10T10:00' }, ...config })
   return ctx
 }
 

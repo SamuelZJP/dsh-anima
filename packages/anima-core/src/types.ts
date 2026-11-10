@@ -9,8 +9,8 @@ export type EffectClass = 'observe' | 'internal' | 'workspace' | 'express' | 'in
 /** All effect classes, in increasing order of reach. */
 export const EFFECT_CLASSES: readonly EffectClass[] = ['observe', 'internal', 'workspace', 'express', 'initiate', 'public', 'irreversible']
 
-/** Kind of an Anima session. */
-export type SessionKind = 'conversation' | 'self'
+/** Kind of an Anima session. `triage` runs the cheap heartbeat decision (DESIGN §7). */
+export type SessionKind = 'conversation' | 'self' | 'triage'
 
 /** A place she can talk, identified by `platform:account:kind:id` (DESIGN §3). */
 export interface ChannelRef {
@@ -36,6 +36,7 @@ export function channelKey(ref: ChannelRef): string {
 /** What Anima knows about a DSH session; `undefined` means it is not an Anima session. */
 export type SessionInfo =
   | { readonly kind: 'self' }
+  | { readonly kind: 'triage' }
   | { readonly kind: 'conversation'; readonly channel: ChannelRef; readonly channelKey: string }
 
 /** Behavior metadata read by the gate and tool scoping (DESIGN §6). */
@@ -48,6 +49,12 @@ export interface BehaviorMeta {
   readonly cost?: number
   /** Session kinds that may call it. */
   readonly sessions: readonly SessionKind[]
+  /** Heartbeat modes it works in; all when omitted. */
+  readonly modes?: readonly ('day' | 'night')[]
+  /** For `initiate` behaviors: the channel key the call targets, read from its arguments. */
+  readonly target?: (args: Readonly<Record<string, unknown>>) => string | undefined
+  /** Owner policy on arguments: a hint when these arguments are not allowed. */
+  readonly constraint?: (args: Readonly<Record<string, unknown>>) => string | undefined
 }
 
 /** Structured Anima error with a stable `code` and a human-readable hint in the message. */

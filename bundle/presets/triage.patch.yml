@@ -1,0 +1,27 @@
+# Agent preset anima-triage: the cheap heartbeat decision (DESIGN §7). One
+# session per her day; Anima selects the triage model before each heartbeat.
+# Tools are the root Anima behaviors scoped to triage: rest and heartbeat_act.
+# The daily rollover keeps a day's history short; compaction is the backstop.
+# (Do not lower compaction-basic's thresholdRatio below its default retainRatio:
+# the plugin then fails to load and agent creation never completes.)
+- insert:
+    - id: anima-preset-triage
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: anima-triage
+        name: Anima triage
+        description: Heartbeat triage. Rest, or wake the Self session to act.
+        order: 22
+        plugins:
+          - id: persona
+            name: '@anima/core/persona'
+            config:
+              kind: triage
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'

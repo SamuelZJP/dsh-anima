@@ -16,7 +16,7 @@ DSH is a developer preview with breaking changes between releases.
 
 **Upgrade procedure:**
 1. Bump every `0.2.2-rc.1` in the `package.json` files and every `engines.dsh` range.
-2. Re-read the files cited in this document at the new tag, and diff the APIs listed in section 10.
+2. Re-read the files cited in this document at the new tag, and diff the APIs listed in section 11.
 3. Rebuild and re-run the tests.
 4. Repeat the demo in section 3.
 5. Update this file.
@@ -133,6 +133,31 @@ pnpm dsh --profile anima-dev --patch <scratch>/low-quota.yml --no-open
 4. `/anima pause`, then a request to speak: the call was refused with `anima/paused`, and she said she would wait. `/anima resume` lifted it.
 5. `/anima self <text>` created "Anima · self" (`anima-self` preset, cwd `~/.anima/workspace`), and she answered in her inner voice without any say tool.
 
+**Phase 2 demo (2026-11-09) — exit check passed.**
+
+*Accelerated day.* A scratch overlay set `anima-core` to `characterId: anima-test2`, `dataDir: ~/.anima/test-day-2`, `clock: { speed: 16, start: '2026-11-10T07:00' }`. Boot command: `pnpm dsh --profile anima-dev --patch <scratch>/test-day.yml --no-open`. Nobody wrote to her. Evidence from the decoded session logs, `life.json` and the ledger:
+- 9 day heartbeats at 07:30, 08:00, 09:30, 11:00, 13:00, 14:30, 16:00, 18:30 and 20:00 (simulated). Every gap was between 20 min and 4 h.
+- 5 heartbeats ended in `rest`. The other 4 went to `heartbeat_act` and then Self.
+- She opened two conversations with the owner on her own:
+  - i1 at 08:02: a morning hello.
+  - i2 at 18:32: an evening hello plus a question about file tools.
+  - Both conversations sent with `local_say`, and both "sent" outcomes were injected into Self.
+- She created goal g1 and logged her day in it.
+- At 20:00 she asked to sleep until 08:00. She was moved to 07:30 ("you sleep until your wake time"), and there were 0 night wakes.
+- Ledger: initiates 2 of 3; billable day tokens 16,732 of 300,000; night tokens 0.
+- Every request used `deepseek-official/deepseek-flash`.
+- The night-wake path is covered by unit tests only.
+
+*Real-time evening (speed 1, default `anima` character, 19:58–23:40).*
+- Triage heartbeats at 19:59, 21:00 and 22:30, each ending in `rest`.
+- At 22:30 she asked for 08:00 and was moved to 07:30. No heartbeat fired during the night.
+- Triage used 1,875 billable tokens.
+- Alarm test:
+  - Asked through `/anima self`, she created an alarm for 20:25 with `schedule_create(target: this_session)`.
+  - Her extra attempt with `target: new` was refused with `anima/not-allowed: your alarms must use target "this_session", so they wake you in this session.`
+  - The alarm was delivered to Self at 20:25:06 as a reminder batch, and she answered with `self_feel`.
+- One bug found and fixed during the run: batch alarms were not parsed, so the report event lacked the prompt.
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -173,7 +198,7 @@ export function apply(ctx: Context) {
   - Registered from a plugin listed in a preset's `plugins`, it is visible only to agents of that preset; a scoped registration overrides a global one of the same name.
   - Per-step hiding: `register(def, { when: ({ agent }) => boolean })`. Per-agent filtering: `agent.ctx.tools.restrict({ allow, deny })`. Anima's platform tool scoping (DESIGN §6) will use preset scoping plus `when`/`restrict`.
   - Under the PTC executor, tools are reachable only through `run_code`.
-- **Unit test:** `packages/anima-core/tests/ping.spec.ts`. Section 9 describes the setup.
+- **Unit test:** `packages/anima-core/tests/ping.spec.ts`. Section 10 describes the setup.
 
 ## 5. Defining an agent preset (Verified in Phase 1)
 
@@ -329,7 +354,53 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
   - `packages/experimental/auto-review/src/index.ts:741`
   - `packages/experimental/hooks-claude-code/src/index.ts:243`
 
-## 8. Other extension points Anima will use (Read)
+## 8. Phase 2 extension points (Verified in Phase 2)
+
+### Model selection per session
+
+- `agent.model.select({ provider, model })` appends a `model/selection` event; the next request uses it, and the choice sticks for the session (`packages/core/agent/src/model-selection.ts`). A route change also adds a `[model changed: …]` notice to the request.
+- The official DeepSeek route is `provider: 'deepseek-official'`, `model: 'deepseek-flash'` (shown as DeepSeek-V4.1-Flash in the UI); read from a `request/header` in the Phase 1 log.
+- Anima selects the triage model on the triage agent before each heartbeat, and the action model on Self before an escalation (`DshSessionHost.selectModel`).
+
+### Token usage
+
+- `assistant/message` events carry `usage: { inputTokens, outputTokens, cacheReadTokens?, cacheWriteTokens?, totalTokens? }`.
+- The DeepSeek adapter's `inputTokens` **excludes** cache reads: `totalTokens = input + output + cacheRead + cacheWrite` (`packages/llm/llm-deepseek/src/translate.ts:159`).
+- Anima counts `input + output + cacheWrite` of Anima sessions from a root `ctx.on('session/event', (session, event) => …)` listener (`packages/core/session/src/index.ts:76`).
+
+### Ending a turn from a tool
+
+`exec.concludeTurn()` inside `execute` makes a successful result terminal for the turn (`packages/core/tools/src/contracts.ts:260`). `rest`, `heartbeat_act` and `stay_silent` use it.
+
+### Context without waking, and agent status
+
+- `agent.inject(message)` queues context for the next step without waking; Anima uses it for intent-outcome notices to Self. Verified: the notice joins Self's next turn.
+- `agent.status` is `'idle' | 'running'` (`runtime-types.ts:201`); the heartbeat skips while the triage or Self agent is running.
+
+### Schedule (her alarms)
+
+- The host service `@deepseek-ai/dsh-schedule` is a root row of web-app (`id: schedule`). The four tools come from the preset child row `@deepseek-ai/dsh-tool-schedule` (no config), which Anima adds to `anima-self` only.
+- `schedule_create(title, prompt, rrule, target)`: `rrule` is one `DTSTART;TZID=…` line plus one `RRULE` line; `target` is `this_session`, `new_once` or `new`. `new` and `new_once` create sessions with the caller's preset and cwd that Anima would not know, so the gate allows only `this_session` (`governTool` with a `constraint`).
+- A delivery arrives in the target session as a `followup` user message with `source.kind: 'schedule'`, framed `[SCHEDULE REMINDER] … reminder_prompt_json: "…"` (`packages/schedule/schedule/src/domain.ts:1159`). Several due reminders, or one delivered after a wait, come as `[SCHEDULE REMINDER BATCH] … reminders_json: [{schedule_id, occurrence_at, reminder_prompt}]`; the live 20:25 alarm in the Phase 2 run used this form. Anima's `alarmPrompts` reads both and turns each prompt into a report event.
+- The `tool:schedule` system-prompt section ("Only create or modify scheduled tasks at the user's explicit request") is replaced by Anima's `complete: true` persona, so she may set alarms on her own.
+- Schedule timing uses the host's real clock; there is no injectable clock. Under `clock.speed > 1` alarms keep real time.
+
+### Time context
+
+`dsh-time-context` reads only the real clock and has no clock option, so the Anima presets drop it. Every Anima stimulus starts with her clock's time instead. DSH still adds a `runtime-context` snapshot (cwd, sandbox, approval, harness checkout, web URL) to every session; it carries no time.
+
+### Tool restriction and deferred tools
+
+- `agent.ctx.tools.restrict({ deny })` hides global tools in one agent scope. It throws on names that are not registered, so the persona row skips those. Anima's persona row uses it to hide `working_directory` and `anima_ping` (`hideTools`).
+- Trap: once a session exists, DSH treats every tool added after its first `request/header` as a deferred addition (`projectToolUpdates`, `packages/llm/llm/src/content.ts`; `deepseek-flash` is `addition-only`). If a restriction removes all of the first header's tools, every remaining tool is deferred. The DeepSeek API then rejects the request: `tools: at least one tool must have defer_loading=false` (INVALID_REQUEST).
+- This hit her Phase 1 Self session, whose first header held only `anima_ping` and `working_directory`. New sessions are safe: their first header already includes Anima behaviors.
+- Resolution: `anima-dev`'s profile patch sets `anima-core.selfGeneration: 2`, which starts a fresh Self session (`anima-self-2d68…`). The old one (`anima-self-9ab1…`) stays in the sidebar unused. Verified live 2026-11-10 00:32: the fresh session's turn succeeded and listed only her own tools. The owner conversation's and the real triage session's first headers include `local_say` and `rest`/`heartbeat_act`, so they are unaffected.
+
+### Compaction trap
+
+`dsh-compaction-basic` rejects a `thresholdRatio` at or below its default `retainRatio` at plugin load. Inside a preset, the failed child row leaves agent creation pending forever: `sessionController.create` writes the session header and never resolves. Phase 2 hit this with `thresholdRatio: 0.06` on the triage preset. The heartbeat now gives up a delivery after 120 s (`anima/delivery-timeout`) and reschedules.
+
+## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
   - `ctx.systemPrompt.section({ name, order, text })` adds to the system prompt. Use it for the static constitution.
@@ -343,7 +414,7 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
   - `rawInput` keeps the leading space after the name.
 - **Non-model-visible plugin state:** a typed `SessionEventMap` extension or `appendPluginRecord` (ignorable `plugin:*` events), `packages/core/session/src/index.ts:495`. Anima's own durable data lives in `~/.anima/`.
 
-## 9. Testing (Verified for tools)
+## 10. Testing (Verified for tools)
 
 - Use vitest with a plain Cordis `Context` and mount only the services under test:
 
@@ -357,7 +428,7 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
 - DSH requires every registration to have a "dispose the fiber, assert it's gone" test; `ping.spec.ts` has one.
 - For agent-level tests (sessions, `followup`), `@deepseek-ai/dsh-agent-loop-testkit` (`mountAgentLoopTestHarness`) exists, but it mounts no LLM adapter; you supply a mock `LlmAdapter`. It has not been tried yet.
 
-## 10. APIs Anima relies on
+## 11. APIs Anima relies on
 
 Re-check these on every DSH upgrade.
 
@@ -374,8 +445,14 @@ Re-check these on every DSH upgrade.
 | `ctx.systemPrompt.section` (agent scope, `complete`) | `dsh-system-prompt` | persona | Verified (`context`, `agent/pre-step` still Read) |
 | `ctx.commands.register` | `dsh-commands` | owner commands | Verified |
 | `executeToolFixture` | `dsh-tool-testkit` (`@internal`) | tests | Verified |
+| `agent.model.select`, `agent.status`, `agent.inject` | `dsh-agent` | triage/action models, busy check, outcome notices | Verified (Phase 2) |
+| `session/event` with `assistant/message.usage`, `tool/call`, `tool/result`, `turn/end`, `user/message` | `dsh-session`, `dsh-llm` | token budget, intent outcomes, alarms | Verified (Phase 2) |
+| `exec.concludeTurn()` | `dsh-tools` | `rest`, `heartbeat_act`, `stay_silent` | Verified (Phase 2) |
+| `@deepseek-ai/dsh-tool-schedule` preset row, `source.kind: 'schedule'` | `dsh-tool-schedule`, `dsh-schedule` | her alarms | Verified (Phase 2) |
+| `dsh-compaction-basic` defaults | `dsh-compaction-basic` | triage preset | Verified (do not lower `thresholdRatio`) |
+| `agent.ctx.tools.restrict({ deny })`, `createScope` (tests) | `dsh-tools`, `dsh-scope` | persona `hideTools` | Verified (Phase 2; see the deferred-tools trap) |
 
-## 11. Known gaps and risks
+## 12. Known gaps and risks
 
 - **Session-log upload:** `dsh-base` sends session logs to DeepSeek with requests to the official API by default. Turn it off under Settings → General → "Upload Session Log when using the official model API", or set `enabled: false` on the `session-log-deepseek` row in the profile patch. This matters once real chats with other people flow through her sessions.
 - **Native install scripts:** the installed CLI pulls native addons (`node-pty`, `koffi`, `dsh-subprocess-local`). Their install scripts are allowlisted in `pnpm-workspace.yaml` (`allowBuilds`).
@@ -383,5 +460,7 @@ Re-check these on every DSH upgrade.
 - **Pre-stable APIs:** everything in section 10 marked Read can change between DSH releases.
 - **Session recency:** sessions fed by a custom source kind do not rise in the sidebar's recency order (section 6).
 - **Session-log upload is on in `anima-dev`:** the Phase 1 demo log shows `session-log-deepseek/delivery-accepted` events. Turn it off before real people talk to her (first bullet above).
-- **Global tools leak into Anima sessions:** her conversation session was offered `anima_ping` (root-level Phase 0 probe) and DSH's global `working_directory` beside `local_say`. Harmless in Phase 1. Restrict them per preset (`agent.ctx.tools.restrict`) or drop `anima_ping` when it matters.
+- **Global tools leak into Anima sessions:** her conversation session was offered `anima_ping` (root-level Phase 0 probe) and DSH's global `working_directory` beside `local_say`. Harmless in Phase 1, but not in Phase 2. In the accelerated day, her Self session called `working_directory`. That led her to conclude she has "no file tools beyond cd", and she spent part of her second initiation asking the owner about it. Fixed: the persona row hides both (`hideTools`, section 8). Hiding them needed a fresh Self session (deferred-tools trap, section 8).
+- **Real clock in DSH parts:** schedule timing and DSH's own event timestamps use the real clock even under a sped-up Anima clock. Session logs therefore show real times; the simulated time is in each stimulus's leading stamp.
+- **First test-day run lost:** the run with the broken triage compaction config left an empty, never-started triage session for character `anima-test` (hidden in the sidebar because blank) and `~/.anima/test-day/`. Both are unused test data.
 - **`--patch` needs `--profile`:** `dsh --patch x.yml anima-dev` fails with "--profile <name> is required"; use `dsh --profile anima-dev --patch x.yml`.

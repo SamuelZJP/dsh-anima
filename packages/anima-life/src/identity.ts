@@ -23,8 +23,19 @@ export function conversationSessionId(characterId: string, key: string): string 
 /**
  * Self session id of a character.
  * @param characterId - character identity.
+ * @param generation - Self session generation; 1 keeps the original id.
  * @returns `anima-self-<24 hex>`.
  */
-export function selfSessionId(characterId: string): string {
-  return `anima-self-${digest('self', characterId)}`
+export function selfSessionId(characterId: string, generation = 1): string {
+  return generation === 1 ? `anima-self-${digest('self', characterId)}` : `anima-self-${digest('self', characterId, String(generation))}`
+}
+
+/**
+ * Triage session id of one of her days (one session per day keeps triage history short).
+ * @param characterId - character identity.
+ * @param day - her day key, `YYYY-MM-DD`.
+ * @returns `anima-t-<24 hex>`.
+ */
+export function triageSessionId(characterId: string, day: string): string {
+  return `anima-t-${digest('triage', characterId, day)}`
 }
