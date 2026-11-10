@@ -8,7 +8,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import * as animaCore from '@anima/core'
 import { describe, expect, it, onTestFinished } from 'vitest'
-import { AnimaLife, conversationSessionId, route, selfSessionId, SessionRouter, stimulusText } from '../src/index.ts'
+import { AnimaLife, consolidationSessionId, conversationSessionId, route, selfSessionId, SessionRouter, stimulusText, wakes } from '../src/index.ts'
 import type { PublishedChannel, SessionHost, Stimulus } from '../src/index.ts'
 
 const owner: PublishedChannel = { platform: 'local', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)' }
@@ -191,5 +191,39 @@ describe('AnimaLife service', () => {
     await fiber.dispose()
     expect(ctx.anima.describeSession(selfSessionId('anima'))).toBeUndefined()
     expect(ctx.anima.hasSubcommand('self')).toBe(false)
+  })
+
+  it('routes consolidation to the day\'s consolidation session with its preset and model', async () => {
+    const { ctx, host } = await setup()
+    const models: string[] = []
+    host.selectModel = ((_agent: unknown, choice: { model: string }) => { models.push(choice.model) }) as typeof host.selectModel
+    const seen: string[] = []
+    ctx.on('anima/stimulus', event => { seen.push(`${event.stimulus.type} ${event.sessionId}`) })
+    const id = await ctx.animaLife.deliver({ type: 'consolidate', day: '2026-11-10', text: 'segments…', run: 'r1', ts: 0 }, { model: { provider: 'p', model: 'cheap' } })
+    expect(id).toBe(consolidationSessionId('anima', '2026-11-10'))
+    expect(host.sessions.get(id)).toMatchObject({ preset: 'anima-consolidation', title: 'Anima · memory 2026-11-10' })
+    expect(host.sessions.get(id)!.inbox[0]).toContain('[consolidate]\nsegments…')
+    expect(models).toEqual(['cheap'])
+    expect(seen).toEqual([`consolidate ${id}`])
+    expect(ctx.anima.describeSession(id)).toEqual({ kind: 'consolidation' })
+  })
+
+  it('injects unaddressed group messages without waking', async () => {
+    const { ctx, host } = await setup()
+    const bob = { platformUserId: 'b', displayName: 'Bob', isOwner: false }
+    expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0 })).toBe(false)
+    expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0, addressed: true })).toBe(true)
+    expect(wakes({ type: 'message', channel: owner, sender: bob, text: 'hi', ts: 0 })).toBe(true)
+    const id = await ctx.animaLife.deliver({ type: 'message', channel: group, sender: bob, text: 'hotpot?', ts: 0 })
+    expect(host.sessions.get(id)!.inbox).toEqual([expect.stringMatching(/^\(inject\) .*Bob: hotpot\?$/)])
+  })
+
+  it('adds report lines from other plugins', async () => {
+    const { ctx, host } = await setup()
+    const fiber = await ctx.plugin({ name: 'reporter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.addReportLine(() => ['Memory: 3 lines pending.']) } })
+    await ctx.animaLife.beat()
+    const triage = [...host.sessions.values()].find(session => session.preset === 'anima-triage')!
+    expect(triage.inbox[0]).toContain('Memory: 3 lines pending.')
+    await fiber.dispose()
   })
 })

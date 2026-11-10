@@ -26,6 +26,26 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     anima: AnimaCore
   }
+  interface Events {
+    /**
+     * A behavior call succeeded (after the gate allowed it and the tool ran).
+     * `anima-memory` records outbound speech from it.
+     */
+    'anima/behavior'(payload: BehaviorEvent): void
+  }
+}
+
+/** Payload of the `anima/behavior` event. */
+export interface BehaviorEvent {
+  /** Tool name. */
+  readonly name: string
+  readonly meta: BehaviorMeta
+  /** Parsed call arguments. */
+  readonly args: Readonly<Record<string, unknown>>
+  /** Calling session id, when called from a session. */
+  readonly sessionId: string | undefined
+  /** Time of the call on her clock. */
+  readonly at: number
 }
 
 /** Maps a DSH session id to Anima session info; provided by `anima-life`. */
@@ -326,6 +346,8 @@ export class AnimaCore extends Service {
       execute: async (args, exec) => {
         const value = await definition.execute(args, exec)
         this.onBehaviorSuccess(name)
+        const event: BehaviorEvent = { name, meta, args: args as Record<string, unknown>, sessionId: exec.agent?.id, at: this.clock.now() }
+        this.ctx.emit('anima/behavior', event)
         return value
       },
     }
@@ -491,6 +513,14 @@ export class AnimaCore extends Service {
         if (this.state.channels === resolver) this.state.channels = undefined
       }
     }, 'anima.provideChannels()')
+  }
+
+  /**
+   * What the channel resolver knows about a channel (e.g. whether it is the owner's).
+   * @param channelKey - `platform:account:kind:id`.
+   */
+  channelInfo(channelKey: string): { readonly isOwner: boolean } | undefined {
+    return this.state.channels?.(channelKey)
   }
 
   /**

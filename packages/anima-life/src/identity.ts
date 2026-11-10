@@ -39,3 +39,13 @@ export function selfSessionId(characterId: string, generation = 1): string {
 export function triageSessionId(characterId: string, day: string): string {
   return `anima-t-${digest('triage', characterId, day)}`
 }
+
+/**
+ * Consolidation session id of one of her days (DESIGN §8): one short session per night.
+ * @param characterId - character identity.
+ * @param day - her day key, `YYYY-MM-DD`.
+ * @returns `anima-m-<24 hex>`.
+ */
+export function consolidationSessionId(characterId: string, day: string): string {
+  return `anima-m-${digest('consolidation', characterId, day)}`
+}

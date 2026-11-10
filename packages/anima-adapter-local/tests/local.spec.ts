@@ -95,3 +95,46 @@ describe('/anima chat', () => {
     expect(await chat(ctx, 'chat')).toMatchObject({ kind: 'error' })
   })
 })
+
+describe('/anima chat --as / --in (dev test channels)', () => {
+  function chat(ctx: Context, rawInput: string) {
+    return ctx.anima.dispatchCommand({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
+  }
+  const aliceSession = conversationSessionId('anima', 'local:owner:private:alice')
+  const groupSession = conversationSessionId('anima', 'local:owner:group:test')
+
+  it('parses flags in any order', () => {
+    expect(local.parseChat('--in group:test --as bob hi all')).toEqual({ as: 'bob', group: 'test', text: 'hi all' })
+    expect(local.parseChat('hello --as bob')).toEqual({ as: undefined, group: undefined, text: 'hello --as bob' })
+    expect(local.parseChat('--as owner hi')).toMatchObject({ error: expect.stringContaining('leave out --as') })
+    expect(local.parseChat('--in test hi')).toMatchObject({ error: expect.stringContaining('group:<id>') })
+    expect(local.parseChat('--as bob')).toMatchObject({ error: expect.stringContaining('Usage') })
+  })
+
+  it('speaks as another person in their own private chat', async () => {
+    const { ctx, host } = await setup()
+    expect(await chat(ctx, 'chat --as alice hi there')).toMatchObject({ kind: 'success' })
+    expect(host.delivered).toEqual([{ id: aliceSession, text: expect.stringMatching(/\[local private "Alice \(local\)"\] Alice: hi there$/) }])
+    expect(ctx.anima.describeSession(aliceSession)).toMatchObject({ kind: 'conversation', channelKey: 'local:owner:private:alice' })
+    expect(ctx.anima.channelInfo('local:owner:private:alice')).toEqual({ isOwner: false })
+    expect((await say(ctx, aliceSession, 'hi Alice')).isError).toBe(false)
+  })
+
+  it('wakes a simulated group only when she is addressed', async () => {
+    const { ctx, host } = await setup()
+    const quiet = await chat(ctx, 'chat --as bob --in group:test hotpot tonight?')
+    expect(quiet).toMatchObject({ kind: 'success', text: expect.stringContaining('as context') })
+    expect(host.delivered).toEqual([])
+    await chat(ctx, 'chat --as bob --in group:test @Anima are you coming?')
+    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[local group "group test (local)"] Bob: @Anima are you coming?') }])
+  })
+
+  it('remembers test channels across a reload', async () => {
+    const { ctx, fiber } = await setup()
+    await chat(ctx, 'chat --as alice hi')
+    await fiber.dispose()
+    expect(ctx.anima.describeSession(aliceSession)).toBeUndefined()
+    await ctx.plugin(local, { ownerName: 'Sam' })
+    expect(ctx.anima.describeSession(aliceSession)).toMatchObject({ kind: 'conversation' })
+  })
+})

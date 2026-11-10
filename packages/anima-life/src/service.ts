@@ -27,6 +27,17 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     animaLife: AnimaLife
   }
+  interface Events {
+    /** A stimulus was delivered to one of her sessions. `anima-memory` records channel messages from it. */
+    'anima/stimulus'(payload: StimulusEvent): void
+  }
+}
+
+/** Payload of the `anima/stimulus` event. */
+export interface StimulusEvent {
+  readonly stimulus: Stimulus
+  /** The session it was routed to. */
+  readonly sessionId: string
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -152,6 +163,7 @@ export class AnimaLife extends Service {
   private triageDecided = true
   private lastReport = ''
   private disposed = false
+  private readonly reportLines = new Set<() => string[]>()
 
   /**
    * @param ctx - root context.
@@ -225,10 +237,31 @@ export class AnimaLife extends Service {
   }
 
   /**
+   * Add lines to every situation report, owned by the calling plugin. Lines
+   * state facts; they never suggest what to do.
+   * @param provider - returns the lines at report time.
+   */
+  addReportLine(provider: () => string[]): () => void {
+    return this.ctx.effect(() => {
+      this.reportLines.add(provider)
+      return () => { this.reportLines.delete(provider) }
+    }, 'animaLife.addReportLine()')
+  }
+
+  /**
    * Route and deliver one stimulus.
+   * @param options.model - model to select on the target session before delivery.
    * @returns the target session id.
    */
-  async deliver(stimulus: Stimulus): Promise<string> {
+  async deliver(stimulus: Stimulus, options: { model?: ModelChoice } = {}): Promise<string> {
+    const sessionId = await this.deliverNow(stimulus, options)
+    this.ctx.emit('anima/stimulus', { stimulus, sessionId })
+    return sessionId
+  }
+
+  private async deliverNow(stimulus: Stimulus, options: { model?: ModelChoice }): Promise<string> {
+    const model = options.model
+    const before = model === undefined ? undefined : (agent: Agent) => this.host.selectModel(agent, model)
     if (stimulus.type === 'message') {
       const key = `${stimulus.channel.platform}:${stimulus.channel.account}:${stimulus.channel.kind}:${stimulus.channel.id}`
       this.file.lastContact[key] = stimulus.ts
@@ -236,7 +269,7 @@ export class AnimaLife extends Service {
       if (stimulus.sender.isOwner) this.report(this.tracker.onOwnerMessage(key))
       this.save()
     }
-    return this.router.deliver(stimulus)
+    return this.router.deliver(stimulus, before)
   }
 
   /** Next scheduled heartbeat, on her clock. */
@@ -304,8 +337,9 @@ export class AnimaLife extends Service {
       this.triageDecided = false
       // Fallback if the triage turn never decides; rest() replaces it.
       this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
+      const canConsolidate = core.behavior('memory_consolidate') !== undefined
       const ask = mode === 'night'
-        ? 'You are asleep. Call rest(until?) to go back to sleep.'
+        ? canConsolidate ? 'You are asleep. Call rest(until?) to go back to sleep, or memory_consolidate() to sort your memories first.' : 'You are asleep. Call rest(until?) to go back to sleep.'
         : 'Decide: rest(until?) to keep resting, or heartbeat_act(reason) to get up and act now.'
       await withTimeout(this.router.deliver({ type: 'heartbeat', to: 'triage', day, text: `${report}\n\n${ask}`, ts: now }, agent => {
         this.host.selectModel(agent, core.modeConfig(mode).triageModel)
@@ -331,9 +365,8 @@ export class AnimaLife extends Service {
       const key = `${channel.platform}:${channel.account}:${channel.kind}:${channel.id}`
       return { key, display: channel.display, mayInitiate: core.mayInitiate(key), lastContact: this.file.lastContact[key] }
     })
-    const notes = forSelf && core.clock.speed > 1
-      ? [`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`]
-      : []
+    const notes = [...this.reportLines].flatMap(provider => provider())
+    if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`)
     return buildReport({
       time: formatStamp(now), phase: core.phase(now), mode: core.mode(now),
       state: core.stateText(),

@@ -5,5 +5,7 @@
       name: '@anima/core'
     - id: anima-life
       name: '@anima/life'
+    - id: anima-memory
+      name: '@anima/memory'
     - id: anima-adapter-local
       name: '@anima/adapter-local'

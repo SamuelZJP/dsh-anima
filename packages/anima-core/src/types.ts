@@ -9,8 +9,14 @@ export type EffectClass = 'observe' | 'internal' | 'workspace' | 'express' | 'in
 /** All effect classes, in increasing order of reach. */
 export const EFFECT_CLASSES: readonly EffectClass[] = ['observe', 'internal', 'workspace', 'express', 'initiate', 'public', 'irreversible']
 
-/** Kind of an Anima session. `triage` runs the cheap heartbeat decision (DESIGN §7). */
-export type SessionKind = 'conversation' | 'self' | 'triage'
+/**
+ * Kind of an Anima session. `triage` runs the cheap heartbeat decision (DESIGN §7);
+ * `consolidation` sorts a night's transcript into memories (DESIGN §8).
+ */
+export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation'
+
+/** All session kinds. */
+export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation']
 
 /** A place she can talk, identified by `platform:account:kind:id` (DESIGN §3). */
 export interface ChannelRef {
@@ -37,6 +43,7 @@ export function channelKey(ref: ChannelRef): string {
 export type SessionInfo =
   | { readonly kind: 'self' }
   | { readonly kind: 'triage' }
+  | { readonly kind: 'consolidation' }
   | { readonly kind: 'conversation'; readonly channel: ChannelRef; readonly channelKey: string }
 
 /** Behavior metadata read by the gate and tool scoping (DESIGN §6). */

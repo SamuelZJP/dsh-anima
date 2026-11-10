@@ -24,13 +24,15 @@
         "./cordis.patch.yml",
         "./presets/conversation.patch.yml",
         "./presets/self.patch.yml",
-        "./presets/triage.patch.yml"
+        "./presets/triage.patch.yml",
+        "./presets/consolidation.patch.yml"
       ]
     }
   },
   "dependencies": {
     "@anima/adapter-local": "workspace:*",
     "@anima/core": "workspace:*",
+    "@anima/memory": "workspace:*",
     "@anima/life": "workspace:*"
   }
 }

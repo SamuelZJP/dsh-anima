@@ -158,6 +158,24 @@ pnpm dsh --profile anima-dev --patch <scratch>/low-quota.yml --no-open
   - The alarm was delivered to Self at 20:25:06 as a reminder batch, and she answered with `self_feel`.
 - One bug found and fixed during the run: batch alarms were not parsed, so the report event lacked the prompt.
 
+**Phase 3 demo (2026-11-10) — exit check passed.**
+
+A scratch overlay set:
+- `anima-core`: `characterId: anima-test3b`, `dataDir: ~/.anima/test-memory-3b`, `clock: { speed: 4, start: '2026-11-10T14:00' }`
+- `anima-memory`: `consolidation.fallbackHours: 0.5`
+
+Boot: `pnpm dsh --profile anima-dev --patch <scratch>/memory.yml --no-open`. Commands were typed in an existing web session. Evidence comes from the decoded session logs and `memory.db`.
+
+1. `/anima chat --as alice Hey, it's Alice. Secret: I'm interviewing at Tencent next Friday for a design job. Please don't tell anyone, especially not the book club group.` She called `memory_remember` (no `keep`) → `m1`, scope `private:local:alice`, person `local:alice`. She then answered with `local_say`.
+2. `/anima chat --as alice … do you remember what I'm doing next Friday?` The session log shows a `user/message` with source `anima-memory`/`recall` right after the stimulus, holding `m1`. She answered "Yep — Tencent interview, design job. Friday. And it stays between us."
+3. `/anima chat --as bob --in group:bookclub @Anima … Do you know what she is up to? Is it a job interview somewhere?` No memory block was injected. Her `memory_recall("Alice book club Friday job interview")` and `memory_recall("Alice")` both returned "Nothing comes to mind." She said she had no idea and would not guess.
+4. The fallback consolidation ran at 14:32 on her clock. The `anima-consolidation` session "Anima · memory 2026-11-10" got two segments: `s1` Alice private and `s2` the group.
+   - She wrote `m3` (episode) and `m4` (fact about `local:bob`), both scoped to `group:local:owner:group:bookclub`.
+   - She wrote two `self` notes with `keep: "self"`.
+   - All 6 transcript lines were then marked consolidated.
+
+A first run (character `anima-test3`, `~/.anima/test-memory-3`) found a wording problem. Told "don't tell anyone", she stored the secret with `keep: "self"`, which hides it even from Alice's own chat. The tool and persona text now say that `here` in a private chat already means only that person; `self` is for her own thoughts. That run's data was left in place.
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -400,12 +418,46 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
 
 `dsh-compaction-basic` rejects a `thresholdRatio` at or below its default `retainRatio` at plugin load. Inside a preset, the failed child row leaves agent creation pending forever: `sessionController.create` writes the session header and never resolves. Phase 2 hit this with `thresholdRatio: 0.06` on the triage preset. The heartbeat now gives up a delivery after 120 s (`anima/delivery-timeout`) and reschedules.
 
+## 8b. Phase 3 extension points (Verified in Phase 3)
+
+### Memory injection through `agent/pre-step`
+
+- `@anima/memory` listens on the root context: `ctx.on('agent/pre-step', async (payload, next) => …)`. A root listener sees every agent's steps (scope-filtered dispatch, `runtime-types.ts:350`).
+- Pattern from `packages/context/time-context/src/index.ts`:
+  1. Call `next()` first.
+  2. Return the decision unchanged on `reject` or abort.
+  3. Otherwise return `{ ...decision, messages: [...decision.messages, extra] }`.
+- Anima injects only on `step === 1` of conversation and Self sessions. The extra message is `createUserMessage({ content, source: { kind: 'anima-memory', form: 'recall' } })`; `recall` is one of `ContextFormed`'s forms (`packages/llm/llm/src/message.ts:86`). The kind is declared in `MessageSourceMap`.
+- **Verified:** the block is logged as `user/message` with `source.kind: 'anima-memory'`, right after the stimulus, before the model's first request of the turn.
+
+### Plugin-to-plugin events
+
+Anima packages talk through Cordis events declared in `interface Events` of `@deepseek-ai/cordis`, so `anima-memory` imports no adapter:
+- `anima/stimulus`, emitted by `@anima/life` after each delivery
+- `anima/behavior`, emitted by `@anima/core` after a behavior succeeds
+
+### `node:sqlite`
+
+- `DatabaseSync` from Node's built-in `node:sqlite` (Node 24.22: no flag, no warning at DSH boot).
+- FTS5 is compiled in, including the `trigram` tokenizer. Trigram does not match queries shorter than 3 characters, which matters for 2-character CJK words, so the store falls back to `LIKE` for them.
+- The database is `<dataDir>/memory.db` in WAL mode.
+
+### Consolidation session
+
+- A fourth Anima preset, `anima-consolidation` (`bundle/presets/consolidation.patch.yml`).
+- Sessions `anima-m-<hash(characterId, day)>` in `<dataDir>/consolidation`.
+- The model is selected per run with `agent.model.select`, the same way as triage.
+
+### Group messages without waking
+
+`agent.inject(message)` followed by `sessions.flush` queues an unaddressed group message for the next turn of that group session without starting a turn (the same API Phase 2 uses for intent notices).
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
   - `ctx.systemPrompt.section({ name, order, text })` adds to the system prompt. Use it for the static constitution.
   - `ctx.systemPrompt.context({ name, order, text })` adds dynamic context. It becomes a durable user-role snapshot, re-sent only when the text changes. Use it for mood, state and needs.
-  - The `agent/pre-step` waterfall (`runtime-types.ts:350`) can append `UserMessage`s to `{kind:'enter', messages}`, and they are logged as `user/message`. Use it for per-turn memory recall. Pattern: `packages/context/time-context/src/index.ts`.
+  - The `agent/pre-step` waterfall (`runtime-types.ts:350`) can append `UserMessage`s to `{kind:'enter', messages}`, and they are logged as `user/message`. Verified in Phase 3 for memory recall (section 8b).
 - **Owner commands (Verified in Phase 1):** `ctx.commands.register({ name, description, input?, handler })` (`packages/interaction/commands/src/index.ts`).
   - Names must match `^[a-z][a-z0-9_-]*$`, so `/anima status` is one command `anima` that parses its own subcommand from `inv.rawInput`.
   - Commands never reach the model. Runs are logged as `command/run` and `command/done`.
@@ -451,6 +503,9 @@ Re-check these on every DSH upgrade.
 | `@deepseek-ai/dsh-tool-schedule` preset row, `source.kind: 'schedule'` | `dsh-tool-schedule`, `dsh-schedule` | her alarms | Verified (Phase 2) |
 | `dsh-compaction-basic` defaults | `dsh-compaction-basic` | triage preset | Verified (do not lower `thresholdRatio`) |
 | `agent.ctx.tools.restrict({ deny })`, `createScope` (tests) | `dsh-tools`, `dsh-scope` | persona `hideTools` | Verified (Phase 2; see the deferred-tools trap) |
+| `agent/pre-step` waterfall, `PreStepDecision`, `ContextFormed` form `recall` | `dsh-agent`, `dsh-llm` | memory auto-injection | Verified (Phase 3) |
+| Cordis `Events` augmentation, `ctx.emit` | `cordis` | `anima/stimulus`, `anima/behavior` between Anima packages | Verified (Phase 3) |
+| `node:sqlite` `DatabaseSync`, FTS5 `trigram` | Node 24 built-in | memory store | Verified (Phase 3) |
 
 ## 12. Known gaps and risks
 

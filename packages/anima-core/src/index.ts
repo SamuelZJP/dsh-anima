@@ -19,7 +19,7 @@ export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction
 export { billableTokens, emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
 export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
-export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type ChannelResolver, type SessionResolver } from './service.ts'
+export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type BehaviorEvent, type ChannelResolver, type SessionResolver } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-core'

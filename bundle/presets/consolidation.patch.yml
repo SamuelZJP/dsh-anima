@@ -1,0 +1,25 @@
+# Agent preset anima-consolidation: one short session per her day that sorts
+# the transcript into memories (DESIGN §8). Anima selects the consolidation
+# model before each run. Its only tool is memory_write, a root Anima behavior
+# scoped to this session kind. Compaction keeps defaults (see triage preset).
+- insert:
+    - id: anima-preset-consolidation
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: anima-consolidation
+        name: Anima memory
+        description: Nightly consolidation. Sorts conversations into lasting memories.
+        order: 23
+        plugins:
+          - id: persona
+            name: '@anima/core/persona'
+            config:
+              kind: consolidation
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'

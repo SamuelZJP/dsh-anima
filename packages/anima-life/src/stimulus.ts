@@ -6,7 +6,7 @@
  */
 
 import { channelKey, type ChannelRef } from '@anima/core'
-import { conversationSessionId, selfSessionId, triageSessionId } from './identity.ts'
+import { consolidationSessionId, conversationSessionId, selfSessionId, triageSessionId } from './identity.ts'
 
 /** A channel an adapter publishes, with a display name. */
 export interface PublishedChannel extends ChannelRef {
@@ -33,6 +33,12 @@ export type Stimulus =
     readonly text: string
     /** Epoch milliseconds on her clock. */
     readonly ts: number
+    /**
+     * Group messages only: whether it addresses her directly (@, her name,
+     * reply to her). Set by the adapter from platform data. Unaddressed group
+     * messages are context and do not wake a turn (DESIGN §5).
+     */
+    readonly addressed?: boolean
   }
   | {
     /** A notice for her inner life, e.g. from the owner via `/anima self`. */
@@ -58,12 +64,32 @@ export type Stimulus =
     readonly context?: string | undefined
     readonly ts: number
   }
+  | {
+    /** Sort unconsolidated conversation into memories (DESIGN §8), in the day's consolidation session. */
+    readonly type: 'consolidate'
+    /** Her day key, naming the consolidation session. */
+    readonly day: string
+    readonly text: string
+    /** Reference recorded in the message source (the consolidation run id). */
+    readonly run: string
+    readonly ts: number
+  }
 
 /** Where a stimulus goes. */
 export type Route =
   | { readonly kind: 'conversation'; readonly sessionId: string; readonly channel: PublishedChannel; readonly channelKey: string }
   | { readonly kind: 'self'; readonly sessionId: string }
   | { readonly kind: 'triage'; readonly sessionId: string; readonly day: string }
+  | { readonly kind: 'consolidation'; readonly sessionId: string; readonly day: string }
+
+/**
+ * Whether a stimulus wakes a turn. Group messages wake only when they address
+ * her or come from the owner (DESIGN §5); the rest join the next turn as context.
+ */
+export function wakes(stimulus: Stimulus): boolean {
+  if (stimulus.type !== 'message' || stimulus.channel.kind !== 'group') return true
+  return stimulus.addressed === true || stimulus.sender.isOwner
+}
 
 /**
  * Route one stimulus to exactly one session.
@@ -84,6 +110,8 @@ export function route(characterId: string, stimulus: Stimulus, selfGeneration = 
         : { kind: 'self', sessionId: selfSessionId(characterId, selfGeneration) }
     case 'notice':
       return { kind: 'self', sessionId: selfSessionId(characterId, selfGeneration) }
+    case 'consolidate':
+      return { kind: 'consolidation', sessionId: consolidationSessionId(characterId, stimulus.day), day: stimulus.day }
   }
 }
 
@@ -110,6 +138,8 @@ export function stimulusText(stimulus: Stimulus): string {
         `Write your own words and send them with ${channel.platform}_say, or call stay_silent(reason) if on reflection it is not the right moment.`,
       ].join('\n')
     }
+    case 'consolidate':
+      return `[consolidate]\n${stimulus.text}`
   }
 }
 
@@ -120,10 +150,13 @@ export function stimulusSummary(stimulus: Stimulus): string {
     case 'notice': return `Notice: ${stimulus.text}`
     case 'heartbeat': return stimulus.to === 'triage' ? 'Heartbeat' : 'Heartbeat: acting'
     case 'intent': return `Intent: ${stimulus.intent}`
+    case 'consolidate': return 'Consolidating memories'
   }
 }
 
 /** Reference recorded in the message source, so session events can be tied back (intent id). */
 export function stimulusRef(stimulus: Stimulus): string | undefined {
-  return stimulus.type === 'intent' ? stimulus.intentId : undefined
+  if (stimulus.type === 'intent') return stimulus.intentId
+  if (stimulus.type === 'consolidate') return stimulus.run
+  return undefined
 }

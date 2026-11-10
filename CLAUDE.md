@@ -22,7 +22,7 @@ If the design turns out to be wrong or incomplete while coding, stop and say so,
 - **Plan before code** for anything beyond a small fix: state what changes, which files, how it will be verified.
 - **Simplest first.** Non-core features get the simplest working version; improve only when a real problem shows up.
 - **Ask before** deleting files, changing DSH profile or config files under `~/.dsh`, starting anything that sends messages to real platform accounts, or adding a dependency that is not obviously needed.
-- **Small commits**, one concern each, with a message that says what changed and why.
+- **One commit per roadmap phase** during early development, with a message that says what changed per package and why. Commit only when the user asks.
 
 ## Architecture rules (from the design)
 

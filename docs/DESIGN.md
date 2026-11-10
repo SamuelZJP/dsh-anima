@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-09 · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-10 · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -38,7 +38,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 
 ## 3. Core concepts
 
-Seven concepts carry the whole design; every later section is built from them.
+Eight concepts carry the whole design; every later section is built from them.
 
 | Concept | What it is | Owned by |
 | --- | --- | --- |
@@ -49,6 +49,7 @@ Seven concepts carry the whole design; every later section is built from them.
 | **Conversation session** | A DSH session bound to one channel. Holds the history with that person or group. | Life loop |
 | **Self session** | Her single long-lived inner-life session. Autonomous stimuli land here; she decides what to do next. | Life loop |
 | **Triage session** | One short-lived session per day of hers that runs the cheap heartbeat decision: rest, or wake the Self session to act. | Life loop |
+| **Consolidation session** | One short session per day of hers that sorts her transcript into memories, on a cheap model. | Memory (delivered by the life loop) |
 
 She also has **self state**: a small set of numbers (needs, energy, circadian phase, mood) that change over time and with behavior outcomes. It is shown to her, never acted on by code directly.
 
@@ -113,6 +114,7 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 | `heartbeat` | Life loop timer | Triage session of her day; escalates to Self | Yes, cheap triage turn |
 | `alarm` | DSH `schedule` task she created | Self or the named session | Yes |
 | `intent` | Self session via `open_conversation` | Target conversation session | Yes |
+| `consolidate` | Memory (`memory_consolidate` or the fallback job) | Consolidation session of her day | Yes, on the consolidation model |
 | `owner-command` | Owner's bound account or DSH UI | Handled by command, no model turn | No |
 
 ### Session identity
@@ -137,6 +139,10 @@ This keeps the reason (Self) apart from the wording (conversation), and keeps ea
 ### Group triage
 
 Group messages are buffered per group for a short window, then one cheap classification step decides: ignore, remember only, or wake a turn. Direct address (@, her name, reply to her, owner) always wakes. This replaces surfcore's keyword wake heuristics, which produced 75 wakes an hour in one group.
+
+**Until Phase 4 (built in Phase 3):** only the direct-address rule exists. The adapter marks a group message `addressed` from platform data; an addressed message or one from the owner wakes the group's conversation session, and any other is injected there as context without waking (`agent.inject`) and recorded in her transcript. The buffered cheap classification comes with QQ groups.
+
+**Test channels (`anima-adapter-local`, dev only):** `/anima chat [--as <name>] [--in group:<id>] <text>` speaks as another person (a private chat `local:owner:private:<name>`) or in a simulated group (`local:owner:group:<id>`). In a simulated group, a message that contains her name counts as addressed. The test channels are kept in `<dataDir>/local/channels.json`.
 
 ## 6. Behaviors
 
@@ -176,7 +182,7 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged. `stay_silent` also declines an intent from Self.
 - `open_conversation(channel, intent, context?)` — start or resume a chat (Self session only).
 - `channels_find(filter)` — list reachable channels with relationship notes, last contact, typical active hours.
-- `memory_recall(query)`, `memory_remember(text, scope)`, `memory_forget(id)`.
+- `memory_recall(query)`, `memory_remember(text, keep?)`, `memory_forget(id)`, `memory_consolidate()`; `memory_write` in the consolidation session only (section 8).
 - `self_note(text)` (self-model), `self_feel(adjustments)` (state), `goals_*`.
 - `schedule_create` / `schedule_edit` (DSH built-ins) — her own alarms.
 - `rest(until?)` — end the current turn and suggest the next heartbeat time (triage and Self).
@@ -230,7 +236,7 @@ Heartbeats are skipped and rescheduled while paused, while the triage or Self se
 
 ### Day and night
 
-Heartbeats differ by phase: daytime heartbeats are **activity** (she may act on the world), night heartbeats are **dreaming** (internal only, no outward behaviors). Dreaming is a separate idea from memory consolidation and is deferred. Until Phase 3 adds consolidation, a night heartbeat (at most one per night) can only `rest`: `heartbeat_act` is day-only.
+Heartbeats differ by phase: daytime heartbeats are **activity** (she may act on the world), night heartbeats are **dreaming** (internal only, no outward behaviors). Dreaming is a separate idea from memory consolidation and is deferred. A night heartbeat (at most one per night) can `rest` or `memory_consolidate()`: `heartbeat_act` is day-only. `memory_consolidate` also works from a day triage turn or the Self session.
 
 Each mode has its own settings block, so the model and budget can be tuned without code changes:
 
@@ -271,25 +277,47 @@ One memory store serves every platform and session. Each memory records where it
 
 ### Audience scopes
 
-Every memory carries a scope: `private:<personId>`, `group:<channel>`, `owner`, `self`, or `public`. When she recalls inside a session, results are limited to scopes that session's audience may hear. In a group chat she cannot recall what someone told her privately. The Self session sees everything, but anything it hands to a conversation through `intent` is checked against that conversation's audience.
+Every memory carries a scope: `private:<personId>`, `group:<channel>`, `owner`, `self`, or `public`. When she recalls inside a session, results are limited to scopes that session's audience may hear. In a group chat she cannot recall what someone told her privately.
+
+**Code sets every scope; privacy never depends on the model's choice.**
+
+| Session | Scope of what she learns there | What she may hear there |
+| --- | --- | --- |
+| Private chat with a person | `private:<personId>` | its own scope and `public` |
+| The owner's private chat (any platform) | `owner` | `owner` and `public` |
+| Group (any non-private channel) | `group:<channelKey>` | its own scope and `public` |
+| Self | `self` | everything |
+| Consolidation | from each transcript segment | only the segments it is given |
+| Triage | nothing | nothing |
+
+- **Person id**: `owner` for bound owner accounts; a hand-linked id from `anima-memory` config `persons: [{ id, accounts: ['qq:123', 'local:alice'] }]`; otherwise `platform:userId`. By adapter convention a private channel's `id` is the other party's user id.
+- **Narrow only**: `memory_remember` and `memory_write` take `keep: 'here' | 'self'`. `here` is the session's scope, and `self` is the only narrowing. The model never types a scope, so it cannot widen one. In a private chat `here` already means "only this person", which is how secrets stay private and can still be talked about with the person who told them.
+- **Self → intent (open):** the Self session hears everything, and the free text of an `intent` is not checked by code against the target audience. Phase 3 relies on the conversation's own scoped recall and a persona rule; see Still open.
+
+### Transcript
+
+Anima keeps its own record of inbound channel messages (from the `anima/stimulus` event of `anima-life`) and outbound speech (successful `express` behaviors, from the `anima/behavior` event of `anima-core`) in the memory database, each line with the scope of its session. Consolidation reads this record, not DSH's session logs.
 
 ### Recall
 
-- **Automatic:** at each turn start a small block of relevant memories (person facts, recent episodes with this channel) is injected through `agent/pre-step`, within a fixed token budget.
-- **On demand:** `memory_recall(query)` uses full-text search plus person/channel lookup; embedding search is added later (see Storage).
+- **Automatic:** at each turn start (step 1 of conversation and Self turns) a small `[memory]` block is appended through `agent/pre-step`. It holds facts about this chat's person, recent episodes with this channel, and full-text hits on what just arrived. Everything is filtered by the session's audience in code and trimmed to `inject.tokenBudget` (default 800 tokens). It is a logged `user/message` with source `anima-memory` / `recall`; nothing is added when nothing matches. Self turns from a heartbeat search only what she woke up wanting.
+- **On demand:** `memory_recall(query, archive?)` uses full-text search within the session's audience; embedding search is added later (see Storage).
+- **Tools:** `memory_recall` (observe; conversation, Self), `memory_remember(text, kind?, about?, keep?, importance?)` and `memory_forget(id)` (internal; conversation, Self; forget only reaches memories audible there), `memory_consolidate()` (internal; triage, Self), `memory_write(segment, kind, text, about?, replaces?, keep?, importance?)` (internal; consolidation only). All limits stay in the gate.
 
 ### Consolidation ("sleep")
 
-Consolidation is a behavior with the `order` need, which she normally performs at night or when idle; a fallback job runs it if she skips it for more than a day.
+Consolidation is a behavior (`memory_consolidate`) she performs at night (her one night wake may consolidate instead of only resting) or when idle. A fallback job runs it when the oldest unconsolidated transcript line is older than `consolidation.fallbackHours` (default 24) on her clock.
 
-1. Summarize new conversation segments into episodes.
-2. Extract facts into semantic memory; when a new fact contradicts an old one, keep the newer, better-sourced one and keep the old as history.
-3. Update person profiles and her self-model digest.
-4. Apply decay and forgetting.
+1. Code claims pending transcript lines (up to `consolidation.maxInputTokens`, default 6000), groups them into one segment per session, and delivers them with the memories she already has for each segment's audience to the consolidation session of her day, on `consolidation.model` (a cheap model).
+2. There she writes episodes, facts and self notes with `memory_write`; the scope comes from the segment. When a new fact contradicts an old one, `replaces` marks the old one `superseded` and keeps it as history.
+3. When that turn ends, the lines are marked consolidated. A run that does not finish within `consolidation.timeoutSeconds` (real time) returns its lines to pending.
+4. Decay is plain code, run once per her day.
+
+Person profiles and the self-model digest are later work; Phase 3 pins a person's facts through `person_id`.
 
 ### Forgetting
 
-Each memory has a strength from recency, recall count, importance and emotional weight. Strength decays daily. Below a first threshold a memory is compressed to a one-line gist; below a second it leaves the active index and moves to the archive. The archive is searchable by explicit request and the owner's tools, never auto-injected. Nothing is hard-deleted except through `memory_forget` or the owner. This keeps surfcore's decayed-card versus full-archive idea.
+Each memory has a strength from recency, recall count, importance and emotional weight. Strength decays daily: it halves every `halfLifeDays × (factFactor for facts) × (1 + importance) × (1 + recallBonus × recalls)` days (defaults 7, 4, 0.5), and a recall adds 0.3. `self` memories do not decay. Below a first threshold (`gistBelow`, 0.2) a memory is compressed to a one-line gist, cut by code; below a second (`archiveBelow`, 0.05) it leaves the active index and moves to the archive. The archive is searchable by explicit request and the owner's tools, never auto-injected. Nothing is hard-deleted except through `memory_forget` or the owner. This keeps surfcore's decayed-card versus full-archive idea.
 
 ### Storage
 
@@ -384,7 +412,7 @@ Unloading the plugin removes all of the above through Cordis effects.
 Everything she does is already a DSH session event, so the owner's view is mostly DSH's own session UI plus a few owner commands; no custom console in the first version.
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
-- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox` (pending messages, cancel), `/anima approve <id>`, `/anima memory <query>` (inspect, edit, forget), `/anima selfmodel` (recent self-model diffs, revert).
+- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox` (pending messages, cancel), `/anima approve <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
 - **Audit trail**: every gated call records behavior, decision, reason and trigger.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
@@ -434,14 +462,21 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Triage | A separate triage session per day of hers, cheap model, tools `rest` and `heartbeat_act` only | 5, 7 |
 | Clock | One injectable clock; `clock.speed` for accelerated test days | 7 |
 | Token budget | Daily cap in the gate on billable (non-cached) tokens; default 300,000 by day, 20,000 at night | 7, 10 |
-| Night (until Phase 3) | At most one wake-up per night, and it can only rest | 7 |
 | Owner goals | `/anima goal add|list|close`; she uses `goals_add|update|close` | 7, 12 |
+| Test channels | `/anima chat --as <name>` and `--in group:<id>` in `anima-adapter-local` (dev only); groups use only the direct-address rule until Phase 4 | 5 |
+| Memory storage | Node's built-in `node:sqlite` (no dependency), FTS5 `trigram` tokenizer (CJK has no word breaks; 2-character CJK terms fall back to LIKE); `<dataDir>/memory.db` | 8 |
+| Memory scope | Code sets the scope from the session's audience; `memory_remember` can only narrow (`keep: self`); recall and auto-injection filter by the current session's audience | 8 |
+| Transcript | Anima records inbound messages and outbound `say` calls in the memory DB; consolidation reads that, not DSH's logs | 8 |
+| Consolidation | Her night wake may consolidate; it runs in its own short session per day on a cheap model; fallback after `fallbackHours` (24); decay is plain code once a day | 7, 8 |
+| Memory scope (Phase 3) | No embeddings, no archive UI; owner commands `/anima memory list|forget`; auto-injection budget is a Config field, default 800 tokens | 8, 12 |
+| Night (from Phase 3) | At most one wake-up per night; it can rest or consolidate | 7 |
 
 ### Still open
 
 - [x] **Intent handoff**: yes; see decisions (Phase 2).
 - [ ] **Dreaming**: what night heartbeats do beyond consolidation; deferred until after Phase 3.
 - [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tune from Phase 2 test runs.
+- [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before real people talk to her.
 - [ ] **Outbox delay** for `initiate` messages (section 10) is not built yet; add it with QQ (Phase 4), where it matters.
 
 ### Phased roadmap
@@ -449,6 +484,6 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 0. **Phase 0 — Integration spike.** Confirm how an out-of-tree plugin is packaged, installed into a dev profile and loaded by DSH; record findings in `docs/DSH-INTEGRATION.md`. Exit: a trivial `anima_ping` tool from `anima-core` appears in a DSH web session.
 1. **Phase 1 — Skeleton on `anima-adapter-local`.** Packages and presets, conversation and Self sessions, `say`, policy gate with quotas, owner commands. Exit: she chats with the owner in the DSH UI and the gate refuses an over-quota call.
 2. **Phase 2 — Autonomy.** Self state, heartbeat with triage, `open_conversation`, goals, self-set alarms. Exit: over a test day she initiates at least once on her own and rests otherwise, within budget.
-3. **Phase 3 — Memory.** Store, scoped recall, auto-injection, nightly consolidation, decay. Exit: a private fact is recalled in that private chat and not in a group.
+3. **Phase 3 — Memory.** Store, scoped recall, auto-injection, nightly consolidation, decay. Exit: a private fact is recalled in that private chat and not in a group. Done 2026-11-10 (DSH-INTEGRATION §3).
 4. **Phase 4 — QQ.** `anima-adapter-qq` on SnowLuma, private and group chats, group triage, owner-DM approvals. Exit: a week on a test account with no runaway wakes.
 5. **Phase 5 — Bilibili and beyond.** `anima-adapter-bili`, public behaviors through approvals. WeChat is deferred.
