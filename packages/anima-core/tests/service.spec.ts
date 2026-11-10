@@ -166,6 +166,7 @@ describe('Phase 2 core service', () => {
     const ctx = await setupCore({ initiate: { perDay: 1, consent: { channels: ['local:owner:private:owner'] } } } as never)
     ctx.anima.setClock(() => T)
     provideSessions(ctx, { self })
+    ctx.anima.provideChannels(key => key === 'local:owner:private:owner' ? { isOwner: true } : undefined, () => ['local:owner:private:owner'])
     registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
     expect((await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' })).isError).toBe(false)
     expect(ctx.anima.todayLedger().initiates).toBe(1)

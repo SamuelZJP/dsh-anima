@@ -34,6 +34,12 @@ export interface AllowRule {
   behavior: string
 }
 
+/** Owner rule making a behavior always need owner approval, whatever its effect class (DESIGN §10). */
+export interface ApproveRule {
+  /** Tool name. */
+  behavior: string
+}
+
 /** A model route for one kind of turn. */
 export interface ModelRoute {
   /** DSH provider id, e.g. `deepseek-official`. */
@@ -101,6 +107,13 @@ export interface Config {
   quotas: QuotaRule[]
   /** Owner allow rules for `public` and `irreversible` behaviors. */
   allow: AllowRule[]
+  /** Behaviors that always need owner approval. */
+  approve: ApproveRule[]
+  /** Owner approvals (DESIGN §10). */
+  approvals: {
+    /** Real seconds before an unanswered request counts as denied. */
+    timeoutSeconds: number
+  }
   /** Her clock. */
   clock: ClockConfig
   /** Day rhythm. */
@@ -122,6 +135,8 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   { effect: 'express', per: 'channel', limit: 30, windowMinutes: 60 },
   { per: 'global', limit: 200, windowMinutes: 24 * 60 },
   { behavior: 'schedule_create', per: 'global', limit: 20, windowMinutes: 24 * 60 },
+  // Group triage may wake a group's conversation at most this often (DESIGN §5).
+  { behavior: 'group_wake', per: 'channel', limit: 6, windowMinutes: 60 },
 ]
 
 /** Default model: DeepSeek-V4.1-Flash on the official API. */
@@ -166,6 +181,11 @@ export const Config: z<Config> = z.object({
   })).default(DEFAULT_QUOTAS).description('Sliding-window quotas checked by the policy gate.'),
   allow: z.array(z.object({ behavior: z.string().required() })).default([])
     .description('Owner rules letting public or irreversible behaviors run without approval.'),
+  approve: z.array(z.object({ behavior: z.string().required() })).default([])
+    .description('Behaviors that always need owner approval, whatever their effect class.'),
+  approvals: z.object({
+    timeoutSeconds: z.number().min(1).default(600).description('Real seconds before an unanswered approval request counts as denied.'),
+  }).description('Owner approvals over the owner line (e.g. the owner\'s QQ private chat).'),
   clock: z.object({
     speed: z.number().min(1).default(1).description('Simulated time per real time; 1 is real time. A test day uses e.g. 16.'),
     start: z.string().description('Simulated local start time, e.g. 2026-11-10T07:00. Omit to start at the real time.'),

@@ -11,7 +11,7 @@ import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from
 import { AnimaCore } from './service.ts'
 
 export * from './types.ts'
-export { DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
+export { DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
 export { decide, GateCode, OPEN_MOMENT, QuotaBook, visibleIn, type GateCall, type GateMoment, type Policy, type Verdict } from './gate.ts'
 export { AnimaClock, formatLocal, formatStamp, localDate, nextAtClock, parseClockTime, parseLocalDateTime, parseWhen, type ClockConfig } from './clock.ts'
 export { dayKey, inWindow, modeAt, nextWake, phaseAt, resolveRhythm, type Mode, type Phase, type Rhythm, type RhythmConfig } from './rhythm.ts'
@@ -19,7 +19,8 @@ export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction
 export { billableTokens, emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
 export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
-export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type BehaviorEvent, type ChannelResolver, type SessionResolver } from './service.ts'
+export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type BehaviorEvent, type ChannelAllowlist, type ChannelResolver, type OwnerReplyHandler, type SessionResolver } from './service.ts'
+export { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, type OwnerReply, type PendingApproval } from './approvals.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-core'
@@ -48,7 +49,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     ctx.effect(() => ctx.commands.register({
       name: COMMAND,
       description: 'Anima owner controls: /anima help lists subcommands',
-      input: { hint: 'status | pause | resume | goal … | chat <text> | self [text] | help' },
+      input: { hint: 'status | pause | resume | goal … | chat <text> | self [text] | outbox | approve <id> | help' },
       handler: invocation => ctx.anima.dispatchCommand(invocation),
     }), 'anima.command')
   })

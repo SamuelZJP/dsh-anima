@@ -7,14 +7,18 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@anima/core'
 import { AnimaLife } from './service.ts'
+import type { Config as LifeConfig } from './config.ts'
 
-export { consolidationSessionId, conversationSessionId, selfSessionId, triageSessionId } from './identity.ts'
-export { route, wakes, stimulusRef, stimulusSummary, stimulusText, type PublishedChannel, type Route, type Sender, type Stimulus } from './stimulus.ts'
+export { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId } from './identity.ts'
+export { route, senderLabel, wakes, stimulusRef, stimulusSummary, stimulusText, type PublishedChannel, type Route, type Sender, type Stimulus } from './stimulus.ts'
+export { batchText, GroupTriage, type Batch, type Decision, type MessageStimulus, type TriageHooks, type TriageOptions } from './group-triage.ts'
+export { Outbox, type HeldMessage, type HoldResult } from './outbox.ts'
+export { Config, resolveLifeConfig } from './config.ts'
 export { PRESETS, SessionRouter, type HostAgent, type ModelChoice, type RouterOptions, type SessionHost } from './router.ts'
 export { nextHeartbeat, type NextHeartbeat, type ScheduleInput } from './heartbeat.ts'
-export { describeOutcome, IntentTracker, type Intent, type Outcome, type OutcomeKind, type TrackerState } from './intent.ts'
+export { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, type Intent, type Outcome, type OutcomeKind, type TrackerState } from './intent.ts'
 export { buildReport, formatSpan, type ChannelLine, type ReportInput } from './report.ts'
-export { alarmPrompts, AnimaLife, DshSessionHost, type StimulusEvent } from './service.ts'
+export { alarmPrompts, AnimaLife, DshSessionHost, type LifeOptions, type StimulusEvent } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-life'
@@ -25,6 +29,6 @@ export const inject = ['anima']
  * Mount the life service.
  * @param ctx - root context.
  */
-export function apply(ctx: Context): void {
-  ctx.plugin(AnimaLife)
+export function apply(ctx: Context, config: Partial<LifeConfig> | undefined): void {
+  ctx.plugin(AnimaLife, { config: config ?? {} })
 }

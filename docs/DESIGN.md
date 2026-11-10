@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-10 · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-10 (Phase 4) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -12,7 +12,7 @@ Anima is a DSH plugin that gives one AI character a persistent personality, memo
 - One memory shared across all platforms, with summarization and forgetting so it stays bounded.
 - Real autonomy: she decides when to greet, whom to talk to, which platform to use, and what to do in her own workspace. No fixed-time scripts.
 - Every private chat (one platform account talking to her) is its own DSH session; group chats likewise.
-- Platforms plug in and out as DSH plugins. QQ through SnowLuma is the first; Bilibili follows; WeChat is deferred.
+- Platforms plug in and out as DSH plugins. QQ through NapCatQQ (over OneBot v11, so any OneBot v11 runtime fits) is the first; Bilibili follows; WeChat is deferred.
 - Owner keeps control: permissions, quotas, approvals, a kill switch, and full visibility into what she did and why.
 - Far less code and coupling than surfcore.
 
@@ -20,7 +20,7 @@ Anima is a DSH plugin that gives one AI character a persistent personality, memo
 
 - Desktop pet, voice/TTS, stickers, slang learning, multi-character switching, a custom web console.
 - Running several characters on one DSH instance (the design keeps a `characterId` key so this stays possible later).
-- Deploying or managing SnowLuma itself; it remains a separately installed program.
+- Deploying or managing the QQ runtime (NapCatQQ) itself; it remains a separately installed program.
 
 ## 2. Design principles
 
@@ -38,7 +38,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 
 ## 3. Core concepts
 
-Eight concepts carry the whole design; every later section is built from them.
+Nine concepts carry the whole design; every later section is built from them.
 
 | Concept | What it is | Owned by |
 | --- | --- | --- |
@@ -49,6 +49,7 @@ Eight concepts carry the whole design; every later section is built from them.
 | **Conversation session** | A DSH session bound to one channel. Holds the history with that person or group. | Life loop |
 | **Self session** | Her single long-lived inner-life session. Autonomous stimuli land here; she decides what to do next. | Life loop |
 | **Triage session** | One short-lived session per day of hers that runs the cheap heartbeat decision: rest, or wake the Self session to act. | Life loop |
+| **Group-triage session** | One short-lived session per day of hers that sorts buffered group chatter on a cheap model: ignore, remember, or wake the group (section 5). | Life loop |
 | **Consolidation session** | One short session per day of hers that sorts her transcript into memories, on a cheap model. | Memory (delivered by the life loop) |
 
 She also has **self state**: a small set of numbers (needs, energy, circadian phase, mood) that change over time and with behavior outcomes. It is shown to her, never acted on by code directly.
@@ -58,7 +59,7 @@ She also has **self state**: a small set of numbers (needs, energy, circadian ph
 Everything runs inside the DSH process as three service packages, platform adapters and two agent presets; platforms stay outside only as runtimes.
 
 ```
-  SnowLuma (QQ)          Bilibili web API          DSH web UI
+  NapCatQQ (QQ)          Bilibili web API          DSH web UI
        │ OneBot v11             │                       │
 ┌──────┼────────────────────────┼───────────────────────┼──────── DSH process ─┐
 │      ▼                        ▼                       ▼                      │
@@ -109,8 +110,10 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 | --- | --- | --- | --- |
 | `message` (private) | Adapter | Conversation session of that channel | Yes |
 | `message` (group) | Adapter | Group's conversation session | Only after group triage (below) |
-| `mention` / `reply-to-her` / `poke` | Adapter | Conversation session | Yes |
-| `platform-event` (new follower, comment reply, friend request) | Adapter | Self session | Batched, at next heartbeat |
+| `channel-event` (recalled message) | Adapter | Conversation session, only if it exists | No; context for the next turn |
+| `mention` / `reply-to-her` / `poke` | Adapter (a group message marked `addressed`; a poke is a message `[pokes you]`) | Conversation session | Yes |
+| `platform-event` (new follower, comment reply, friend request) | Adapter (`animaLife.note`) | Self session's report | Batched, at next heartbeat |
+| `group-batch` | Group triage | Group-triage session of her day | Yes, cheap triage turn |
 | `heartbeat` | Life loop timer | Triage session of her day; escalates to Self | Yes, cheap triage turn |
 | `alarm` | DSH `schedule` task she created | Self or the named session | Yes |
 | `intent` | Self session via `open_conversation` | Target conversation session | Yes |
@@ -138,9 +141,16 @@ This keeps the reason (Self) apart from the wording (conversation), and keeps ea
 
 ### Group triage
 
-Group messages are buffered per group for a short window, then one cheap classification step decides: ignore, remember only, or wake a turn. Direct address (@, her name, reply to her, owner) always wakes. This replaces surfcore's keyword wake heuristics, which produced 75 wakes an hour in one group.
+Group messages are buffered per group for a short window, then one cheap classification step decides: ignore, remember only, or wake a turn. Direct address (@, reply to her, a poke, owner) always wakes. This replaces surfcore's keyword wake heuristics, which produced 75 wakes an hour in one group. Group triage lives in `anima-life` and is platform-independent (local test groups use it too).
 
-**Until Phase 4 (built in Phase 3):** only the direct-address rule exists. The adapter marks a group message `addressed` from platform data; an addressed message or one from the owner wakes the group's conversation session, and any other is injected there as context without waking (`agent.inject`) and recorded in her transcript. The buffered cheap classification comes with QQ groups.
+- **Direct address.** The adapter marks a group message `addressed` from platform data (QQ: an `at` segment with her number, or a `reply` to one of her messages). An addressed message or one from the owner wakes the group's conversation session at once; messages buffered for that group are injected first as context.
+- **Buffer.** Any other group message waits in its group's buffer for `groupTriage.windowSeconds` of real time (default 60), or until `maxBatch` messages (default 30). The buffer then closes into a batch `b<n>`.
+- **Classify.** The batch goes to the **group-triage session** of her day (`anima-g-<hash(characterId, day)>`, preset `anima-group-triage`, model `groupTriage.model`, by default the day triage model). There she calls exactly one of:
+  - `group_wake(batch, reason)`: the batch goes to the group's conversation session; the earlier messages are injected as context, and the last one wakes her
+  - `group_pass(batch, remember, reason?)`: `remember: true` keeps the lines only in her transcript with the group scope, so consolidation turns them into `group:` memories; `false` drops them
+- **Limits stay in the gate.** A default quota `group_wake` 6 per hour per channel caps triage wakes; the `channel` counter uses the behavior's `target` (the batch's group).
+- **Fallbacks never wake.** No decision within `groupTriage.timeoutSeconds` (default 300), or a turn that ends without one, means remember. At night, while paused, or over the token budget the batch is remembered without a model call.
+- `life.json` keeps per-day, per-group counters (direct and triage wakes, batches, outcomes, fallbacks); `/anima status` shows today's.
 
 **Test channels (`anima-adapter-local`, dev only):** `/anima chat [--as <name>] [--in group:<id>] <text>` speaks as another person (a private chat `local:owner:private:<name>`) or in a simulated group (`local:owner:group:<id>`). In a simulated group, a message that contains her name counts as addressed. The test channels are kept in `<dataDir>/local/channels.json`.
 
@@ -178,7 +188,7 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 
 ### Core behavior set (platform-independent)
 
-- `<platform>_say(text, replyTo?)` — speak in the current conversation. Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
+- `<platform>_say(text, replyTo?)` — speak in the current conversation (`qq_say` also takes `mention: [userId]` in groups). Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
 - `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged. `stay_silent` also declines an intent from Self.
 - `open_conversation(channel, intent, context?)` — start or resume a chat (Self session only).
 - `channels_find(filter)` — list reachable channels with relationship notes, last contact, typical active hours.
@@ -187,8 +197,9 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `schedule_create` / `schedule_edit` (DSH built-ins) — her own alarms.
 - `rest(until?)` — end the current turn and suggest the next heartbeat time (triage and Self).
 - `heartbeat_act(reason)` — triage only, by day: wake the Self session to act.
+- `group_wake(batch, reason)`, `group_pass(batch, remember, reason?)` — group-triage session only (section 5).
 
-Platform adapters add platform behaviors (`qq_poke`, `bili_post_dynamic`, `bili_comment`, …) with the same metadata.
+Platform adapters add platform behaviors (`qq_history`, later `qq_poke`, `bili_post_dynamic`, `bili_comment`, …) with the same metadata.
 
 ### Tool scoping by platform
 
@@ -360,9 +371,16 @@ A refused call returns a structured reason to her (`code`, `hint`), so she can a
 Approvals start simple and grow in two steps:
 
 1. **Phase 1 — rules only.** No approval channel. `public` and `irreversible` behaviors are refused unless an owner rule in settings allows them (e.g. "may comment on Bilibili videos, max 3 per day"). She gets a structured refusal and can tell the owner what she wanted.
-2. **Phase 4 — owner DM.** With QQ connected, a request goes to the owner's bound account as a short message with an id ("wants to post: … reply 1 to allow, 2 to deny"). No reply within a set time means deny. The DSH approval UI stays as a fallback.
+2. **Phase 4 — owner DM.** An adapter provides the **owner line** (`anima.provideOwnerLine`; QQ: the owner's private chat). The gate runs every other check first; then a `public` or `irreversible` call without an allow rule, or any behavior listed in the core config `approve: [{ behavior }]`, is held while the owner is asked:
+   - The request carries an id: `[Anima approval a3] … Reply "yes a3" to allow or "no a3" to deny.` Ids keep counting across restarts.
+   - The owner answers with a plain `yes <id>` / `no <id>` as the whole message. Such replies (and `cancel <id>`) are consumed by `anima.handleOwnerReply` and never reach her sessions; the owner gets a confirmation.
+   - No answer within `approvals.timeoutSeconds` (default 600) means denied. A no or a timeout reaches her as `anima/denied` with a hint.
+   - Without an owner line the Phase 1 rule applies (`anima/needs-approval`). `/anima approve <id>` and `/anima deny <id>` answer from the DSH UI.
+   - Friend requests (QQ) use the same broker: yes accepts, no declines, a timeout leaves the request unanswered on QQ. Accepting a friend does not add them to the allowlist.
 
-Outgoing `initiate` and `public` messages also sit in an **outbox** for a short delay (e.g. 30–60 s) during which the owner or a rule can cancel them.
+**Outbox.** A message she starts on her own (a say in a conversation turn that answers an intent from Self) waits `outbox.delaySeconds` of real time (default 45) before it goes out. During the wait the owner can cancel it with `/anima outbox cancel <id>` or a `cancel <id>` reply on the owner line; optionally (`outbox.notifyOwner`) the owner is told about each held message to another person. The say tool blocks for the delay, so its result stays truthful: a cancelled message is an error `anima/outbox-cancelled`, and her Self hears the intent was `cancelled`. Pausing during the wait cancels too. Replies to people who wrote to her are not delayed.
+
+**Allowlist.** A platform adapter can restrict itself to listed channels (`anima.restrictChannels`). The adapter drops events from other chats before delivery, `animaLife.deliver` refuses channel stimuli for them, and the gate refuses that platform's behaviors in them and initiating toward them (`anima/not-allowlisted`). QQ lists the owner and the configured users and groups. A target key that no adapter published is refused before every other check, including approval (`anima/unknown-channel`), and the hint lists the keys she can reach; a `/anima self` notice lists them too. An `initiate` counts against the daily budget only when the behavior succeeds (a declined intent still counts, because `open_conversation` itself succeeded).
 
 ### Trust and injection
 
@@ -378,13 +396,13 @@ Outgoing `initiate` and `public` messages also sit in an **outbox** for a short 
 
 ## 11. Platform adapters
 
-Each platform is one DSH plugin that implements a small adapter contract; the core never imports platform code. QQ via SnowLuma is first because SnowLuma already speaks OneBot v11.
+Each platform is one DSH plugin that implements a small adapter contract; the core never imports platform code. QQ is first, through NapCatQQ. The adapter speaks only standard OneBot v11 and never NapCat internals, so another OneBot v11 runtime such as LLOneBot replaces it by changing the config URL.
 
 ### Adapter contract
 
 An adapter plugin, when loaded:
 
-1. **Connects** to its platform runtime (for QQ: the OneBot v11 WebSocket and HTTP API that SnowLuma exposes) and reports health.
+1. **Connects** to its platform runtime and reports health. QQ connects as a WebSocket client to the runtime's OneBot v11 forward WebSocket server (URL and access token in config). It reconnects with backoff (1 s doubling, capped), and treats lost heartbeats (none for 2.5 intervals) and the `bot_offline` notice as health signals, shown in `/anima status` and as a line in her report while QQ is down.
 2. **Publishes channels**: friends, groups and other places she can talk, with display names and the bound account ids.
 3. **Emits stimuli**: converts platform events into the normalized `message`, `mention`, `platform-event` types.
 4. **Registers behaviors**: at least `say` for its channels, plus platform-specific ones, each with metadata.
@@ -401,7 +419,7 @@ Unloading the plugin removes all of the above through Cordis effects.
 | Adapter | Runtime | First behaviors | Status |
 | --- | --- | --- | --- |
 | `anima-adapter-local` | DSH web UI | `say` to the owner without any external platform | Phase 1, for development |
-| `anima-adapter-qq` | SnowLuma, OneBot v11 | `say`, `poke`, read group history, list members | Phase 4 |
+| `anima-adapter-qq` | NapCatQQ (any OneBot v11 runtime) | `qq_say` (reply, @), `qq_history`; inbound private/group messages, pokes, recalls, friend requests. Later: poke and emoji reactions, typing status, Qzone, files | Phase 4 |
 | `anima-adapter-bili` | Bilibili web API with her account | browse feed, watch info, comment, post dynamic, DMs | Phase 5 |
 | `anima-adapter-wechat` | Deferred | `say` | Later |
 
@@ -412,7 +430,7 @@ Unloading the plugin removes all of the above through Cordis effects.
 Everything she does is already a DSH session event, so the owner's view is mostly DSH's own session UI plus a few owner commands; no custom console in the first version.
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
-- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox` (pending messages, cancel), `/anima approve <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
+- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
 - **Audit trail**: every gated call records behavior, decision, reason and trigger.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
@@ -434,7 +452,7 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Decayed memory card vs full archive | **Keep idea** | Active index vs archive (section 8) |
 | Privacy patterns in `lib/privacy.js` | **Keep idea** | Output check inside `say` and recall scoping |
 | Fish guard (bot-dominated groups) | **Keep idea** | A policy-gate rule |
-| Outbox and idempotent conversation close | **Keep idea** | Outbox in the gate; `end_conversation` |
+| Outbox and idempotent conversation close | **Keep idea** | Outbox in `anima-life`, asked by every say tool; `end_conversation` |
 | Session-map duplicate bug | **Keep lesson** | Deterministic session ids |
 | Persona cards in `roles/` | **Keep content** | Becomes the constitution file |
 | Desktop pet, voice, stickers, slang, character switching, console, token ledger, updater | Drop for now | Out of scope (section 1) |
@@ -470,6 +488,13 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Consolidation | Her night wake may consolidate; it runs in its own short session per day on a cheap model; fallback after `fallbackHours` (24); decay is plain code once a day | 7, 8 |
 | Memory scope (Phase 3) | No embeddings, no archive UI; owner commands `/anima memory list|forget`; auto-injection budget is a Config field, default 800 tokens | 8, 12 |
 | Night (from Phase 3) | At most one wake-up per night; it can rest or consolidate | 7 |
+| QQ runtime | NapCatQQ, replacing SnowLuma (no longer public). The adapter talks only OneBot v11, so LLOneBot or another runtime works by config | 1, 11 |
+| QQ transport | `anima-adapter-qq` is a WebSocket client of the runtime's OneBot v11 forward WebSocket server, on Node's built-in `WebSocket` (no dependency); token as `?access_token=`; reconnect with backoff; heartbeat and `bot_offline` health | 11 |
+| QQ scope (Phase 4) | Inbound: private and group messages (text, @, reply, image placeholders), pokes, recalls, friend requests. Outbound: `qq_say` with reply and @; `qq_history`. Later: outbound pokes and reactions, typing, Qzone, files | 11 |
+| Allowlist | Only configured chats (owner + listed users and groups); enforced in the adapter, in `animaLife.deliver` and in the gate, never in prompts | 10 |
+| Group triage | Per-group buffer (default 60 s / 30 messages) → one cheap turn in a daily group-triage session: `group_wake` or `group_pass(remember)`; direct address and owner always wake; wake cap is a gate quota; fallbacks remember | 5 |
+| Owner approvals | Over the owner line (QQ private chat): id + plain `yes`/`no <id>`; timeout (600 s) = denied; core config `approve` forces approval for named behaviors; friend requests use it and are never auto-accepted | 10 |
+| Outbox | Her initiated messages wait `outbox.delaySeconds` (default 45, real time); cancel via `/anima outbox cancel <id>` or `cancel <id>` on the owner line | 10 |
 
 ### Still open
 
@@ -477,7 +502,9 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 - [ ] **Dreaming**: what night heartbeats do beyond consolidation; deferred until after Phase 3.
 - [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tune from Phase 2 test runs.
 - [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before real people talk to her.
-- [ ] **Outbox delay** for `initiate` messages (section 10) is not built yet; add it with QQ (Phase 4), where it matters.
+- [x] **Outbox delay**: built in Phase 4 (section 10).
+- [x] **Session-log upload**: turned off in `anima-dev` (owner decision, Phase 4; DSH-INTEGRATION §12).
+- [ ] **Week on QQ**: the unattended week was cancelled for now; run it later if group wake rates need measuring.
 
 ### Phased roadmap
 
@@ -485,5 +512,5 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 1. **Phase 1 — Skeleton on `anima-adapter-local`.** Packages and presets, conversation and Self sessions, `say`, policy gate with quotas, owner commands. Exit: she chats with the owner in the DSH UI and the gate refuses an over-quota call.
 2. **Phase 2 — Autonomy.** Self state, heartbeat with triage, `open_conversation`, goals, self-set alarms. Exit: over a test day she initiates at least once on her own and rests otherwise, within budget.
 3. **Phase 3 — Memory.** Store, scoped recall, auto-injection, nightly consolidation, decay. Exit: a private fact is recalled in that private chat and not in a group. Done 2026-11-10 (DSH-INTEGRATION §3).
-4. **Phase 4 — QQ.** `anima-adapter-qq` on SnowLuma, private and group chats, group triage, owner-DM approvals. Exit: a week on a test account with no runaway wakes.
+4. **Phase 4 — QQ.** `anima-adapter-qq` on NapCatQQ (OneBot v11), private and group chats on an allowlist, group triage, owner-DM approvals, the outbox. Exit: a week on a test account with no runaway wakes. Supervised runs passed 2026-11-10 (DSH-INTEGRATION §3). The owner cancelled the week-long run for now, so the phase closes on the supervised runs; the runaway-wake check is a gate quota (`group_wake`) plus the per-group counters in `life.json`, not yet a measured week.
 5. **Phase 5 — Bilibili and beyond.** `anima-adapter-bili`, public behaviors through approvals. WeChat is deferred.

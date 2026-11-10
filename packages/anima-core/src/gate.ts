@@ -4,19 +4,22 @@
  * @module @anima/core/gate
  */
 
-import type { AllowRule, QuotaRule } from './config.ts'
+import type { AllowRule, ApproveRule, QuotaRule } from './config.ts'
 import type { Mode } from './rhythm.ts'
 import type { BehaviorMeta, EffectClass, SessionInfo } from './types.ts'
 
 /** Gate outcome. A refusal carries a stable `code` and a hint she can act on. */
 export type Verdict =
-  | { readonly allowed: true }
+  /** `approval` set: allowed only once the owner approves; the text says why approval is needed. */
+  | { readonly allowed: true; readonly approval?: string }
   | { readonly allowed: false; readonly code: string; readonly hint: string }
 
 /** Policy the gate applies. Fields beyond quotas and allow rules are optional (tests). */
 export interface Policy {
   readonly quotas: readonly QuotaRule[]
   readonly allow: readonly AllowRule[]
+  /** Behaviors that always need owner approval. */
+  readonly approve?: readonly ApproveRule[]
   /** Effect classes allowed per mode; all when omitted. */
   readonly allowedEffects?: Readonly<Record<Mode, readonly EffectClass[]>>
   /** Self-initiated conversations per day; unlimited when omitted. */
@@ -35,6 +38,20 @@ export interface GateMoment {
   readonly initiatesUsed: number
   /** Whether she may initiate in a channel (consent). */
   readonly mayInitiate: (channelKey: string) => boolean
+  /** Whether an owner line exists to ask approvals on; without one, approval-class calls are refused. */
+  readonly ownerLine?: boolean
+  /**
+   * Whether a channel is on its platform's allowlist: false when refused,
+   * undefined when the platform has no allowlist.
+   */
+  readonly channelAllowed?: (channelKey: string) => boolean | undefined
+  /**
+   * Whether an adapter published a channel. A target nobody published is left
+   * to the behavior, which refuses it and lists the channels that exist.
+   */
+  readonly channelKnown?: (channelKey: string) => boolean
+  /** Channel keys she may reach (known and allowlisted), listed when a call targets an unknown one. */
+  readonly knownChannels?: () => readonly string[]
 }
 
 /** Moment used when the caller gives none: day, nothing spent, consent everywhere. */
@@ -66,6 +83,9 @@ export const GateCode = {
   quietHours: 'anima/quiet-hours',
   noConsent: 'anima/no-consent',
   notAllowed: 'anima/not-allowed',
+  notAllowlisted: 'anima/not-allowlisted',
+  unknownChannel: 'anima/unknown-channel',
+  denied: 'anima/denied',
 } as const
 
 /**
@@ -93,7 +113,10 @@ export function visibleIn(meta: BehaviorMeta, session: SessionInfo | undefined, 
 function counterKey(index: number, rule: QuotaRule, call: GateCall): string {
   const { session, meta } = call
   switch (rule.per) {
-    case 'channel': return `${index}|channel:${session?.kind === 'conversation' ? session.channelKey : 'self'}`
+    case 'channel': {
+      const target = meta.target?.(call.args ?? {})
+      return `${index}|channel:${target ?? (session?.kind === 'conversation' ? session.channelKey : 'self')}`
+    }
     case 'platform': return `${index}|platform:${meta.platform ?? 'core'}`
     case 'global': return `${index}|global`
   }
@@ -186,9 +209,9 @@ export class QuotaBook {
 
 /**
  * Decide one behavior call. Checks, in order: Anima session, session kind,
- * platform, mode (night), approval-class effects, argument constraints, token
- * budget, initiate rules (daily count, quiet hours, consent), quotas
- * (DESIGN §10 items 1–5; trust arrives with real platforms). Does not record usage.
+ * platform, mode (night), channel allowlist, argument constraints, token
+ * budget, initiate rules (daily count, quiet hours, consent), quotas, and
+ * last whether owner approval is needed (DESIGN §10). Does not record usage.
  * @param call - the call.
  * @param policy - owner policy.
  * @param book - quota counters.
@@ -211,8 +234,20 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   if ((meta.modes !== undefined && !meta.modes.includes(moment.mode)) || (allowed !== undefined && !allowed.includes(meta.effect))) {
     return deny(GateCode.night, `${name} is not available while you are ${moment.mode === 'night' ? 'asleep' : 'awake'}${allowed === undefined ? '' : `; now only ${allowed.join(', ')} behaviors work`}.`)
   }
-  if ((meta.effect === 'public' || meta.effect === 'irreversible') && !policy.allow.some(rule => rule.behavior === name)) {
-    return deny(GateCode.needsApproval, `${name} is a ${meta.effect} action and the owner has not allowed it. You can tell the owner what you wanted to do.`)
+  const target = meta.target?.(args)
+  if (target !== undefined && moment.channelKnown?.(target) === false) {
+    // Refused before any approval or count, with the real keys, so she never has to guess.
+    const known = moment.knownChannels?.() ?? []
+    return deny(GateCode.unknownChannel, `no channel "${target}". Channels you can reach: ${known.length === 0 ? 'none' : known.join(', ')}.`)
+  }
+  const allowlisted = moment.channelAllowed
+  if (allowlisted !== undefined) {
+    if (meta.platform !== undefined && session.kind === 'conversation' && allowlisted(session.channelKey) === false) {
+      return deny(GateCode.notAllowlisted, `this chat is not on the owner's allowlist, so ${name} does not work here.`)
+    }
+    if (target !== undefined && allowlisted(target) === false) {
+      return deny(GateCode.notAllowlisted, `${target} is not on the owner's allowlist; you cannot reach it.`)
+    }
   }
   const constraint = meta.constraint?.(args)
   if (constraint !== undefined) return deny(GateCode.notAllowed, constraint)
@@ -225,7 +260,6 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
       return deny(GateCode.overQuota, `you already started ${moment.initiatesUsed} of ${limit} conversations allowed today. Wait until tomorrow, or wait for others to reach out.`)
     }
     if (moment.quiet !== undefined) return deny(GateCode.quietHours, `${moment.quiet}; you cannot start conversations now.`)
-    const target = meta.target?.(args)
     if (target !== undefined && !moment.mayInitiate(target)) {
       return deny(GateCode.noConsent, `the owner has not allowed you to start conversations in ${target}.`)
     }
@@ -235,6 +269,12 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
     const minutes = Math.max(1, Math.ceil((over.freeAt - call.now) / 60_000))
     const { rule } = over
     return deny(GateCode.overQuota, `limit of ${rule.limit} per ${describeWindow(rule.windowMinutes)} ${describeScope(rule)} reached for ${name}; next slot in about ${minutes} min. Do not retry now.`)
+  }
+  const forced = policy.approve?.some(rule => rule.behavior === name) === true
+  if (forced || ((meta.effect === 'public' || meta.effect === 'irreversible') && !policy.allow.some(rule => rule.behavior === name))) {
+    const why = forced ? `the owner wants to approve every ${name}` : `${name} is a ${meta.effect} action`
+    if (moment.ownerLine === true) return { allowed: true, approval: why }
+    return deny(GateCode.needsApproval, `${why} and the owner has not allowed it. You can tell the owner what you wanted to do.`)
   }
   return { allowed: true }
 }

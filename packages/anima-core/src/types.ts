@@ -11,12 +11,13 @@ export const EFFECT_CLASSES: readonly EffectClass[] = ['observe', 'internal', 'w
 
 /**
  * Kind of an Anima session. `triage` runs the cheap heartbeat decision (DESIGN §7);
- * `consolidation` sorts a night's transcript into memories (DESIGN §8).
+ * `consolidation` sorts a night's transcript into memories (DESIGN §8);
+ * `group-triage` sorts buffered group chatter: ignore, remember, or wake (DESIGN §5).
  */
-export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation'
+export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation' | 'group-triage'
 
 /** All session kinds. */
-export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation']
+export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation', 'group-triage']
 
 /** A place she can talk, identified by `platform:account:kind:id` (DESIGN §3). */
 export interface ChannelRef {
@@ -44,6 +45,7 @@ export type SessionInfo =
   | { readonly kind: 'self' }
   | { readonly kind: 'triage' }
   | { readonly kind: 'consolidation' }
+  | { readonly kind: 'group-triage' }
   | { readonly kind: 'conversation'; readonly channel: ChannelRef; readonly channelKey: string }
 
 /** Behavior metadata read by the gate and tool scoping (DESIGN §6). */
@@ -58,7 +60,11 @@ export interface BehaviorMeta {
   readonly sessions: readonly SessionKind[]
   /** Heartbeat modes it works in; all when omitted. */
   readonly modes?: readonly ('day' | 'night')[]
-  /** For `initiate` behaviors: the channel key the call targets, read from its arguments. */
+  /**
+   * The channel key the call targets, read from its arguments. Used for
+   * initiate consent and the allowlist, and as the counter of `per: channel`
+   * quotas when the calling session is not that channel's conversation.
+   */
   readonly target?: (args: Readonly<Record<string, unknown>>) => string | undefined
   /** Owner policy on arguments: a hint when these arguments are not allowed. */
   readonly constraint?: (args: Readonly<Record<string, unknown>>) => string | undefined

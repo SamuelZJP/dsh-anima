@@ -57,7 +57,8 @@ dsh-anima/
     anima-life/          stimulus routing, sessions, heartbeat, open_conversation, outbox
     anima-memory/        memory store, recall, consolidation
     anima-adapter-local/ dev adapter over the DSH web UI
-  presets/               conversation, self
+    anima-adapter-qq/    QQ over OneBot v11 (NapCatQQ or any OneBot v11 runtime)
+  presets/               conversation, self, triage, group-triage, consolidation
   bundle/                anima bundle that installs everything into a DSH profile
 ```
 

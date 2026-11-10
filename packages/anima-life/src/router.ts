@@ -8,7 +8,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnimaError, channelKey, type SessionInfo, type SessionKind } from '@anima/core'
 import { route, stimulusRef, stimulusSummary, stimulusText, wakes, type PublishedChannel, type Route, type Stimulus } from './stimulus.ts'
-import { consolidationSessionId, conversationSessionId, selfSessionId, triageSessionId } from './identity.ts'
+import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId } from './identity.ts'
 
 /** Preset ids of the session kinds (bundle/presets/*.patch.yml). */
 export const PRESETS: Record<SessionKind, string> = {
@@ -16,9 +16,10 @@ export const PRESETS: Record<SessionKind, string> = {
   self: 'anima-self',
   triage: 'anima-triage',
   consolidation: 'anima-consolidation',
+  'group-triage': 'anima-group-triage',
 }
 
-const CWD: Record<SessionKind, string> = { conversation: 'conversations', self: 'workspace', triage: 'triage', consolidation: 'consolidation' }
+const CWD: Record<SessionKind, string> = { conversation: 'conversations', self: 'workspace', triage: 'triage', consolidation: 'consolidation', 'group-triage': 'group-triage' }
 
 /** A model route to select for a session's next requests. */
 export interface ModelChoice {
@@ -67,6 +68,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
   private readonly channels = new Map<string, { channel: PublishedChannel; channelKey: string }>()
   private readonly triage = new Map<string, string>()
   private readonly consolidation = new Map<string, string>()
+  private readonly groupTriage = new Map<string, string>()
 
   constructor(private readonly host: SessionHost<A>, private readonly options: RouterOptions) {}
 
@@ -97,6 +99,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
     if (sessionId === this.selfId) return { kind: 'self' }
     if (this.triage.has(sessionId)) return { kind: 'triage' }
     if (this.consolidation.has(sessionId)) return { kind: 'consolidation' }
+    if (this.groupTriage.has(sessionId)) return { kind: 'group-triage' }
     const entry = this.channels.get(sessionId)
     return entry === undefined ? undefined : { kind: 'conversation', channel: entry.channel, channelKey: entry.channelKey }
   }
@@ -118,6 +121,16 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
   consolidationId(day: string): string {
     const id = consolidationSessionId(this.options.characterId, day)
     this.consolidation.set(id, day)
+    return id
+  }
+
+  /**
+   * Group-triage session id of a day, made known to {@link describe}.
+   * @param day - her day key.
+   */
+  groupTriageId(day: string): string {
+    const id = groupTriageSessionId(this.options.characterId, day)
+    this.groupTriage.set(id, day)
     return id
   }
 
@@ -181,19 +194,29 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
 
   /**
    * Route a stimulus to its session and deliver it: as a waking message, or as
-   * context for the next turn when it does not wake (unaddressed group messages).
+   * context for the next turn when it does not wake. A `channel-event` is
+   * delivered only into an existing session.
    * @param before - called with the agent just before delivery (e.g. to select a model).
+   * @param wake - overrides {@link wakes}.
    * @returns the target session id.
    */
-  async deliver(stimulus: Stimulus, before?: (agent: A) => void): Promise<string> {
+  async deliver(stimulus: Stimulus, before?: (agent: A) => void, wake = wakes(stimulus)): Promise<string> {
     const target = route(this.options.characterId, stimulus, this.options.selfGeneration)
     if (target.kind === 'conversation' && !this.channels.has(target.sessionId)) this.know(target.channel)
     if (target.kind === 'triage') this.triage.set(target.sessionId, target.day)
     if (target.kind === 'consolidation') this.consolidation.set(target.sessionId, target.day)
-    const agent = await this.ensure(target)
+    if (target.kind === 'group-triage') this.groupTriage.set(target.sessionId, target.day)
+    let agent: A | undefined
+    if (stimulus.type === 'channel-event') {
+      if (this.host.isArchived(target.sessionId)) return target.sessionId
+      agent = await this.host.resolve(target.sessionId)
+      if (agent === undefined) return target.sessionId
+    } else {
+      agent = await this.ensure(target)
+    }
     before?.(agent)
     const text = this.stamped(stimulusText(stimulus))
-    if (wakes(stimulus)) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus))
+    if (wake) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus))
     else await this.host.inject(agent, text, stimulusSummary(stimulus), stimulus.type)
     return target.sessionId
   }
@@ -217,6 +240,7 @@ function title(target: Route): string {
     case 'self': return 'Anima · self'
     case 'triage': return `Anima · triage ${target.day}`
     case 'consolidation': return `Anima · memory ${target.day}`
+    case 'group-triage': return `Anima · groups ${target.day}`
     case 'conversation': return `Anima · ${target.channel.display}`
   }
 }

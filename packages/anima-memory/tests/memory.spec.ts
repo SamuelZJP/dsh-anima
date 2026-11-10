@@ -269,7 +269,7 @@ describe('AnimaMemory', () => {
   it('consolidates in its own session; scopes come from the segment', async () => {
     const { ctx, host } = await setup()
     await ctx.animaLife.deliver(message(ALICE, 'Alice', 'I moved to Hangzhou last week'))
-    await ctx.animaLife.deliver(message(GROUP, 'Bob', 'anyone up for hotpot?', { addressed: false }))
+    await ctx.animaLife.deliver(message(GROUP, 'Bob', 'anyone up for hotpot?', { addressed: true }))
     const lines = await ctx.animaMemory.consolidate('her')
     expect(lines).toBe(2)
     const consolidationId = consolidationSessionId('anima', ctx.anima.dayKey())
@@ -310,6 +310,17 @@ describe('AnimaMemory', () => {
     expect(host.injected.map(d => d.id)).toEqual([sessionOf(GROUP)])
     expect(host.delivered.map(d => d.id)).toEqual([sessionOf(GROUP)])
     expect(ctx.animaMemory.store.pendingCount()).toBe(2)
+  })
+
+  it('records group lines that triage only remembers, with the group scope', async () => {
+    const { ctx, host } = await setup()
+    const stimulus = message(GROUP, 'Bob', 'the meetup moved to Sunday', { addressed: false })
+    ctx.animaLife.router.know(GROUP)
+    ctx.emit('anima/stimulus', { stimulus, sessionId: sessionOf(GROUP), delivery: 'record' })
+    expect(ctx.animaMemory.store.pendingCount()).toBe(1)
+    expect(host.delivered).toEqual([])
+    const [segment] = ctx.animaMemory.store.claim('test', 10_000)
+    expect(segment?.scope).toBe(`group:${GROUP.platform}:${GROUP.account}:${GROUP.kind}:${GROUP.id}`)
   })
 
   it('offers /anima memory list and forget', async () => {

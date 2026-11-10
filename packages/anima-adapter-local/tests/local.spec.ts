@@ -123,10 +123,10 @@ describe('/anima chat --as / --in (dev test channels)', () => {
   it('wakes a simulated group only when she is addressed', async () => {
     const { ctx, host } = await setup()
     const quiet = await chat(ctx, 'chat --as bob --in group:test hotpot tonight?')
-    expect(quiet).toMatchObject({ kind: 'success', text: expect.stringContaining('as context') })
+    expect(quiet).toMatchObject({ kind: 'success', text: expect.stringContaining('into group triage') })
     expect(host.delivered).toEqual([])
     await chat(ctx, 'chat --as bob --in group:test @Anima are you coming?')
-    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[local group "group test (local)"] Bob: @Anima are you coming?') }])
+    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[local group "group test (local)"] Bob [local bob]: @Anima are you coming?') }])
   })
 
   it('remembers test channels across a reload', async () => {

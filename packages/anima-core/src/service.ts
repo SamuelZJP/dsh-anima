@@ -12,6 +12,7 @@ import { Service, type Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session'
 import { defineTool, type PreToolDecision, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, type OwnerReply } from './approvals.ts'
 import { AnimaClock, formatLocal, parseWhen } from './clock.ts'
 import { SubcommandTable, type Subcommand } from './commands.ts'
 import type { ModeConfig, ResolvedConfig } from './config.ts'
@@ -53,6 +54,15 @@ export type SessionResolver = (sessionId: string) => SessionInfo | undefined
 
 /** What the gate needs to know about a channel; provided by `anima-life`. */
 export type ChannelResolver = (channelKey: string) => { readonly isOwner: boolean } | undefined
+
+/**
+ * Handles an owner reply command (`cancel o2`, …) that approvals do not.
+ * @returns the confirmation to send back, or undefined when the id is not its own.
+ */
+export type OwnerReplyHandler = (reply: OwnerReply) => string | undefined
+
+/** Whether a channel key is on its platform's allowlist. */
+export type ChannelAllowlist = (channelKey: string) => boolean
 
 /** Name recorded in `ToolErrorInfo.name` for gate refusals. */
 export const GATE_INFO_NAME = 'AnimaPolicy'
@@ -96,9 +106,13 @@ export class AnimaCore extends Service {
   private readonly quota = new QuotaBook()
   private readonly subcommands = new SubcommandTable()
   private readonly statusProviders = new Set<() => string[]>()
-  private readonly state: { paused: boolean; resolver: SessionResolver | undefined; channels: ChannelResolver | undefined } = {
-    paused: false, resolver: undefined, channels: undefined,
+  private readonly state: { paused: boolean; resolver: SessionResolver | undefined; channels: ChannelResolver | undefined; channelList: (() => readonly string[]) | undefined; ownerLine: OwnerLine | undefined } = {
+    paused: false, resolver: undefined, channels: undefined, channelList: undefined, ownerLine: undefined,
   }
+  private readonly allowlists = new Map<string, ChannelAllowlist>()
+  private readonly ownerReplies = new Set<OwnerReplyHandler>()
+  /** Pending owner approvals. */
+  readonly approvals: ApprovalBroker
   private readonly constitutionText: string
   private readonly statePath: string
   private self: SelfState
@@ -122,6 +136,15 @@ export class AnimaCore extends Service {
     }
     this.self = saved === undefined || saved.self.updatedAt > now ? initialState(this.model, now) : saved.self
     this.ledger = new Ledger(saved?.days ?? {})
+    // Ids keep counting across restarts, so a late "yes a3" never approves a newer request.
+    const approvalsPath = join(config.dataDir, 'approvals.json')
+    const approvalSeq = { seq: readJson<{ seq: number }>(approvalsPath)?.seq ?? 0 }
+    this.approvals = new ApprovalBroker(() => {
+      approvalSeq.seq += 1
+      writeJson(approvalsPath, approvalSeq)
+      return approvalSeq.seq
+    }, config.approvals.timeoutSeconds * 1000)
+    ctx.effect(() => () => this.approvals.denyAll(), 'anima.approvals')
 
     ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
       const meta = this.behaviorTable.get(exec.name)
@@ -137,10 +160,14 @@ export class AnimaCore extends Service {
       }
       const verdict = decide(call, this.policy(), this.quota, this.moment(call.now))
       if (!verdict.allowed) return refusal(verdict.code, verdict.hint)
+      if (verdict.approval !== undefined) {
+        const answer = await this.requestApproval(`She wants to call ${exec.name}${describeArgs(args)} (${verdict.approval}).`, { signal: exec.signal })
+        if (answer !== 'approved') return refusal(GateCode.denied, deniedHint(exec.name, answer))
+        if (this.state.paused) return refusal(GateCode.paused, PAUSED_HINT)
+      }
       const decision = await next()
       if (decision.kind === 'allow') {
         this.quota.record(call, config.quotas)
-        if (meta.effect === 'initiate') this.today(call.now).initiates += meta.cost ?? 1
         this.save()
       }
       return decision
@@ -173,6 +200,8 @@ export class AnimaCore extends Service {
       { name: 'status', usage: 'status — state, budgets, sessions and quota usage', run: () => ({ kind: 'success', text: this.statusText() }) },
       { name: 'pause', usage: 'pause — refuse every Anima behavior and stop heartbeats until resumed', run: () => { this.state.paused = true; return { kind: 'success', text: 'Anima paused. Every behavior is refused and heartbeats stop until /anima resume.' } } },
       { name: 'resume', usage: 'resume — lift a pause', run: () => { this.state.paused = false; return { kind: 'success', text: 'Anima resumed.' } } },
+      { name: 'approve', usage: 'approve <id> — allow a pending approval request (same as replying "yes <id>" on the owner line)', run: args => this.answerCommand(args, true) },
+      { name: 'deny', usage: 'deny <id> — deny a pending approval request', run: args => this.answerCommand(args, false) },
       { name: 'goal', usage: 'goal add <text> [due <YYYY-MM-DD HH:mm>] | goal list | goal close <id> [reason] — owner goals', run: args => this.goalCommand(args) },
     ]
     for (const sub of core) this.subcommands.add(sub)
@@ -258,6 +287,7 @@ export class AnimaCore extends Service {
     return {
       quotas: this.config.quotas,
       allow: this.config.allow,
+      approve: this.config.approve,
       allowedEffects: { day: this.config.modes.day.allowedEffects, night: this.config.modes.night.allowedEffects },
       initiatePerDay: this.config.initiate.perDay,
     }
@@ -270,6 +300,12 @@ export class AnimaCore extends Service {
       overBudget: this.overBudget(now),
       initiatesUsed: this.todayLedger(now).initiates,
       mayInitiate: key => this.mayInitiate(key),
+      ownerLine: this.state.ownerLine !== undefined,
+      channelAllowed: key => this.channelAllowed(key),
+      // Default deny: without a channel resolver no target is known.
+      channelKnown: key => this.state.channels?.(key) !== undefined,
+      // Only keys she may actually reach are offered in refusals.
+      knownChannels: () => (this.state.channelList?.() ?? []).filter(key => this.channelAllowed(key) !== false),
     }
   }
 
@@ -345,6 +381,8 @@ export class AnimaCore extends Service {
       ...definition,
       execute: async (args, exec) => {
         const value = await definition.execute(args, exec)
+        // A started conversation counts only once it really started; a refused or failed call does not.
+        if (meta.effect === 'initiate') this.today(this.clock.now()).initiates += meta.cost ?? 1
         this.onBehaviorSuccess(name)
         const event: BehaviorEvent = { name, meta, args: args as Record<string, unknown>, sessionId: exec.agent?.id, at: this.clock.now() }
         this.ctx.emit('anima/behavior', event)
@@ -485,6 +523,105 @@ export class AnimaCore extends Service {
     }
   }
 
+  // ---- allowlists, owner line and approvals ----
+
+  /**
+   * Restrict a platform to an allowlist of channels (DESIGN §10): the gate then
+   * refuses that platform's behaviors in other channels and initiating there.
+   * Owned by the calling plugin.
+   * @param platform - platform id, the first part of its channel keys.
+   * @param allowed - whether a channel key is allowed.
+   */
+  restrictChannels(platform: string, allowed: ChannelAllowlist): () => void {
+    return this.ctx.effect(() => {
+      if (this.allowlists.has(platform)) throw new AnimaError('anima/allowlist-duplicate', `platform "${platform}" already has an allowlist.`)
+      this.allowlists.set(platform, allowed)
+      return () => {
+        if (this.allowlists.get(platform) === allowed) this.allowlists.delete(platform)
+      }
+    }, `anima.restrictChannels(${platform})`)
+  }
+
+  /**
+   * Whether a channel is allowed by its platform's allowlist.
+   * @param channelKey - `platform:account:kind:id`.
+   * @returns undefined when the platform has no allowlist.
+   */
+  channelAllowed(channelKey: string): boolean | undefined {
+    const platform = channelKey.split(':', 1)[0] ?? ''
+    return this.allowlists.get(platform)?.(channelKey)
+  }
+
+  /**
+   * Provide the owner line approvals are asked on (one at a time). Owned by the calling plugin.
+   * @param line - sends plain text to the owner.
+   */
+  provideOwnerLine(line: OwnerLine): () => void {
+    return this.ctx.effect(() => {
+      if (this.state.ownerLine !== undefined) throw new AnimaError('anima/owner-line-duplicate', `an owner line (${this.state.ownerLine.name}) is already provided; enable owner approvals in one adapter only.`)
+      this.state.ownerLine = line
+      return () => {
+        if (this.state.ownerLine === line) {
+          this.state.ownerLine = undefined
+          this.approvals.denyAll()
+        }
+      }
+    }, 'anima.provideOwnerLine()')
+  }
+
+  /** The current owner line, if an adapter provides one. */
+  get ownerLine(): OwnerLine | undefined {
+    return this.state.ownerLine
+  }
+
+  /**
+   * Ask the owner over the owner line and wait for the answer.
+   * @param summary - what she wants, one or two lines.
+   */
+  requestApproval(summary: string, options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<ApprovalAnswer> {
+    return this.approvals.request(this.state.ownerLine, summary, {
+      ...options,
+      onAsked: id => this.ctx.logger.info(`anima: approval ${id} asked: ${summary}`),
+    })
+  }
+
+  /** Handle owner reply commands other than approvals (e.g. outbox cancel). Owned by the calling plugin. */
+  addOwnerReply(handler: OwnerReplyHandler): () => void {
+    return this.ctx.effect(() => {
+      this.ownerReplies.add(handler)
+      return () => { this.ownerReplies.delete(handler) }
+    }, 'anima.addOwnerReply()')
+  }
+
+  /**
+   * A message the owner sent on the owner line. Reply commands (`yes a3`,
+   * `no a3`, `cancel o2`) are consumed here and never reach her sessions.
+   * @param text - the message text.
+   * @returns the confirmation to send back, or undefined when it is ordinary chat.
+   */
+  handleOwnerReply(text: string): string | undefined {
+    const reply = parseOwnerReply(text)
+    if (reply === undefined) return undefined
+    if (reply.verb !== 'cancel' && reply.id.startsWith('a')) {
+      return this.approvals.answer(reply.id, reply.verb === 'yes')
+        ? `${reply.verb === 'yes' ? 'Allowed' : 'Denied'} ${reply.id}.`
+        : `No pending request ${reply.id} (already answered or timed out).`
+    }
+    for (const handler of this.ownerReplies) {
+      const answer = handler(reply)
+      if (answer !== undefined) return answer
+    }
+    return `No pending request ${reply.id}.`
+  }
+
+  private answerCommand(args: string, approve: boolean): CommandResult {
+    const id = args.trim().toLowerCase()
+    if (!/^a\d+$/.test(id)) return { kind: 'error', text: `Usage: /anima ${approve ? 'approve' : 'deny'} <id>, e.g. a3. Pending: ${this.approvals.list().map(p => p.id).join(', ') || 'none'}` }
+    return this.approvals.answer(id, approve)
+      ? { kind: 'success', text: `${approve ? 'Allowed' : 'Denied'} ${id}.` }
+      : { kind: 'error', text: `No pending request ${id}.` }
+  }
+
   // ---- resolvers, commands, status ----
 
   /**
@@ -504,13 +641,18 @@ export class AnimaCore extends Service {
   /**
    * Install the channel resolver used for initiate consent (`anima-life` owns it).
    * @param resolver - maps a channel key to what the gate needs.
+   * @param list - every known channel key, for refusals of unknown targets.
    */
-  provideChannels(resolver: ChannelResolver): () => void {
+  provideChannels(resolver: ChannelResolver, list?: () => readonly string[]): () => void {
     return this.ctx.effect(() => {
       if (this.state.channels !== undefined) throw new AnimaError('anima/resolver-duplicate', 'a channel resolver is already provided; load only one anima-life.')
       this.state.channels = resolver
+      this.state.channelList = list
       return () => {
-        if (this.state.channels === resolver) this.state.channels = undefined
+        if (this.state.channels === resolver) {
+          this.state.channels = undefined
+          this.state.channelList = undefined
+        }
       }
     }, 'anima.provideChannels()')
   }
@@ -570,10 +712,27 @@ export class AnimaCore extends Service {
       `Open goals: ${goals.length === 0 ? 'none' : ''}`,
       ...goals.map(goal => `  ${describeGoal(goal)}`),
       `Behaviors: ${[...this.behaviorTable.keys()].sort().join(', ') || '(none)'}`,
+      `Owner line: ${this.state.ownerLine?.name ?? 'none (approval-class behaviors are refused)'}`,
+      `Pending approvals: ${this.approvals.list().map(p => `${p.id} ${p.summary}`).join('; ') || 'none'}`,
     ]
     for (const provider of this.statusProviders) lines.push(...provider())
     lines.push('Quotas:', ...this.quota.usage(this.config.quotas, now).map(line => `  ${line}`))
     return lines.join('\n')
+  }
+}
+
+/** Short argument summary for an approval request. */
+function describeArgs(args: Readonly<Record<string, unknown>>): string {
+  const text = JSON.stringify(args)
+  if (text === '{}') return ''
+  return ` with ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`
+}
+
+function deniedHint(name: string, answer: ApprovalAnswer): string {
+  switch (answer) {
+    case 'denied': return `the owner said no to ${name}. Do not ask again for the same thing now.`
+    case 'timeout': return `the owner did not answer in time, so ${name} was not allowed. You can mention it to the owner later.`
+    default: return `the owner could not be asked, so ${name} was not allowed.`
   }
 }
 

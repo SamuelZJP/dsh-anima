@@ -183,7 +183,11 @@ describe('AnimaLife service', () => {
     const { ctx, host } = await setup()
     const invocation = { rawInput: 'self how are you?', agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation
     expect(await ctx.anima.dispatchCommand(invocation)).toMatchObject({ kind: 'success' })
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [notice] The owner says: how are you?'])
+    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [notice] The owner says: how are you?\nChannels you can reach: none.'])
+    await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
+    ctx.anima.restrictChannels('qq', () => false)
+    await ctx.anima.dispatchCommand(invocation)
+    expect(host.sessions.get(selfSessionId('anima'))!.inbox[1]).toContain('Channels you can reach: Owner (local): "local:owner:private:owner".')
   })
 
   it('withdraws the resolver and subcommand on unload', async () => {
@@ -208,14 +212,15 @@ describe('AnimaLife service', () => {
     expect(ctx.anima.describeSession(id)).toEqual({ kind: 'consolidation' })
   })
 
-  it('injects unaddressed group messages without waking', async () => {
+  it('buffers unaddressed group messages for group triage', async () => {
     const { ctx, host } = await setup()
     const bob = { platformUserId: 'b', displayName: 'Bob', isOwner: false }
     expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0 })).toBe(false)
     expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0, addressed: true })).toBe(true)
     expect(wakes({ type: 'message', channel: owner, sender: bob, text: 'hi', ts: 0 })).toBe(true)
     const id = await ctx.animaLife.deliver({ type: 'message', channel: group, sender: bob, text: 'hotpot?', ts: 0 })
-    expect(host.sessions.get(id)!.inbox).toEqual([expect.stringMatching(/^\(inject\) .*Bob: hotpot\?$/)])
+    expect(host.sessions.has(id)).toBe(false)
+    expect(ctx.animaLife.triage.open()).toEqual([{ channelKey: 'qq:10:group:42', messages: 1 }])
   })
 
   it('adds report lines from other plugins', async () => {

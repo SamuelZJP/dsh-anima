@@ -64,7 +64,7 @@ export function chatPerson(facts: SessionFacts, persons: readonly PersonLink[]):
  */
 export function learnScope(facts: SessionFacts, persons: readonly PersonLink[]): Scope | undefined {
   const { info } = facts
-  if (info === undefined || info.kind === 'triage') return undefined
+  if (info === undefined || info.kind === 'triage' || info.kind === 'group-triage') return undefined
   if (info.kind === 'self' || info.kind === 'consolidation') return SELF
   const person = chatPerson(facts, persons)
   if (person !== undefined) return person === 'owner' ? OWNER : `private:${person}`

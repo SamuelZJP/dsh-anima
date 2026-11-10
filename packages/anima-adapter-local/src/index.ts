@@ -99,7 +99,8 @@ export function chatChannel(chat: Pick<ChatArgs, 'as' | 'group'>): PublishedChan
 
 /**
  * Whether a group message addresses her directly: `@<name>` or her name
- * (DESIGN §5 direct-address rule, as this dev adapter applies it).
+ * (DESIGN §5 direct-address rule, as this dev adapter applies it). Other group
+ * messages go through group triage.
  */
 export function addressesHer(text: string, herName: string): boolean {
   return text.toLowerCase().includes(herName.toLowerCase())
@@ -169,6 +170,8 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
         throw new AnimaError('anima/no-channel', 'this session is not bound to a local channel.')
       }
       if (args.text.trim() === '') throw new AnimaError('anima/empty-message', 'text is empty; to stay silent, call stay_silent instead.')
+      // Her own initiations wait in the outbox first (DESIGN §10).
+      await ctx.animaLife.holdOutgoing(sessionId!, args.text)
       const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
       appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text: args.text })}\n`)
@@ -197,9 +200,11 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
         ...addressed === undefined ? {} : { addressed },
       })
       const how = channel.kind === 'group' && addressed !== true && !sender.isOwner
-        ? 'as context (it does not address her, so it joins her next turn there)'
+        ? 'into group triage (it does not address her; after the triage window a cheap check decides whether to ignore, remember or wake her)'
         : ''
-      return { kind: 'success', text: `Delivered to "Anima · ${channel.display}" (${sessionId})${how === '' ? '' : ` ${how}`}. Open it in the sidebar to watch her reply.` }
+      return { kind: 'success', text: how === ''
+        ? `Delivered to "Anima · ${channel.display}" (${sessionId}). Open it in the sidebar to watch her reply.`
+        : `Sent ${how}.` }
     },
   })
 }

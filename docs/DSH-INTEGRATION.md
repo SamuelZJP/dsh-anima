@@ -176,6 +176,38 @@ Boot: `pnpm dsh --profile anima-dev --patch <scratch>/memory.yml --no-open`. Com
 
 A first run (character `anima-test3`, `~/.anima/test-memory-3`) found a wording problem. Told "don't tell anyone", she stored the secret with `keep: "self"`, which hides it even from Alice's own chat. The tool and persona text now say that `here` in a private chat already means only that person; `self` is for her own thoughts. That run's data was left in place.
 
+**Phase 4 demo (2026-11-10, supervised). The owner cancelled the unattended week for now.**
+
+Setup:
+- NapCatQQ on another machine, logged in to her test account <her-qq>. Its OneBot v11 WebSocket server (token, array messages, 30 s heartbeat) is reached through an SSH tunnel at `ws://127.0.0.1:3003`.
+- A read-only probe first: `get_login_info`, `get_group_info`, `get_friend_list`.
+- A scratch `--patch` overlay enabled `anima-adapter-qq` (owner <owner-qq>, allowlist: group <test-group>; token from `ANIMA_QQ_TOKEN`) and set:
+  - `anima-core`: `characterId: anima-qq`, `name: 小鲸鱼`, `dataDir: ~/.anima/test-qq`, a daytime `clock.start` (the real clock was 03:20, when `express` is refused), and for runs 3–4 `approve: [{ behavior: open_conversation }]`
+- Boot: `ANIMA_QQ_TOKEN=… pnpm dsh --profile anima-dev --patch <scratch>/qq.yml --no-open`.
+
+`/anima status` showed `QQ: connected to ws://127.0.0.1:3003 as <her-qq> (小鲸鱼); account online; last heartbeat 1 s ago`.
+
+1. **Private chat.** The owner wrote `你好呀`. The conversation session logged `[qq private "Sam (QQ)"] Sam (owner) [msg 2009603572]: 你好呀` and she answered with `qq_say` → `sent (msg 360883479)`.
+2. **Group.**
+   - Owner messages in the group woke her directly (`direct` counter), as designed.
+   - A second member (九命猫) sent two plain messages, then `@小鲸鱼 hello！` within the window. The log shows the two buffered messages spliced as context (`next-step`) and the @ as the waking message. She replied with `qq_say(..., mention: ["<member-qq>"])`.
+   - Two more plain messages from 九命猫 closed into batch `b1` after 60 s. It went to the group-triage session `anima-g-3baedb39…` on `deepseek-flash` (1,419 tokens), and she called `group_pass(b1, remember: false)` → ignore. Nothing reached the group session.
+3. **Approval.**
+   - The owner told her through `/anima self` to greet the owner on QQ.
+   - Approval `a1` went to the owner's QQ private chat, and the owner answered `yes a1`. That first attempt used the local channel, because she did not know the QQ key.
+   - On her own heartbeat the next day of her clock, working from her goal g1, she called `open_conversation("qq:<her-qq>:private:<owner-qq>")`. That was approval `a4`, and the owner answered yes.
+4. **Outbox.**
+   - Her greeting to the owner on QQ waited **45.2 s** (`qq_say` call at …912.598, result `sent (msg 137233534)` at …957.843).
+   - Self got the outcome notice `Your intent i3 for Sam (QQ) …: sent — you spoke there.`
+   - Cancellation (`cancel o<n>`, `/anima outbox cancel`) is covered by unit tests only.
+
+The run found three gate problems, fixed in this phase. Each has tests.
+- A `/anima self` notice carried no situation report, so she guessed QQ channel keys (`qq:owner:private:owner`, …). The gate refused each guess with a hint that did not list the real keys. Fixes:
+  - The gate now refuses an unknown target first, with `anima/unknown-channel` and the reachable keys, before allowlist, consent, quotas and approval. Default deny: with no channel resolver, nothing is known.
+  - The `/anima self` notice now names her reachable channels.
+- A failed initiate (an approved probe for an unknown key) counted against her daily budget and used it up. Initiates now count only when the behavior succeeds.
+- An approval was asked for a call that the tool would refuse anyway (the unknown key). This is fixed by the first item.
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -452,6 +484,49 @@ Anima packages talk through Cordis events declared in `interface Events` of `@de
 
 `agent.inject(message)` followed by `sessions.flush` queues an unaddressed group message for the next turn of that group session without starting a turn (the same API Phase 2 uses for intent notices).
 
+## 8c. Phase 4 extension points (Verified by unit tests; live demo in section 3 once run)
+
+### QQ over OneBot v11
+
+- `@anima/adapter-qq` uses Node's **built-in `WebSocket`** (global in Node 24, undici). No dependency was added. The access token goes in the standard OneBot query parameter `?access_token=`, because the built-in client sets no custom headers.
+- It talks only standard OneBot v11 (plus NapCat's `bot_offline` notice, which other runtimes may not send). Swapping NapCatQQ for LLOneBot or another runtime means changing `url` (and `accessToken`).
+- Unit tests run against `tests/fake-onebot.ts`, a forward-WS server on `node:http` with a hand-written upgrade handshake and frame codec.
+
+| OneBot v11 | Kind | Used for |
+| --- | --- | --- |
+| `get_login_info` | action | verify `account` on every connect; mismatch blocks delivery and sending |
+| `send_private_msg`, `send_group_msg` | action | `qq_say` (segments `reply`, `at`, `text`); the returned `message_id` marks her messages |
+| `get_msg` | action | is a replied-to message hers (when not in her recent sent ids) |
+| `get_friend_msg_history`, `get_group_msg_history` (`count`) | action (NapCat extension, widely supported) | `qq_history` |
+| `set_friend_add_request` (`flag`, `approve`) | action | answering a friend request after the owner decides |
+| `message` (`private`, `group`; array segments, CQ string fallback) | event | messages |
+| `notice` `notify`/`poke` with `target_id` = her | event | poke → waking message `[pokes you]` |
+| `notice` `friend_recall`, `group_recall` | event | `channel-event` context |
+| `notice` `bot_offline` | event (NapCat) | health: account offline |
+| `request` `friend`; `group`/`invite` | event | owner approval; a note to Self |
+| `meta_event` `heartbeat` (`interval`, `status.online`), `lifecycle` | event | watchdog (2.5 intervals) and health |
+
+### Bundle row disabled by default
+
+`bundle/cordis.patch.yml` lists `anima-adapter-qq` with `disabled: true`, so profiles without QQ boot (a disabled row may omit required config; `apps/cli/reference/README.md`). To enable it, a patch replaces the row's config and sets `disabled: false`. During development this is a `--patch` overlay, which leaves `~/.dsh` untouched:
+
+```yaml
+- id: anima-adapter-qq
+  disabled: false
+  config:
+    url: ws://127.0.0.1:3001
+    accessToken: !!js process.env.ANIMA_QQ_TOKEN
+    account: 10001          # her QQ number
+    owner: 20002            # the owner's QQ id
+    ownerName: Sam
+    allow:
+      groups: [{ id: 40004, name: Test group }]
+```
+
+### Group-triage preset
+
+A fifth Anima preset, `anima-group-triage` (`bundle/presets/group-triage.patch.yml`). Its sessions are `anima-g-<hash(characterId, day)>` in `<dataDir>/group-triage`. The model is selected per batch with `agent.model.select`, as for triage.
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
@@ -506,6 +581,9 @@ Re-check these on every DSH upgrade.
 | `agent/pre-step` waterfall, `PreStepDecision`, `ContextFormed` form `recall` | `dsh-agent`, `dsh-llm` | memory auto-injection | Verified (Phase 3) |
 | Cordis `Events` augmentation, `ctx.emit` | `cordis` | `anima/stimulus`, `anima/behavior` between Anima packages | Verified (Phase 3) |
 | `node:sqlite` `DatabaseSync`, FTS5 `trigram` | Node 24 built-in | memory store | Verified (Phase 3) |
+| global `WebSocket` (client) | Node 24 built-in | QQ OneBot transport | Verified in unit tests (Phase 4) |
+| `exec.signal` on `tools/pre-execute` | `dsh-tools` | an aborted turn denies a pending owner approval | Read (Phase 4) |
+| Loader row `disabled: true` in a bundle, re-enabled by a patch | Cordis loader | optional QQ adapter row | Verified with `--dump-config` (Phase 4) |
 
 ## 12. Known gaps and risks
 
@@ -514,7 +592,7 @@ Re-check these on every DSH upgrade.
 - **pnpm version for `dsh plugin`:** `dsh plugin` runs whichever `pnpm` is on PATH inside the profile directory. On this machine that is corepack's default (12.x), not the workspace's 11.28.5. It worked, but watch for lockfile differences.
 - **Pre-stable APIs:** everything in section 10 marked Read can change between DSH releases.
 - **Session recency:** sessions fed by a custom source kind do not rise in the sidebar's recency order (section 6).
-- **Session-log upload is on in `anima-dev`:** the Phase 1 demo log shows `session-log-deepseek/delivery-accepted` events. Turn it off before real people talk to her (first bullet above).
+- **Session-log upload is off in `anima-dev`** since Phase 4 (owner decision): the profile patch sets `session-log-deepseek` `enabled: false`, verified with `--dump-config`. Phase 1–3 logs (and the Phase 4 supervised runs, which ran before the change) were uploaded under the default.
 - **Global tools leak into Anima sessions:** her conversation session was offered `anima_ping` (root-level Phase 0 probe) and DSH's global `working_directory` beside `local_say`. Harmless in Phase 1, but not in Phase 2. In the accelerated day, her Self session called `working_directory`. That led her to conclude she has "no file tools beyond cd", and she spent part of her second initiation asking the owner about it. Fixed: the persona row hides both (`hideTools`, section 8). Hiding them needed a fresh Self session (deferred-tools trap, section 8).
 - **Real clock in DSH parts:** schedule timing and DSH's own event timestamps use the real clock even under a sped-up Anima clock. Session logs therefore show real times; the simulated time is in each stimulus's leading stamp.
 - **First test-day run lost:** the run with the broken triage compaction config left an empty, never-started triage session for character `anima-test` (hidden in the sidebar because blank) and `~/.anima/test-day/`. Both are unused test data.

@@ -9,3 +9,9 @@
       name: '@anima/memory'
     - id: anima-adapter-local
       name: '@anima/adapter-local'
+    # QQ over OneBot v11 (NapCatQQ or any OneBot v11 runtime). Disabled here
+    # because it needs url, account and owner; a profile patch or --patch
+    # overlay enables it with that config (docs/DSH-INTEGRATION.md).
+    - id: anima-adapter-qq
+      name: '@anima/adapter-qq'
+      disabled: true
