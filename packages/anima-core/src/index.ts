@@ -1,24 +1,53 @@
 /**
- * Anima core plugin. Phase 0 registers only the `anima_ping` integration probe.
+ * Anima core plugin: the `anima` service (behaviors, policy gate, pause,
+ * session resolver slot), the `/anima` owner command, and `anima_ping`.
  * @module @anima/core
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-commands'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from './config.ts'
+import { AnimaCore } from './service.ts'
+
+export * from './types.ts'
+export { DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type QuotaRule, type QuotaScope, type ResolvedConfig } from './config.ts'
+export { decide, GateCode, QuotaBook, visibleIn, type GateCall, type Policy, type Verdict } from './gate.ts'
+export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
+export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type SessionResolver } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-core'
 /** Services used by the plugin. */
 export const inject = ['tools']
 
+/** Plugin config. */
+export type Config = CoreConfig
+/** Plugin config schema. */
+export const Config = ConfigSchema
+
 /** Name of the integration probe tool. */
 export const PING_TOOL = 'anima_ping'
+/** Name of the owner command. */
+export const COMMAND = 'anima'
 
 /**
  * Register Anima core contributions.
- * @param ctx - context providing the tool registry.
+ * @param ctx - root context.
+ * @param config - plugin config.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Partial<Config> | undefined): void {
+  ctx.plugin(AnimaCore, resolveConfig(config))
+
+  ctx.inject(['anima', 'commands'], (ctx) => {
+    ctx.effect(() => ctx.commands.register({
+      name: COMMAND,
+      description: 'Anima owner controls: /anima help lists subcommands',
+      input: { hint: 'status | pause | resume | chat <text> | self [text] | help' },
+      handler: invocation => ctx.anima.dispatchCommand(invocation),
+    }), 'anima.command')
+  })
+
   ctx.tools.register(defineTool({
     name: PING_TOOL,
     description: 'Check that the Anima plugin is loaded. Returns "pong", echoing the optional message.',

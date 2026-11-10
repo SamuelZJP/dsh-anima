@@ -165,7 +165,7 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 
 ### Core behavior set (platform-independent)
 
-- `say(text, replyTo?)` — speak in the current conversation; the adapter bound to the session sends it.
+- `<platform>_say(text, replyTo?)` — speak in the current conversation. Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
 - `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged.
 - `open_conversation(channel, intent)` — start or resume a chat (Self session only).
 - `channels_find(filter)` — list reachable channels with relationship notes, last contact, typical active hours.

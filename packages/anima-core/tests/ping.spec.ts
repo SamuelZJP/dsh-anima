@@ -5,13 +5,14 @@ import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import { expect, it, onTestFinished } from 'vitest'
 import * as animaCore from '../src/index.ts'
+import { tempDataDir } from './helpers.ts'
 
 async function setup(): Promise<Context> {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore)
+  await ctx.plugin(animaCore, { dataDir: tempDataDir() })
   return ctx
 }
 
@@ -47,7 +48,7 @@ it('unregisters the tool when the plugin is disposed', async () => {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  const fiber = await ctx.plugin(animaCore)
+  const fiber = await ctx.plugin(animaCore, { dataDir: tempDataDir() })
   expect(ctx.tools.get(animaCore.PING_TOOL)).toBeDefined()
   await fiber.dispose()
   expect(ctx.tools.get(animaCore.PING_TOOL)).toBeUndefined()

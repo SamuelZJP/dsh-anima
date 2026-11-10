@@ -121,6 +121,18 @@ This boots the web app and prints `dsh web: http://127.0.0.1:3080/?token=…`. O
   - `tool/result` with content `pong: hello`, `isError: false`
 - The model reported `pong: hello` back. A root-level tool is therefore visible in the web app's `standard` preset.
 
+**Phase 1 demo (2026-11-09) — exit check passed.** Booted with a one-off overlay that sets the express per-channel quota to 2 per 10 min:
+
+```bash
+pnpm dsh --profile anima-dev --patch <scratch>/low-quota.yml --no-open
+```
+
+1. `/anima status` (typed in an existing web session) listed `local_say`, the Self id `anima-self-9ab1…`, the owner conversation id `anima-c-cd66…`, and both quotas.
+2. `/anima chat Hi, it's Sam…` created "Anima · Owner (local)" with the `anima-conversation` preset. She replied by calling `local_say`, and `~/.anima/local/outbox.jsonl` got the line.
+3. Asked for three separate messages, she called `local_say` three times in one step. The first (the 2nd in the window) was sent; the other two returned `Error: anima/over-quota: limit of 2 per 10 min in this channel reached for local_say; next slot in about 10 min. Do not retry now.` She stopped and told the owner she would send the rest later.
+4. `/anima pause`, then a request to speak: the call was refused with `anima/paused`, and she said she would wait. `/anima resume` lifted it.
+5. `/anima self <text>` created "Anima · self" (`anima-self` preset, cwd `~/.anima/workspace`), and she answered in her inner voice without any say tool.
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -163,7 +175,7 @@ export function apply(ctx: Context) {
   - Under the PTC executor, tools are reachable only through `run_code`.
 - **Unit test:** `packages/anima-core/tests/ping.spec.ts`. Section 9 describes the setup.
 
-## 5. Defining an agent preset (Read)
+## 5. Defining an agent preset (Verified in Phase 1)
 
 A preset is one plugin row of `@deepseek-ai/dsh-agent-preset` whose `plugins` are ordinary Cordis entries mounted into each agent of that preset. `packages/bundle/web-app/presets/minimal.patch.yml` is the smallest real example.
 
@@ -192,9 +204,15 @@ A preset is one plugin row of `@deepseek-ai/dsh-agent-preset` whose `plugins` ar
   - `agentPresets.select(agent, id)` works only while the session is blank. After the first turn it throws `agent-preset/locked`.
   - The selection is logged as the session event `agent-preset/selected`.
 - **Edits apply to new Agents only:** a running Agent keeps its composition.
+- **Verified (Phase 1):**
+  - Anima ships `bundle/presets/conversation.patch.yml` and `self.patch.yml` as extra entries of the bundle's `dsh.bundle.patch` list. Their ids are `anima-conversation` and `anima-self`.
+  - A child row may name a **package subpath export**: `@anima/core/persona` resolves through the bundle's dependencies.
+  - DSH packages named in child rows (`dsh-time-context`, `dsh-compaction-basic`) resolve from the installation.
+  - Anima's persona row registers `PERSONA_PREFIX_SECTION` with `complete: true` in the agent scope, the same way `dsh-persona` does. The constitution then replaces DSH's coding-agent prompt, but tools are still declared.
+  - The web UI labels such a session with the preset's `name` ("Anima conversation").
 - In the web app, DSH disables the host-level agent tool rows and moves them into its presets (`web-app/cordis.patch.yml`, "the agent plane moves behind agent presets"). Anima's `conversation` and `self` presets must list every DSH tool they want, e.g. `@deepseek-ai/dsh-tool-fs` with its config. Copy the rows from `presets/standard.patch.yml`.
 
-## 6. Creating a session and enqueuing a message from a plugin (Read)
+## 6. Creating a session and enqueuing a message from a plugin (Verified in Phase 1)
 
 This is how `anima-life` will deliver stimuli. Reference implementations:
 - `packages/schedule/schedule/src/runtime.ts`: a durable delivery into a new or existing session.
@@ -220,6 +238,13 @@ if ('error' in found && found.error.code === 'session/not-found') {
 - Session ids are arbitrary strings; DSH's own use the prefixes `session-` and `webhook-`. Anima will use `anima-<hash>`. DSH ids are branded `SessionId` (`brandString<SessionId>(…)` from `@deepseek-ai/dsh-brand`).
 - **Alternative:** raw `ctx.agents.create({ sessionId, meta: { cwd, agentPreset }, setup: agentCtx => ctx.agentPresets.mount(agentCtx, id) })`. The Agent is then owned by our plugin and dies when it unloads, and existing sessions need `ctx.agents.resume`. Prefer the controller.
 
+- **Verified (Phase 1):** `@anima/life` (`src/service.ts`, `DshSessionHost`) works as follows:
+  - It resolves first and creates on `session/not-found` with `{ sessionId, cwd, agentPreset }`. It then resolves again and titles the session with `sessionTitle.rename`.
+  - The requested id was kept, e.g. `anima-c-cd66…`.
+  - The session log starts with `session`, `permission/preset`, `sandbox/mode`, `approval/policy` and `session/title`. A separate `agent-preset/selected` event is **not** written when the preset is passed at create, yet the UI shows the preset.
+  - Sessions whose `cwd` is not a registered workspace (`~/.anima/conversations`, `~/.anima/workspace`) are listed under **"Ungrouped"** in the sidebar.
+  - Logs are stored under `~/.dsh/sessions/--home-<user>-.anima-conversations--/<id>/`.
+
 ### Deliver a message
 
 The Agent methods are in `packages/core/agent/src/runtime-types.ts:251-270`:
@@ -244,10 +269,11 @@ if (!(await ctx.sessions.flush(agent.session))) throw …          // durable ac
 ```
 
 - **Source kind:** declare our own `MessageSourceMap` kind (`packages/llm/llm/src/message.ts:110`). There is no shared "plugin" kind. `packages/context/time-context/src/index.ts:15` shows the declaration pattern.
+- **Verified (Phase 1):** `followup` plus `sessions.flush` wakes an idle agent and starts a turn. The log records `agent/inbox/spliced`, then `user/message` with `source: { kind: 'anima-stimulus', stimulus: 'message', form: 'notice', summary }`.
 - **How it renders and sorts:**
   - A non-`user` kind renders in the web chat as a context row, not a user bubble.
   - It does not bump the session's recency in the sidebar; only `kind: 'user'` does.
-  - Decide per stimulus type in Phase 1.
+  - Phase 1 delivers every stimulus as `anima-stimulus` / `notice`. The web chat renders it as an "Execution requested" row, not a user bubble.
 - **Logging:** inbox insertion is logged as `agent/inbox/spliced`, and the claimed message as `user/message`. Delivered content is therefore model-visible and logged by construction.
 - **Restart:** a restored inbox does not wake an idle Agent. Schedule removes the message and calls `followup` again (`runtime.ts:322-337`).
 - **Archived sessions refuse model steps.** Check `workspaceRegistry.archivedSessionIds` before delivering.
@@ -261,9 +287,10 @@ if (!(await ctx.sessions.flush(agent.session))) throw …          // durable ac
 ### Service injection and sidebar
 
 - **`inject`:** `['agents', 'sessions', 'sessionController']`. Optional: `workspaceRegistry`, `sessionTitle`, `permissionPresets`.
+- **Commands in a blank session:** a slash command typed into a brand-new web session that has no turn yet showed no result in the UI. Run `/anima …` from a session that has had a turn.
 - **Sidebar:** plugin-created sessions appear live, listed under their workspace or "Ungrouped". To attach one to a workspace, pass `workspaceId` or call `workspaceRegistry.resolveByPath(cwd)?.attachSession(id)`. Blank sessions (no turn yet) are hidden until selected.
 
-## 7. Hooking `tools/pre-execute` (Read)
+## 7. Hooking `tools/pre-execute` (Verified in Phase 1)
 
 This is the place for the policy gate (DESIGN §10).
 
@@ -285,6 +312,16 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
 - **What the model sees on deny:** exactly `Error: <reason>`. `info` (`{name, code, reason?}`) reaches only the durable log and UI.
   - **Anima convention:** `reason = "<code>: <hint>"`, so she gets both (DESIGN §10).
   - To fully control the model-facing content, use `tools/post-execute` returning `{kind:'block', feedback}`.
+- **Verified (Phase 1):**
+  - A deny from the root listener reaches the model as exactly `Error: anima/over-quota: <hint>`.
+  - The durable `tool/result` carries `error: { name: 'AnimaPolicy', code, reason }`.
+  - When one step holds several calls, each call passes the hook in order, so a quota mid-batch refuses the later calls.
+  - `next()` returns `{ kind: 'allow' }` when no later listener decides. Anima counts quota usage only then.
+  - `ctx.tools.guard` is also installed for the pause switch. The pre-execute listener checks pause first, so the model sees `anima/paused` with `info.code`.
+- **Conditional tools (`register(def, { when })`), Verified:**
+  - `when` runs at step preparation with `{ agent, modelSelection, signal }`, and Anima uses it for per-session scoping.
+  - A tool registered with `when` is executable **only with a step `toolSet`** (`ToolsService.executable`, `packages/core/tools/src/index.ts:251`).
+  - In tests, build one with `ctx.tools.resolve({ agent, modelSelection, signal })` (a stand-in `{ id }` agent works) and pass it to `executeToolFixture`. Read admitted tools with `toolSet.view(agent)`; `view(undefined)` sees nothing scoped to the agent.
 - **PTC:** `run_code` and each of its sub-calls pass through the hook; sub-calls have `exec.parent` set. Skip the outer `run_code` when gating behaviors.
 - **Final denial:** `ctx.tools.guard(exec => reason | undefined)` is monotonic; later listeners cannot override it. Use it for the global pause switch.
 - **References:**
@@ -298,10 +335,12 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
   - `ctx.systemPrompt.section({ name, order, text })` adds to the system prompt. Use it for the static constitution.
   - `ctx.systemPrompt.context({ name, order, text })` adds dynamic context. It becomes a durable user-role snapshot, re-sent only when the text changes. Use it for mood, state and needs.
   - The `agent/pre-step` waterfall (`runtime-types.ts:350`) can append `UserMessage`s to `{kind:'enter', messages}`, and they are logged as `user/message`. Use it for per-turn memory recall. Pattern: `packages/context/time-context/src/index.ts`.
-- **Owner commands:** `ctx.commands.register({ name, description, input?, handler })` (`packages/interaction/commands/src/index.ts`).
+- **Owner commands (Verified in Phase 1):** `ctx.commands.register({ name, description, input?, handler })` (`packages/interaction/commands/src/index.ts`).
   - Names must match `^[a-z][a-z0-9_-]*$`, so `/anima status` is one command `anima` that parses its own subcommand from `inv.rawInput`.
   - Commands never reach the model. Runs are logged as `command/run` and `command/done`.
   - Template: `packages/compaction/command-compact/src/index.ts`.
+  - Verified with `/anima status|pause|resume|chat|self`. A `{ kind: 'success', text }` result renders inline in the session where it was typed, and the log records `command/run` and `command/done`.
+  - `rawInput` keeps the leading space after the name.
 - **Non-model-visible plugin state:** a typed `SessionEventMap` extension or `appendPluginRecord` (ignorable `plugin:*` events), `packages/core/session/src/index.ts:495`. Anima's own durable data lives in `~/.anima/`.
 
 ## 9. Testing (Verified for tools)
@@ -326,13 +365,14 @@ Re-check these on every DSH upgrade.
 | --- | --- | --- | --- |
 | `dsh.bundle` manifest, `dsh plugin add`, `--from-default-profile`, `--dump-config` | `@deepseek-ai/dsh` CLI | install | Verified |
 | `ctx.tools.register`, `defineTool` | `dsh-tools` | every behavior | Verified |
-| `tools/pre-execute`, `PreToolDecision`, `ctx.tools.guard` | `dsh-tools` | policy gate | Read |
-| `@deepseek-ai/dsh-agent-preset` rows, `dsh-persona` | `dsh-agent-preset`, `dsh-persona` | conversation / self presets | Read |
-| `sessionController.create` / `resolveAgent` | `dsh-api-session-controller` | session routing | Read |
-| `Agent.followup` / `steer` / `inject`, `createUserMessage`, `MessageSourceMap` | `dsh-agent`, `dsh-llm` | stimulus delivery | Read |
-| `ctx.sessions.flush`, `session/event` | `dsh-session` | durability, observation | Read |
-| `ctx.systemPrompt.section` / `context`, `agent/pre-step` | `dsh-system-prompt`, `dsh-agent` | persona, state, memory injection | Read |
-| `ctx.commands.register` | `dsh-commands` | owner commands | Read |
+| `tools/pre-execute`, `PreToolDecision`, `ctx.tools.guard` | `dsh-tools` | policy gate | Verified |
+| `register(def, { when })`, `tools.resolve`, `ResolvedToolSet.view` | `dsh-tools` | per-session tool scoping, tests | Verified |
+| `@deepseek-ai/dsh-agent-preset` rows, persona section names from `dsh-system-prompt` | `dsh-agent-preset`, `dsh-system-prompt` | conversation / self presets | Verified |
+| `sessionController.create` / `resolveAgent`, `sessionTitle.rename`, `workspaceRegistry.archivedSessionIds` | `dsh-api-session-controller`, `dsh-session-title`, `dsh-workspace` | session routing | Verified (archived check not exercised live) |
+| `Agent.followup`, `createUserMessage`, `boundContextSummary`, `MessageSourceMap` | `dsh-agent`, `dsh-llm` | stimulus delivery | Verified (`steer` / `inject` still Read) |
+| `ctx.sessions.flush` | `dsh-session` | durability | Verified (`session/event` still Read) |
+| `ctx.systemPrompt.section` (agent scope, `complete`) | `dsh-system-prompt` | persona | Verified (`context`, `agent/pre-step` still Read) |
+| `ctx.commands.register` | `dsh-commands` | owner commands | Verified |
 | `executeToolFixture` | `dsh-tool-testkit` (`@internal`) | tests | Verified |
 
 ## 11. Known gaps and risks
@@ -342,3 +382,6 @@ Re-check these on every DSH upgrade.
 - **pnpm version for `dsh plugin`:** `dsh plugin` runs whichever `pnpm` is on PATH inside the profile directory. On this machine that is corepack's default (12.x), not the workspace's 11.28.5. It worked, but watch for lockfile differences.
 - **Pre-stable APIs:** everything in section 10 marked Read can change between DSH releases.
 - **Session recency:** sessions fed by a custom source kind do not rise in the sidebar's recency order (section 6).
+- **Session-log upload is on in `anima-dev`:** the Phase 1 demo log shows `session-log-deepseek/delivery-accepted` events. Turn it off before real people talk to her (first bullet above).
+- **Global tools leak into Anima sessions:** her conversation session was offered `anima_ping` (root-level Phase 0 probe) and DSH's global `working_directory` beside `local_say`. Harmless in Phase 1. Restrict them per preset (`agent.ctx.tools.restrict`) or drop `anima_ping` when it matters.
+- **`--patch` needs `--profile`:** `dsh --patch x.yml anima-dev` fails with "--profile <name> is required"; use `dsh --profile anima-dev --patch x.yml`.

@@ -1,6 +1,6 @@
 {
   "name": "@anima/core",
-  "description": "Anima core: self state, persona prompt, policy gate and owner commands (Phase 0: anima_ping only)",
+  "description": "Anima core: behaviors, policy gate, persona prompt and owner commands",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,17 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./persona": {
+      "types": "./lib/persona.d.ts",
+      "default": "./lib/persona.js"
+    },
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
-  "files": ["lib", "locale"],
+  "files": [
+    "lib",
+    "locale"
+  ],
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
@@ -24,7 +31,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-commands": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
@@ -32,6 +42,9 @@
     "@deepseek-ai/dsh-system-prompt": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tool-testkit": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "@deepseek-ai/dsh-commands": "0.2.2-rc.1",
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@deepseek-ai/dsh-agent": "0.2.2-rc.1"
   }
 }

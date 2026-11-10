@@ -6,19 +6,30 @@
   "type": "module",
   "exports": {
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./presets/*.yml": "./presets/*.yml",
     "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
-  "files": ["cordis.patch.yml", "locale"],
+  "files": [
+    "cordis.patch.yml",
+    "presets",
+    "locale"
+  ],
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0"
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/conversation.patch.yml",
+        "./presets/self.patch.yml"
+      ]
     }
   },
   "dependencies": {
-    "@anima/core": "workspace:*"
+    "@anima/adapter-local": "workspace:*",
+    "@anima/core": "workspace:*",
+    "@anima/life": "workspace:*"
   }
 }

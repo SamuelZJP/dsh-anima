@@ -1,5 +1,9 @@
-# Anima bundle layer. Root-level rows register into DSH's global layer, so
-# every agent preset in the profile sees their tools.
+# Anima bundle layer. Root-level rows register into DSH's global layer; Anima
+# behaviors hide themselves outside Anima sessions (tool `when` conditions).
 - insert:
     - id: anima-core
       name: '@anima/core'
+    - id: anima-life
+      name: '@anima/life'
+    - id: anima-adapter-local
+      name: '@anima/adapter-local'
