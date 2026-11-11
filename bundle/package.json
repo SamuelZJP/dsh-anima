@@ -37,6 +37,7 @@
     "@anima/adapter-qq": "workspace:*",
     "@anima/core": "workspace:*",
     "@anima/life": "workspace:*",
-    "@anima/memory": "workspace:*"
+    "@anima/memory": "workspace:*",
+    "@anima/page": "workspace:*"
   }
 }

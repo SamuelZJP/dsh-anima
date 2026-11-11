@@ -98,7 +98,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
   if (saved !== undefined) client.setCookies(saved.cookies)
   const api = new BiliApi(client)
   const counts = { views: 0, viewsFailed: 0, watched: 0 }
-  const login = { pending: undefined as undefined | { key: string; until: number }, lastResult: undefined as string | undefined }
+  const login = { pending: undefined as undefined | { key: string; until: number; svg: string }, lastResult: undefined as string | undefined }
   let disposed = false
   let qrRoute: (() => Promise<void>) | undefined
   ctx.effect(() => () => { disposed = true }, 'anima-adapter-bili.lifetime')
@@ -274,9 +274,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
       switch (verb) {
         case 'login': return loginCommand()
         case 'logout': {
-          const removed = store.remove()
-          client.clearLogin()
-          refreshToken = undefined
+          const { removed } = await core.ownerAction('bili.logout', {}, 'command') as { removed: boolean }
           return { kind: 'success', text: removed ? 'Logged out: her Bilibili cookies are deleted.' : 'She was not logged in.' }
         }
         case '':
@@ -289,24 +287,78 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
     },
   })
 
-  async function loginCommand() {
-    if (login.pending !== undefined && Date.now() < login.pending.until) return { kind: 'error' as const, text: 'A QR login is already waiting; scan it, or wait for it to expire (3 min).' }
+  /**
+   * Start a QR login (command and page share it).
+   * @param serve - also serve the QR on a one-time link (the command's way; the page shows it inline).
+   * @throws {AnimaError} `anima/bili-login-pending` while one waits.
+   */
+  async function beginLogin(serve: boolean): Promise<{ svg: string; svgPath: string; text: string; link: string | undefined; expiresAt: number }> {
+    if (login.pending !== undefined && Date.now() < login.pending.until) throw new AnimaError('anima/bili-login-pending', 'A QR login is already waiting; scan it, or wait for it to expire (3 min).')
     const pending = await startLogin(client)
     const svgText = qrSvg(pending.qr)
     const svg = join(dir, 'login-qr.svg')
     writeFileSync(svg, svgText, { mode: 0o600 })
-    login.pending = { key: pending.key, until: Date.now() + QR_WAIT_MS }
+    login.pending = { key: pending.key, until: Date.now() + QR_WAIT_MS, svg: svgText }
     login.lastResult = 'waiting for the scan'
-    const link = serveQr(svgText)
+    const link = serve ? serveQr(svgText) : undefined
     ctx.logger.info(`anima bili: scan this QR with the Bilibili app on her account (also saved as ${svg}${link === undefined ? '' : ` and served at ${link}`}):\n${pending.text}`)
     void pollUntilDone(pending.key)
+    return { svg: svgText, svgPath: svg, text: pending.text, link, expiresAt: login.pending.until }
+  }
+
+  // Owner surface shared with the Anima page (DESIGN §12). Cookies are never shown.
+  core.providePlatform({
+    platform: 'bili',
+    title: 'Bilibili',
+    view: () => {
+      const { risk, login: who } = client
+      const backingOff = risk.until !== undefined && Date.now() < risk.until
+      const waiting = login.pending !== undefined && Date.now() < login.pending.until
+      return {
+        health: backingOff ? 'warn' : who.isLogin ? 'ok' : 'off',
+        summary: statusLines()[0]!.replace(/^Bilibili: /, ''),
+        details: {
+          loggedIn: who.isLogin,
+          uname: who.uname ?? null,
+          mid: who.mid ?? null,
+          lastLogin: login.lastResult ?? null,
+          pendingQr: waiting ? { svg: login.pending!.svg, expiresAt: login.pending!.until } : null,
+          risk: { backingOffUntil: backingOff ? risk.until : null, hits: risk.hits, lastPath: risk.lastPath ?? null },
+          traffic: { requests: client.counts.requests, failures: client.counts.failures, ...counts },
+          closeView: config.closeView.enabled,
+        },
+      }
+    },
+    actions: {
+      login: async () => {
+        const started = await beginLogin(false)
+        return { svg: started.svg, expiresAt: started.expiresAt }
+      },
+      logout: () => {
+        const removed = store.remove()
+        client.clearLogin()
+        refreshToken = undefined
+        return { removed }
+      },
+    },
+  })
+
+  async function loginCommand() {
+    let started: Awaited<ReturnType<typeof beginLogin>>
+    try {
+      started = await core.ownerAction('bili.login-link', {}, 'command') as Awaited<ReturnType<typeof beginLogin>>
+    } catch (error: unknown) {
+      return { kind: 'error' as const, text: message(error).replace(/^anima\/bili-login-pending: /, '') }
+    }
+    const { svgPath: svg, link, text: qrText } = started
     const head = 'Scan the QR with the Bilibili app, logged in to HER account, and confirm on the phone. It expires in 3 minutes.'
     const tail = 'Check the result with /anima bili status.'
     // The web UI shows command output as short, line-spaced plain text, where a
     // text QR cannot scan; a page the browser renders as an image can.
     if (link !== undefined) return { kind: 'success' as const, text: [head, `Open this in your browser: ${link}`, `(Also saved as ${svg}.) ${tail}`].join('\n') }
-    return { kind: 'success' as const, text: [head, pending.text, `If it does not scan, open ${svg} instead. ${tail}`].join('\n') }
+    return { kind: 'success' as const, text: [head, qrText, `If it does not scan, open ${svg} instead. ${tail}`].join('\n') }
   }
+  core.addOwnerAction('bili.login-link', () => beginLogin(true))
 
   /**
    * Serve the pending QR on DSH's webserver, when this host has one, at a

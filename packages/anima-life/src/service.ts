@@ -8,7 +8,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, channelKey, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, writeJson } from '@anima/core'
+import { AnimaError, channelKey, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, stringArg, writeJson } from '@anima/core'
 import type {} from '@anima/core'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -302,7 +302,7 @@ export class AnimaLife extends Service {
       name: 'heartbeat',
       usage: 'heartbeat — run a heartbeat now instead of at the scheduled time',
       run: async () => {
-        await this.beat()
+        await core.ownerAction('heartbeat', {}, 'command')
         return { kind: 'success', text: `Heartbeat delivered to the triage session of ${core.dayKey()}.` }
       },
     })
@@ -310,7 +310,7 @@ export class AnimaLife extends Service {
     core.addSubcommand({
       name: 'outbox',
       usage: 'outbox [cancel <id>] — list her held initiated messages, or cancel one before it goes out',
-      run: (args) => {
+      run: async (args) => {
         const [verb = '', id = ''] = args.split(/\s+/)
         if (verb === '') {
           const held = this.outbox.list()
@@ -318,9 +318,22 @@ export class AnimaLife extends Service {
           return { kind: 'success', text: held.map(m => `${m.id} → ${m.display} in ${Math.max(0, Math.round((m.sendsAt - Date.now()) / 1000))} s (intent ${m.intentId}): ${m.text}`).join('\n') }
         }
         if (verb.toLowerCase() !== 'cancel' || id === '') return { kind: 'error', text: 'Usage: /anima outbox [cancel <id>]' }
-        return this.outbox.cancel(id) ? { kind: 'success', text: `Cancelled ${id.toLowerCase()}.` } : { kind: 'error', text: `No message ${id} in the outbox.` }
+        const { cancelled } = await core.ownerAction('outbox.cancel', { id }, 'command') as { cancelled: boolean }
+        return cancelled ? { kind: 'success', text: `Cancelled ${id.toLowerCase()}.` } : { kind: 'error', text: `No message ${id} in the outbox.` }
       },
     })
+
+    // Owner surface shared with the Anima page (DESIGN §12).
+    core.addOwnerView('outbox', () => ({
+      delaySeconds: this.config.outbox.delaySeconds,
+      held: this.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, intentId: m.intentId, text: m.text, sendsAt: m.sendsAt })),
+    }))
+    core.addOwnerAction('outbox.cancel', args => ({ cancelled: this.outbox.cancel(stringArg(args, 'id')) }))
+    core.addOwnerAction('heartbeat', async () => {
+      await this.beat()
+      return { day: core.dayKey() }
+    })
+    core.addStatusPart('life', () => this.statusPart())
 
     this.registerBehaviors()
 
@@ -408,7 +421,24 @@ export class AnimaLife extends Service {
       if (stimulus.sender.isOwner) this.report(this.tracker.onOwnerMessage(key))
       this.save()
     }
-    return this.router.deliver(stimulus, before, wake)
+    return this.routed(stimulus, before, wake)
+  }
+
+  /** Deliver through the router and record each wake in the activity log (DESIGN §12). */
+  private async routed(stimulus: Stimulus, before?: (agent: Agent) => void, wake = wakes(stimulus)): Promise<string> {
+    const sessionId = await this.router.deliver(stimulus, before, wake)
+    if (wake) {
+      const core = this.ctx.anima
+      const channel = 'channel' in stimulus && stimulus.channel !== undefined ? channelKey(stimulus.channel) : undefined
+      core.recordActivity({
+        type: 'wake',
+        stimulus: stimulus.type === 'heartbeat' ? `heartbeat-${stimulus.to}` : stimulus.type,
+        session: core.describeSession(sessionId)?.kind ?? 'unknown',
+        sessionId,
+        ...channel === undefined ? {} : { channel },
+      })
+    }
+    return sessionId
   }
 
   /**
@@ -473,7 +503,7 @@ export class AnimaLife extends Service {
     const spoke = this.file.lastSpoke[batch.channelKey]
     const text = batchText(batch, lines, spoke === undefined ? undefined : formatLocal(spoke))
     const model = groupTriageModel(this.config) ?? core.modeConfig('day').triageModel
-    await withTimeout(this.router.deliver({ type: 'group-batch', day, batch: batch.id, channel: batch.channel, text, ts: now }, agent => {
+    await withTimeout(this.routed({ type: 'group-batch', day, batch: batch.id, channel: batch.channel, text, ts: now }, agent => {
       this.host.selectModel(agent, model)
     }), DELIVERY_TIMEOUT_MS, 'batch delivery to the group-triage session')
     return true
@@ -597,7 +627,7 @@ export class AnimaLife extends Service {
       const ask = mode === 'night'
         ? canConsolidate ? 'You are asleep. Call rest(until?) to go back to sleep, or memory_consolidate() to sort your memories first.' : 'You are asleep. Call rest(until?) to go back to sleep.'
         : 'Decide: rest(until?) to keep resting, or heartbeat_act(reason) to get up and act now.'
-      await withTimeout(this.router.deliver({ type: 'heartbeat', to: 'triage', day, text: `${report}\n\n${ask}`, ts: now }, agent => {
+      await withTimeout(this.routed({ type: 'heartbeat', to: 'triage', day, text: `${report}\n\n${ask}`, ts: now }, agent => {
         this.host.selectModel(agent, core.modeConfig(mode).triageModel)
       }), DELIVERY_TIMEOUT_MS, 'heartbeat delivery to the triage session')
     } finally {
@@ -621,7 +651,7 @@ export class AnimaLife extends Service {
       const key = `${channel.platform}:${channel.account}:${channel.kind}:${channel.id}`
       return { key, display: channel.display, mayInitiate: core.mayInitiate(key), lastContact: this.file.lastContact[key] }
     })
-    const notes = [...this.reportLines].flatMap(provider => provider())
+    const notes = [core.selfModelReportLine(), ...[...this.reportLines].flatMap(provider => provider())]
     if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`)
     return buildReport({
       time: formatStamp(now), phase: core.phase(now), mode: core.mode(now),
@@ -642,7 +672,7 @@ export class AnimaLife extends Service {
     this.save()
     const report = this.lastReport === '' ? this.reportText(now, true) : `${this.lastReport}\n${this.reportText(now, true).split('\n').filter(line => line.startsWith('Test clock:')).join('\n')}`.trimEnd()
     const text = `${report}\n\nYou woke up wanting to: ${reason}\nAct on it with your tools if you still want to. When you are done, call rest(until?).`
-    await this.router.deliver({ type: 'heartbeat', to: 'self', day: core.dayKey(now), text, ts: now }, agent => {
+    await this.routed({ type: 'heartbeat', to: 'self', day: core.dayKey(now), text, ts: now }, agent => {
       this.host.selectModel(agent, core.modeConfig(core.mode(now)).actionModel)
     })
   }
@@ -824,7 +854,7 @@ export class AnimaLife extends Service {
         this.file.counts.intents += 1
         this.file.lastContact[args.channel] = now
         this.save()
-        await this.router.deliver({ type: 'intent', channel, intentId, intent: args.intent, context: args.context, ts: now })
+        await this.routed({ type: 'intent', channel, intentId, intent: args.intent, context: args.context, ts: now })
         return { delivered: true, intentId }
       },
     }), { effect: 'initiate', sessions: ['self'], target: args => typeof args.channel === 'string' ? args.channel : undefined })
@@ -909,6 +939,26 @@ export class AnimaLife extends Service {
         return { silent: true }
       },
     }), { effect: 'internal', sessions: ['conversation'] })
+  }
+
+  private statusPart(): Record<string, unknown> {
+    const { counts, nextHeartbeatAt, lastHeartbeatAt, intents } = this.file
+    const core = this.ctx.anima
+    return {
+      nextHeartbeatAt: nextHeartbeatAt ?? null,
+      nextHeartbeat: nextHeartbeatAt === undefined ? null : formatLocal(nextHeartbeatAt),
+      lastHeartbeat: lastHeartbeatAt === undefined ? null : formatLocal(lastHeartbeatAt),
+      selfActing: this.file.awaitingSelfRest,
+      counts,
+      intents: [...intents.pending, ...intents.active].map(i => ({ id: i.id, display: i.display })),
+      outboxHeld: this.outbox.list().length,
+      groupsToday: this.file.groups[core.dayKey()] ?? {},
+      sessions: {
+        self: this.router.selfId,
+        triage: this.router.triageId(core.dayKey()),
+        conversations: this.router.known().map(({ sessionId, channel }) => ({ sessionId, display: channel.display, channelKey: channelKey(channel) })),
+      },
+    }
   }
 
   private statusLines(): string[] {

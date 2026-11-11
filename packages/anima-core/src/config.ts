@@ -142,6 +142,15 @@ export interface Config {
   modes: Record<Mode, ModeConfig>
   /** Rules for starting conversations. */
   initiate: InitiateConfig
+  /** Her self-model (DESIGN §9); the daily cap on `self_note` is a quota. */
+  selfModel: {
+    /** Most notes she may keep. */
+    maxEntries: number
+    /** Longest note, in characters. */
+    maxEntryChars: number
+    /** Characters of the short digest in conversation prompts. */
+    digestChars: number
+  }
 }
 
 /** Default quotas: modest per-channel speech, a daily global ceiling. */
@@ -154,6 +163,8 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   // Bilibili browsing: calls per hour, and close views (tier 2) per day (DESIGN §11).
   { platform: 'bili', per: 'platform', limit: 60, windowMinutes: 60 },
   { behavior: 'bili_view_closely', per: 'global', limit: 3, windowMinutes: 24 * 60 },
+  // Her self-model changes slowly: a few edits per day (DESIGN §9).
+  { behavior: 'self_note', per: 'global', limit: 3, windowMinutes: 24 * 60 },
 ]
 
 /** Default limits: a close view looks at no more than 12 frames of a video up to 20 minutes. */
@@ -255,6 +266,11 @@ export const Config: z<Config> = z.object({
       channels: z.array(z.string()).default([]),
     }),
   }).description('Rules for starting conversations.'),
+  selfModel: z.object({
+    maxEntries: z.natural().min(1).default(40).description('Most self-model notes she may keep.'),
+    maxEntryChars: z.natural().min(20).default(200).description('Longest self-model note, in characters.'),
+    digestChars: z.natural().min(0).default(600).description('Characters of the short self-model digest in conversation prompts.'),
+  }).description('Her self-model (DESIGN §9). The daily cap on self_note is a quota rule.'),
 }) as z<Config>
 
 /** Validated config with `dataDir` resolved to an absolute path and times parsed. */

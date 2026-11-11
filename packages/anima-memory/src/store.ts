@@ -399,6 +399,47 @@ export class MemoryStore {
     return (rows as unknown as MemoryRow[]).map(toMemory)
   }
 
+  /**
+   * Owner browsing (the Anima page): filter by text, scope and status, newest first.
+   * @param options.query - substring of the text, scope or person.
+   * @param options.scope - an exact scope, or a prefix ending in `:` (e.g. `private:`).
+   * @param options.status - one status, or `all`.
+   * @returns one page and the total that match.
+   */
+  browse(options: { query?: string | undefined; scope?: string | undefined; status?: MemoryStatus | 'all' | undefined; limit?: number; offset?: number } = {}): { memories: Memory[]; total: number } {
+    const where: string[] = []
+    const params: string[] = []
+    if (options.query !== undefined && options.query !== '') {
+      where.push("(text LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\' OR person_id LIKE ? ESCAPE '\\')")
+      const like = `%${options.query.replace(/[\\%_]/g, c => `\\${c}`)}%`
+      params.push(like, like, like)
+    }
+    if (options.scope !== undefined && options.scope !== '') {
+      if (options.scope.endsWith(':')) {
+        where.push('substr(scope, 1, ?) = ?')
+        params.push(String(options.scope.length), options.scope)
+      } else {
+        where.push('scope = ?')
+        params.push(options.scope)
+      }
+    }
+    const status = options.status ?? 'active'
+    if (status !== 'all') {
+      where.push('status = ?')
+      params.push(status)
+    }
+    const sql = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`
+    const total = Number((this.db.prepare(`SELECT count(*) AS n FROM memories ${sql}`).get(...params) as { n: number }).n)
+    const rows = this.db.prepare(`SELECT * FROM memories ${sql} ORDER BY id DESC LIMIT ? OFFSET ?`)
+      .all(...params, options.limit ?? 50, options.offset ?? 0) as unknown as MemoryRow[]
+    return { memories: rows.map(toMemory), total }
+  }
+
+  /** Distinct scopes with their memory counts. */
+  scopes(): { scope: string; count: number }[] {
+    return this.db.prepare('SELECT scope, count(*) AS count FROM memories GROUP BY scope ORDER BY count DESC').all() as { scope: string; count: number }[]
+  }
+
   /** Counts by status, for status lines. */
   counts(): Record<MemoryStatus, number> {
     const result: Record<MemoryStatus, number> = { active: 0, archived: 0, superseded: 0 }

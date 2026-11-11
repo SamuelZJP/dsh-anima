@@ -312,6 +312,32 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
 
   core.addStatus(() => statusLines(config, client.health, login, counts))
+  // Owner surface shared with the Anima page (DESIGN §12); the access token is never shown.
+  core.providePlatform({
+    platform: PLATFORM,
+    title: 'QQ',
+    view: () => {
+      const { health } = client
+      const ok = login.ready && health.state === 'open' && health.online !== false
+      return {
+        health: ok ? 'ok' : health.state === 'open' ? 'warn' : 'down',
+        summary: statusLines(config, health, login, counts)[0]!.replace(/^QQ: /, ''),
+        details: {
+          url: config.url,
+          account: config.account,
+          nickname: login.nickname ?? null,
+          state: health.state,
+          online: health.online ?? null,
+          lastHeartbeat: health.lastHeartbeat ?? null,
+          connects: health.connects,
+          lastError: health.lastError ?? null,
+          problem: login.problem ?? null,
+          allowlist: { owner: config.owner, users: config.allow.users, groups: config.allow.groups },
+          traffic: { ...counts },
+        },
+      }
+    },
+  })
   life.addReportLine(() => {
     const { health } = client
     if (login.ready && health.state === 'open' && health.online !== false) return []

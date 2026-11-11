@@ -255,6 +255,49 @@ The run found three gate problems, fixed in this phase. Each has tests.
   - ~~the text QR is not scannable in the web UI~~ fixed 2026-11-11: the web UI shows command output as plain text in a `<pre>` (12/18 px lines, at most 260 px tall), where no text QR can scan. `/anima bili login` now serves the SVG on DSH's webserver at a one-time random path (`/anima/bili/qr/<32 hex>.svg`, removed when the login ends or expires) and prints the link. Hosts without a webserver still get the text QR. Checked live: the link opened the QR in the browser;
   - `m6`, a note about herself written in the owner segment, took the owner scope, as the rules say (only `keep: "self"` narrows).
 
+**Phase 6 demo (2026-11-11, self-model and Anima page): exit check passed, after two design fixes during the run.**
+
+**Setup:**
+- A scratch `--patch` overlay set:
+  - `anima-core`: `characterId: anima-p6`, `name: 小鲸鱼`, `dataDir: ~/.anima/test-p6`, `clock: { speed: 8 }`, `approve: [{ behavior: open_conversation }]`
+  - `anima-adapter-local`: `ownerLine: true`
+  - `anima-memory` (last run): `consolidation.fallbackHours: 1`
+- The data dir was seeded with a copy of `test-bili2`'s `memory.db` (SQLite backup) and constitution. The original was left untouched.
+- `clock.start` was moved forward between runs: 2026-12-15, then 2027-03-01, 2027-03-02 07:40 and 16:00.
+- Boot: `pnpm dsh --profile anima-dev --patch <scratch>/p6.yml --no-open`. Local channel only; no QQ or Bilibili traffic.
+- **Evidence:** built-in browser pane screenshots, decoded session logs, `self-model-log.jsonl` and `activity/*.jsonl`. All requests used `deepseek-official/deepseek-flash`.
+
+**The page, live:**
+- **Status:** clock, phase, energy, needs, budget and next heartbeat, refreshing every 5 s.
+- **Memory:** active and **archive**. After the clock moved to 2027-03-01, decay archived m4, m7 and m8 and gisted m5; the archive filter listed them.
+- **Activity:** gate decisions with codes, wakes by stimulus and session kind, tokens, and owner actions. Day 2027-03-02 logged 3 owner actions, all with source `page`.
+- **Approvals:**
+  - a1–a3 (`open_conversation`, forced by `approve`) were approved on the page; a4 was denied on the page. Each answer is logged with source `page`.
+  - After a1, her greeting was held in the Outbox list with a countdown (45 s) and then sent.
+- **Settings:**
+  - Saving `anima-memory` `{ inject: { tokenBudget: 900 } }` wrote the profile patch through `configEditor.edit`.
+  - `"lots"` was refused with the schema error, and nothing was written.
+  - The `anima-core` and `anima-adapter-local` rows were flagged "overridden by a higher layer" (the overlay).
+  - The profile patch was restored byte-for-byte afterwards.
+
+**Self-model:**
+1. **Day 1 (report and tool only).** `self_note` was offered, and Self's logged context had "# Your self-model … No notes yet". She described a new habit in chat but did not note it. Consolidation stored it as `self`-kind memories m9 and m10 instead, as Phase 3 tells it to.
+2. **Fix 1 (owner decision).** A factual report line: "Your self-model: no notes yet. self_note keeps …". It was logged in her Self reports; still no note.
+3. **Fix 2 (owner decision).** Consolidation offers `self_note` for lasting traits, with `self` memories kept for passing thoughts (DESIGN §8, §9).
+4. **Day 2, 21:07.** The owner asked in chat whether she had come to like slower things. In the conversation session she answered, then called `self_note` herself.
+   - Her first call was refused by the tool: `anima/self-model-text … 253 characters`. She shortened it, and **d1** added **n1** [tastes] "I like long uninterrupted stretches — quiet mornings, letting a thing settle before I write about it. I dislike being rushed into an instant answer." Reason: "The owner pointed out I've gotten fonder of slow things; putting it into words made it clear."
+   - The next step's logged context snapshot (seq 125) carried the note under "## tastes".
+5. **Owner revert on the page.** The Persona tab listed n1 and d1. Revert with reason "demo: owner review of her first note" produced **d2** (`by: owner, op: revert, revertOf: d1`) and an activity record `selfmodel.revert` with source `page`. Her next request's context snapshot (seq 136) no longer had a self-model section.
+
+**Issues found and fixed during the run:**
+- **Native dialogs:** the page's `window.prompt` and `window.confirm` were dismissed silently in the desktop browser pane, so Revert did nothing. Revert, Forget, goal Close and Bilibili logout now confirm inline (`Confirm` in `ui.tsx`).
+- **Self-model uptake:** as above (report line, consolidation `self_note`).
+
+**Observed, not changed:**
+- **Stale intents:** Self's report says the owner wrote but not that her conversation replied. Twice Self opened a reply intent the conversation had already answered; the conversation declined one with `stay_silent`, and the owner denied the other.
+- **Decay over gaps:** decay applies the whole gap since its last run to memories created in between. m8, written on 2026-12-15, was decayed as if 33 days old after a clock jump. This only matters across skipped days.
+- **Narrow pane:** at the pane's narrow width the Memory and Changes tables wrap tightly.
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -592,6 +635,80 @@ A fifth Anima preset, `anima-group-triage` (`bundle/presets/group-triage.patch.y
 
 The `tools/pre-execute` listener awaits `BehaviorMeta.facts(args)` before `decide()`, which is allowed because the waterfall is async. A slow fact lookup delays only that call.
 
+## 8e. Phase 6 spike: a plugin page in the web UI (Verified by a live probe)
+
+**Live probe (2026-11-11), Verified.**
+- **Setup:** `@anima/page` with an esbuild-built `lib/client.js` (format below) and one `GET /api/anima/view` route, booted in `anima-dev` with a scratch `--patch` overlay.
+- **Sidebar and page:** the sidebar showed **Anima** below Plugins and Automation tasks, and clicking it opened the page.
+- **Route:** the page's document-relative `fetch('api/anima/view?…')` answered, and its 5 s poll updated the page.
+- **Authentication:** the same URL fetched with `curl` without the browser cookie returned **401**.
+
+An out-of-tree plugin **can** add a sidebar entry and a full page at the pinned tag. There is no user-facing guide for it (`docs/user/develop` covers only Host plugins); the facts below come from package READMEs and source. None of the APIs used is marked `@internal`, but the whole web client is developer preview.
+
+**Examples studied.** At `dsh-v0.2.2-rc.1` only two packages register a sidebar panel: `@deepseek-ai/dsh-client-ui-schedule` ("自动化任务", Automation tasks) and `@deepseek-ai/dsh-client-ui-plugin-manager` (Plugins). The "SSH" and "上下文洞察" pages from the owner's screenshot have no sidebar panel at this tag: `packages/ssh/*` has no client half, and the nearest "context" package, `dsh-experimental-client-ui-stats` (统计视图), is a conversation View, not a panel. They come from a newer DSH or another plugin, so `ui-schedule` is the reference.
+
+### One package, two halves
+
+A package becomes a browser plugin by declaring `dsh.client` in `package.json` and exporting a built bundle at `./client` (`packages/client/modules/README.md`, "Declaring a client plugin"; `docs/subsystems/client-modules.md`, "The scan"):
+
+```json
+"exports": { ".": "./lib/index.js", "./client": "./lib/client.js" },
+"dsh": { "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-layout"] } }
+```
+
+- The **Host half** (`.`) is an ordinary Loader row (here: a row in Anima's bundle patch). `ui-schedule`'s Host half is an empty `apply`.
+- `dsh-client-modules` scans **every active Loader entry** whose package declares `dsh.client`, so a linked bundle's package qualifies like an official one. It serves the bundle under `/plugins/??<pkg>/client.js&rev=…` and adds it to the boot graph `window.__DSH_BOOT__`. A missing `lib/client.js` fails activation with "run `pnpm run build` before launch".
+- `dsh.client.inject` names package rows whose factories must load first. `external` lists extra module requests beyond the platform table.
+
+### Bundle format (what an out-of-tree build must emit)
+
+DSH builds client bundles with its own tsdown preset (`packages/client/tsdown.client.ts`), which is not published. The artifact contract is simple, a CJS body in a factory (`tsdown.client.ts:932-938`):
+
+```js
+window.__ModuleLoader__.load({ id: "<package name>", factory: (require) => {
+var module = { exports: {} }; var exports = module.exports;
+/* CJS bundle body: exports.apply, exports.inject */
+return module.exports; } });
+```
+
+- `require` resolves only the frozen **platform module table** (`packages/client/web/src/platform.ts`): `react`, `react/jsx-runtime`, `react-dom`, `react-dom/client`, `@deepseek-ai/cordis`, `zod`, `@tanstack/react-virtual`, `dsh-client-store`, `dsh-client-ui-slots`, `dsh-client-ui-primitives`, `dsh-client-ui-dockkit`, plus declared rows. Everything else must be inlined. Type-only imports are erased and need nothing at runtime.
+- React is the host's (18). The plugin ships no React.
+- CSS: the preset compiles CSS modules into an injected `<style data-plugin=…>` tag. Without the preset, a plugin injects its own style tag in an effect. Feature styles use the theme's `--dsw-alias-*` tokens (`docs/web-styling.md`).
+
+### Sidebar entry and page
+
+From `ui-schedule/src/client/index.ts:218-246` and `ui-sidebar/README.md`, "Global panel entries":
+
+```ts
+export const inject = ['slots', 'locale']
+export function apply(ctx) {
+  ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: 'anima' }, AnimaPage))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register(
+    { name: 'sidebar.panellist', id: 'anima', order: 30, label: 'Anima' }, AnimaIcon))
+}
+```
+
+- `sidebar.panellist` is a root-scoped list; each `id` selects the component registered under the same key in ui-layout's root-scoped keyed `main` slot. The icon gets `{ size, active }`.
+- `ctx.slots.inject(key, cb)` re-runs the registration whenever the owning slot is (re)declared, and removes it on unload.
+- Tabs inside the page are the plugin's own React state. DSH has no page-tab contract.
+- Live plugin composition: enabling or disabling the row in the Plugins page adds or removes the panel without a reload.
+
+### Talking to the plugin
+
+- **Typed `ctx.remote` is closed to Anima.** Remote namespaces are generated at DSH build time and mounted by the fixed `@deepseek-ai/dsh-api-remotes` assembly ("Adding a Host Remote package is an explicit choice by the Client composition owner", `docs/api-gateway.md`).
+- **Exact Fetch routes are open.** The Host half registers `ctx.connection.fetch.register({ path: '/api/anima/…', methods: ['GET','POST'], requestBody: 'buffered', fetch: (req: Request) => Promise<Response> })` (`packages/client/connection/src/rpc.ts:152-176`; used by `experimental/inspector`, `plugin-manager`, `file-upload`). The route sits behind Connection's Host/Origin checks and browser-cookie authentication, and only owner Peers reach it (others get 403).
+- The browser calls it with a document-relative `fetch('api/anima/…')`, as `experimental/inspector/src/client/plugin.ts:87` does. The session cookie authenticates it.
+- There is no push channel for plugin routes. A page polls, or uses a streaming route.
+- Phase 5's `ctx.webServer.register` QR route is **not** authenticated by Connection. It is fine for a one-time random path, but not for owner data or edits.
+
+### How Anima builds and uses it (Phase 6)
+
+- **Build.** `packages/anima-page/scripts/build-client.mjs` runs esbuild (root dev dependency, with `@types/react@18`): entry `src/client/index.tsx`, `format: 'cjs'`, `bundle`, externals `react`, `react/jsx-runtime`, `react-dom` and `@deepseek-ai/cordis`. The banner and footer are the factory wrapper above. `tsc -p tsconfig.client.json` type-checks the client (`jsx: react-jsx`, DOM lib); the DSH client types it needs are declared locally in `src/client/dsh.ts`.
+- **Styles.** One `<style data-plugin="@anima/page">` injected in an effect, colored with `--dsw-alias-*` tokens, so light and dark themes both work.
+- **Dialogs.** No `window.prompt` or `window.confirm`: the desktop browser pane dismissed them without showing them (Phase 6 demo). Confirmations are inline.
+- **Data.** Each tab polls `GET api/anima/view?name=<view>` (3–15 s) and posts changes to `api/anima/action`; both map to the `anima` service's owner views and actions (DESIGN §12).
+- **Settings.** `ctx.configEditor` is optional (`ctx.inject(['configEditor'], …)`); `edit()` validates the full candidate against the row's schema before writing the profile patch, and the Loader restarts the row.
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
@@ -654,6 +771,11 @@ Re-check these on every DSH upgrade.
 | global `fetch`, `Response.headers.getSetCookie`, `node:crypto` md5, `Readable.fromWeb` | Node 24 built-ins | Bilibili client, WBI, downloads | Verified (Phase 5) |
 | system `ffmpeg` (`select` scene + `showinfo`, `-fps_mode vfr`) | OS binary | frame extraction | Verified (Phase 5) |
 | `ctx.webServer.register({ kind: 'exact', path, resource })`, `getOrigin()` (optional, read with `ctx.get`) | `dsh-host-webserver` | login QR page | Verified (Phase 5 follow-up; typed locally, no dependency added) |
+| `dsh.client` manifest + `./client` export, factory format `window.__ModuleLoader__.load({ id, factory })`, platform module table (`react`, `react/jsx-runtime`, `@deepseek-ai/cordis`) | `dsh-client-modules`, `dsh-client-web` | Anima page browser bundle (esbuild) | Verified (Phase 6 probe and demo) |
+| client slots `sidebar.panellist` (list, `id`, `order`, `label`) and `main` (keyed, `key`), `ctx.slots.inject` / `register` | `dsh-client-ui-slots`, `-ui-sidebar`, `-ui-layout` | sidebar entry and page | Verified (Phase 6; typed locally) |
+| `ctx.connection.fetch.register({ path, methods, requestBody, fetch })` | `dsh-client-connection` (Host half) | owner routes `/api/anima/view`, `/api/anima/action` | Verified (Phase 6; 401 without the browser cookie) |
+| `ctx.systemPrompt.context({ name, order, text: () => string, interpolate, required })` | `dsh-system-prompt` | self-model digest | Verified (Phase 6: logged runtime-context snapshot updates after a note and after a revert) |
+| `ctx.configEditor.entries()`, `configuration()`, `edit(entry, change)`, `documentPath` (optional) | `dsh-config-editor` | Settings tab | Verified in the Phase 6 demo (typed locally) |
 
 ## 12. Known gaps and risks
 

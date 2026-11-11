@@ -31,11 +31,18 @@ export const SAY_TOOL = 'local_say'
 export interface Config {
   /** How she sees the owner's name in messages. */
   ownerName: string
+  /**
+   * Dev only: provide the owner line, so approvals are asked here. Requests
+   * go to `<dataDir>/local/owner-line.jsonl` and the log; the owner answers on
+   * the Anima page, with `/anima approve <id>`, or with `/anima chat yes <id>`.
+   */
+  ownerLine: boolean
 }
 
 /** Plugin config schema. */
 export const Config: z<Config> = z.object({
   ownerName: z.string().default('Owner').description('Owner display name in local messages.'),
+  ownerLine: z.boolean().default(false).description('Dev only: ask owner approvals here (answer on the Anima page or with /anima approve). Off when QQ provides the owner line.'),
 }) as z<Config>
 
 /** The single local channel: a private chat with the owner. */
@@ -131,6 +138,18 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
   const dataDir = ctx.anima.config.dataDir
   ctx.animaLife.publish([OWNER_CHANNEL])
 
+  if (config?.ownerLine === true) {
+    const linePath = join(dataDir, 'local', 'owner-line.jsonl')
+    ctx.anima.provideOwnerLine({
+      name: 'local owner line (Anima page or /anima approve)',
+      send: async (text) => {
+        mkdirSync(dirname(linePath), { recursive: true })
+        appendFileSync(linePath, `${JSON.stringify({ at: ctx.anima.clock.now(), real: Date.now(), text })}\n`)
+        ctx.logger.info(`anima local owner line: ${text}`)
+      },
+    })
+  }
+
   // Test channels survive a restart, so their sessions resolve to them again.
   const known = new Map<string, PublishedChannel>()
   const channelsFile = channelsPath(dataDir)
@@ -185,6 +204,11 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     run: async (args) => {
       const chat = parseChat(args)
       if ('error' in chat) return { kind: 'error', text: chat.error }
+      // On the local owner line, the owner's "yes a3" answers an approval and never reaches her.
+      if (config?.ownerLine === true && chat.as === undefined && chat.group === undefined) {
+        const answer = ctx.anima.handleOwnerReply(chat.text)
+        if (answer !== undefined) return { kind: 'success', text: answer }
+      }
       const channel = chatChannel(chat)
       remember(channel)
       const sender = chat.as === undefined

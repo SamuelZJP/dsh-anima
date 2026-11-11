@@ -6,18 +6,21 @@
  * @module @anima/core/service
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-session'
 import { defineTool, type PreToolDecision, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { ActivityLog, summarize, type DaySummary, type NewActivity, type OwnerSource } from './activity.ts'
 import { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, type OwnerReply } from './approvals.ts'
 import { AnimaClock, formatLocal, parseWhen } from './clock.ts'
 import { SubcommandTable, type Subcommand } from './commands.ts'
 import type { ModeConfig, ResolvedConfig } from './config.ts'
 import { decide, GateCode, QuotaBook, visibleIn, type GateCall, type GateMoment } from './gate.ts'
-import { describeGoal, GoalStore } from './goals.ts'
+import { describeGoal, GoalStore, type Goal } from './goals.ts'
+import { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
+import { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfSection } from './selfmodel.ts'
 import { billableTokens, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 import { dayKey, inWindow, modeAt, phaseAt, type Mode, type Phase } from './rhythm.ts'
 import { advance, describeNeeds, feel, initialState, satisfy, spendTurn, type SelfState, type StateModel } from './state.ts'
@@ -33,6 +36,8 @@ declare module '@deepseek-ai/cordis' {
      * `anima-memory` records outbound speech from it.
      */
     'anima/behavior'(payload: BehaviorEvent): void
+    /** The owner saved a new constitution; persona rows re-read it. */
+    'anima/constitution'(text: string): void
   }
 }
 
@@ -115,8 +120,16 @@ export class AnimaCore extends Service {
   private readonly ownerReplies = new Set<OwnerReplyHandler>()
   /** Pending owner approvals. */
   readonly approvals: ApprovalBroker
-  private readonly constitutionText: string
+  private constitutionCache: { mtimeMs: number; text: string }
+  private readonly constitutionPath: string
   private readonly statePath: string
+  /** Activity log (gate decisions, wakes, owner actions). */
+  readonly activity: ActivityLog
+  /** Her self-model. */
+  readonly selfModel: SelfModelStore
+  private readonly owner = new OwnerRegistry()
+  private readonly platforms = new Map<string, PlatformProvider>()
+  private readonly statusParts = new Map<string, () => unknown>()
   private self: SelfState
   private readonly ledger: Ledger
 
@@ -126,7 +139,10 @@ export class AnimaCore extends Service {
    */
   constructor(ctx: Context, readonly config: ResolvedConfig) {
     super(ctx, 'anima')
-    this.constitutionText = loadConstitution(config)
+    this.constitutionPath = join(config.dataDir, 'constitution.md')
+    this.constitutionCache = loadConstitution(config)
+    this.activity = new ActivityLog(join(config.dataDir, 'activity'))
+    this.selfModel = new SelfModelStore(join(config.dataDir, 'self-model.json'), join(config.dataDir, 'self-model-log.jsonl'), config.selfModel)
     this.clock = new AnimaClock(config.clock)
     this.model = { needs: config.needs, energy: config.energy, mood: config.mood, rhythm: config.day }
     this.goals = new GoalStore(join(config.dataDir, 'goals.json'))
@@ -137,7 +153,8 @@ export class AnimaCore extends Service {
       ctx.logger.warn(`state.json is from ${formatLocal(saved.self.updatedAt)}, after her clock (${formatLocal(now)}); starting fresh self state.`)
     }
     this.self = saved === undefined || saved.self.updatedAt > now ? initialState(this.model, now) : saved.self
-    this.ledger = new Ledger(saved?.days ?? {})
+    // Two weeks of day counters: enough for the formal test's whole week.
+    this.ledger = new Ledger(saved?.days ?? {}, 14)
     this.quota.load(saved?.quotas)
     // Ids keep counting across restarts, so a late "yes a3" never approves a newer request.
     const approvalsPath = join(config.dataDir, 'approvals.json')
@@ -152,7 +169,20 @@ export class AnimaCore extends Service {
     ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
       const meta = this.behaviorTable.get(exec.name)
       if (meta === undefined) return next()
-      if (this.state.paused) return refusal(GateCode.paused, PAUSED_HINT)
+      const sessionId = exec.agent?.id
+      const sessionKind = sessionId === undefined ? undefined : this.describeSession(sessionId)?.kind
+      const record = (decision: 'allowed' | 'refused' | 'approved' | 'denied', code?: string, hint?: string) => this.recordActivity({
+        type: 'gate', behavior: exec.name, decision,
+        ...sessionKind === undefined ? {} : { session: sessionKind },
+        ...sessionId === undefined ? {} : { sessionId },
+        ...code === undefined ? {} : { code },
+        ...hint === undefined ? {} : { hint },
+      })
+      const refuse = (code: string, hint: string) => {
+        record('refused', code, hint)
+        return refusal(code, hint)
+      }
+      if (this.state.paused) return refuse(GateCode.paused, PAUSED_HINT)
       const args = exec.arguments !== null && typeof exec.arguments === 'object' ? exec.arguments as Record<string, unknown> : {}
       let facts: Readonly<Record<string, number>> | undefined
       if (meta.facts !== undefined) {
@@ -161,7 +191,7 @@ export class AnimaCore extends Service {
         } catch (error: unknown) {
           const code = error instanceof AnimaError ? error.code : 'anima/facts-failed'
           const text = error instanceof Error ? error.message.replace(/^[a-z]+\/[a-z-]+:\s*/, '') : String(error)
-          return refusal(code, text)
+          return refuse(code, text)
         }
       }
       const call: GateCall = {
@@ -173,16 +203,23 @@ export class AnimaCore extends Service {
         ...facts === undefined ? {} : { facts },
       }
       const verdict = decide(call, this.policy(), this.quota, this.moment(call.now))
-      if (!verdict.allowed) return refusal(verdict.code, verdict.hint)
+      if (!verdict.allowed) return refuse(verdict.code, verdict.hint)
       if (verdict.approval !== undefined) {
         const answer = await this.requestApproval(`She wants to call ${exec.name}${describeArgs(args)} (${verdict.approval}).`, { signal: exec.signal })
-        if (answer !== 'approved') return refusal(GateCode.denied, deniedHint(exec.name, answer))
-        if (this.state.paused) return refusal(GateCode.paused, PAUSED_HINT)
+        if (answer !== 'approved') {
+          const hint = deniedHint(exec.name, answer)
+          record('denied', GateCode.denied, hint)
+          return refusal(GateCode.denied, hint)
+        }
+        if (this.state.paused) return refuse(GateCode.paused, PAUSED_HINT)
       }
       const decision = await next()
       if (decision.kind === 'allow') {
         this.quota.record(call, config.quotas)
         this.save()
+        record(verdict.approval === undefined ? 'allowed' : 'approved')
+      } else if (decision.kind === 'deny') {
+        record('refused', decision.info?.code ?? 'dsh/denied', decision.reason)
       }
       return decision
     }, { prepend: true })
@@ -212,13 +249,15 @@ export class AnimaCore extends Service {
 
     const core: Subcommand[] = [
       { name: 'status', usage: 'status — state, budgets, sessions and quota usage', run: () => ({ kind: 'success', text: this.statusText() }) },
-      { name: 'pause', usage: 'pause — refuse every Anima behavior and stop heartbeats until resumed', run: () => { this.state.paused = true; return { kind: 'success', text: 'Anima paused. Every behavior is refused and heartbeats stop until /anima resume.' } } },
-      { name: 'resume', usage: 'resume — lift a pause', run: () => { this.state.paused = false; return { kind: 'success', text: 'Anima resumed.' } } },
+      { name: 'pause', usage: 'pause — refuse every Anima behavior and stop heartbeats until resumed', run: async () => { await this.ownerAction('pause', {}, 'command'); return { kind: 'success', text: 'Anima paused. Every behavior is refused and heartbeats stop until /anima resume.' } } },
+      { name: 'resume', usage: 'resume — lift a pause', run: async () => { await this.ownerAction('resume', {}, 'command'); return { kind: 'success', text: 'Anima resumed.' } } },
       { name: 'approve', usage: 'approve <id> — allow a pending approval request (same as replying "yes <id>" on the owner line)', run: args => this.answerCommand(args, true) },
       { name: 'deny', usage: 'deny <id> — deny a pending approval request', run: args => this.answerCommand(args, false) },
       { name: 'goal', usage: 'goal add <text> [due <YYYY-MM-DD HH:mm>] | goal list | goal close <id> [reason] — owner goals', run: args => this.goalCommand(args) },
+      { name: 'selfmodel', usage: 'selfmodel [list] | selfmodel revert <dId> [reason] — her self-model notes and recent changes', run: args => this.selfModelCommand(args) },
     ]
     for (const sub of core) this.subcommands.add(sub)
+    this.registerOwnSurface()
   }
 
   /** Whether the pause switch is on. */
@@ -231,9 +270,36 @@ export class AnimaCore extends Service {
     this.clock.setOverride(now)
   }
 
-  /** The constitution text, read at load. */
+  /** The constitution text, re-read when the file changes. */
   constitution(): string {
-    return this.constitutionText
+    try {
+      const { mtimeMs } = statSync(this.constitutionPath)
+      if (mtimeMs !== this.constitutionCache.mtimeMs) {
+        const text = readFileSync(this.constitutionPath, 'utf8')
+        // An emptied file keeps the last good text; saving empty text is refused.
+        if (text.trim() !== '') this.constitutionCache = { mtimeMs, text }
+      }
+    } catch {
+      // A missing file keeps the last good text.
+    }
+    return this.constitutionCache.text
+  }
+
+  /**
+   * Save a new constitution (owner). Keeps the previous text in `constitution.md.bak`
+   * and tells persona rows, so running sessions get it on their next request.
+   * @throws {AnimaError} `anima/constitution-empty`.
+   */
+  saveConstitution(text: string): { chars: number } {
+    if (text.trim() === '') throw new AnimaError('anima/constitution-empty', 'the constitution cannot be empty.')
+    const previous = this.constitution()
+    writeFileSync(`${this.constitutionPath}.bak`, previous)
+    const normalized = text.endsWith('\n') ? text : `${text}\n`
+    writeFileSync(`${this.constitutionPath}.tmp`, normalized)
+    renameSync(`${this.constitutionPath}.tmp`, this.constitutionPath)
+    this.constitutionCache = { mtimeMs: statSync(this.constitutionPath).mtimeMs, text: normalized }
+    this.ctx.emit('anima/constitution', normalized)
+    return { chars: normalized.length }
   }
 
   // ---- time and budgets ----
@@ -504,9 +570,36 @@ export class AnimaCore extends Service {
         return { mood: `valence ${this.self.mood.valence.toFixed(2)}, arousal ${this.self.mood.arousal.toFixed(2)}` }
       },
     }), { effect: 'internal', sessions: ['self', 'conversation'] })
+
+    this.registerBehavior(defineTool({
+      name: 'self_note',
+      description: 'Change your self-model: short notes about your own tastes, habits and opinions that you want to keep. Give `text` to add a note; `replaces` with a note id and `text` to change one; `replaces` without `text` to remove one. Your self-model changes slowly: only a few edits a day, so note only what feels lasting. Your constitution always wins over it.',
+      parameters: {
+        section: { type: 'string', enum: [...SELF_SECTIONS], required: true, description: 'tastes, habits, opinions or other.' },
+        text: { type: 'string', description: 'The note, in your own words, one or two sentences.' },
+        replaces: { type: 'string', description: 'Id of the note to change or remove, e.g. n3.' },
+        reason: { type: 'string', required: true, description: 'What made you notice this about yourself.' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { change: { type: 'string', required: true, description: 'The change, one line.' } } },
+        render: (_args, value) => [{ type: 'text', text: value.change }],
+      },
+      execute: async (args, exec) => {
+        const diff = this.selfModel.note({
+          section: args.section as SelfSection,
+          text: args.text,
+          replaces: args.replaces,
+          reason: args.reason,
+          at: this.clock.now(),
+          real: Date.now(),
+          sessionId: exec.agent?.id,
+        })
+        return { change: describeDiff(diff) }
+      },
+    }), { effect: 'internal', sessions: ['self', 'conversation', 'consolidation'] })
   }
 
-  private goalCommand(args: string): CommandResult {
+  private async goalCommand(args: string): Promise<CommandResult> {
     const [verb = '', ...rest] = args.split(/\s+/)
     const text = args.slice(verb.length).trim()
     const now = this.clock.now()
@@ -519,7 +612,7 @@ export class AnimaCore extends Service {
           dueAt = parseWhen(match[2]!, now)
           if (dueAt === undefined) return { kind: 'error', text: `"${match[2]}" is not a time like 2026-11-10 21:00 or 21:00.` }
         }
-        const goal = this.goals.add({ text: body, owner: 'owner', due: dueAt, now })
+        const goal = await this.ownerAction('goal.add', { text: body, ...dueAt === undefined ? {} : { dueAt } }, 'command') as Goal
         return { kind: 'success', text: `Added ${describeGoal(goal)}` }
       }
       case 'list': {
@@ -530,7 +623,7 @@ export class AnimaCore extends Service {
         const [id] = rest
         if (id === undefined) return { kind: 'error', text: 'Usage: /anima goal close <id> [reason]' }
         const reason = text.slice(id.length).trim()
-        const goal = this.goals.close(id, { status: 'done', reason: reason === '' ? undefined : reason, by: 'owner', now })
+        const goal = await this.ownerAction('goal.close', { id, ...reason === '' ? {} : { reason } }, 'command') as Goal
         return { kind: 'success', text: `Closed ${describeGoal(goal)}` }
       }
       default:
@@ -629,12 +722,227 @@ export class AnimaCore extends Service {
     return `No pending request ${reply.id}.`
   }
 
-  private answerCommand(args: string, approve: boolean): CommandResult {
+  private async answerCommand(args: string, approve: boolean): Promise<CommandResult> {
     const id = args.trim().toLowerCase()
     if (!/^a\d+$/.test(id)) return { kind: 'error', text: `Usage: /anima ${approve ? 'approve' : 'deny'} <id>, e.g. a3. Pending: ${this.approvals.list().map(p => p.id).join(', ') || 'none'}` }
-    return this.approvals.answer(id, approve)
+    const { answered } = await this.ownerAction(approve ? 'approve' : 'deny', { id }, 'command') as { answered: boolean }
+    return answered
       ? { kind: 'success', text: `${approve ? 'Allowed' : 'Denied'} ${id}.` }
       : { kind: 'error', text: `No pending request ${id}.` }
+  }
+
+  private async selfModelCommand(args: string): Promise<CommandResult> {
+    const [verb = 'list', id, ...rest] = args.split(/\s+/).filter(word => word !== '')
+    if (verb === 'list') {
+      const entries = this.selfModel.entries()
+      const diffs = this.selfModel.diffs().slice(-10)
+      return {
+        kind: 'success',
+        text: [
+          `Self-model notes (${entries.length}):`,
+          ...entries.length === 0 ? ['  none yet'] : entries.map(e => `  ${e.id} [${e.section}] ${e.text}`),
+          'Recent changes:',
+          ...diffs.length === 0 ? ['  none yet'] : diffs.map(d => `  ${describeDiff(d)} — ${formatLocal(d.at)}, ${d.by}: ${d.reason}`),
+        ].join('\n'),
+      }
+    }
+    if (verb === 'revert' && id !== undefined) {
+      const diff = await this.ownerAction('selfmodel.revert', { id, reason: rest.join(' ') || 'reverted by the owner' }, 'command') as SelfDiff
+      return { kind: 'success', text: `Reverted: ${describeDiff(diff)}` }
+    }
+    return { kind: 'error', text: 'Usage: /anima selfmodel [list] | selfmodel revert <dId> [reason]' }
+  }
+
+  // ---- owner surface (commands and the Anima page) ----
+
+  /** Add an owner view (a read the page and commands share). Owned by the calling plugin. */
+  addOwnerView(name: string, view: OwnerView): () => void {
+    return this.ctx.effect(() => this.owner.addView(name, view), `anima.addOwnerView(${name})`)
+  }
+
+  /** Add an owner action (a write the page and commands share). Owned by the calling plugin. */
+  addOwnerAction(name: string, action: OwnerAction): () => void {
+    return this.ctx.effect(() => this.owner.addAction(name, action), `anima.addOwnerAction(${name})`)
+  }
+
+  /** Read an owner view. */
+  ownerView(name: string, params: ViewParams = {}): Promise<unknown> {
+    return this.owner.view(name, params)
+  }
+
+  /**
+   * Run an owner action and log it with its source.
+   * @param name - action name.
+   * @param args - JSON arguments.
+   * @param source - `command` or `page`.
+   */
+  async ownerAction(name: string, args: Readonly<Record<string, unknown>>, source: OwnerSource): Promise<unknown> {
+    try {
+      const result = await this.owner.run(name, args, source)
+      this.recordActivity({ type: 'owner', action: name, source, args, ok: true })
+      return result
+    } catch (error: unknown) {
+      this.recordActivity({ type: 'owner', action: name, source, args, ok: false, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+  }
+
+  /** Registered owner view and action names. */
+  ownerNames(): { views: string[]; actions: string[] } {
+    return this.owner.names()
+  }
+
+  /**
+   * Provide a platform's owner surface (health for Status, details and actions
+   * for Platforms). Owned by the calling plugin.
+   */
+  providePlatform(provider: PlatformProvider): () => void {
+    return this.ctx.effect(() => {
+      if (this.platforms.has(provider.platform)) throw new AnimaError('anima/platform-duplicate', `platform "${provider.platform}" already has an owner surface.`)
+      this.platforms.set(provider.platform, provider)
+      const disposers = Object.entries(provider.actions ?? {}).map(([name, action]) => this.owner.addAction(`${provider.platform}.${name}`, action))
+      return () => {
+        for (const dispose of disposers) dispose()
+        if (this.platforms.get(provider.platform) === provider) this.platforms.delete(provider.platform)
+      }
+    }, `anima.providePlatform(${provider.platform})`)
+  }
+
+  /** Add a named part to the structured status view (e.g. `life`). Owned by the calling plugin. */
+  addStatusPart(name: string, part: () => unknown): () => void {
+    return this.ctx.effect(() => {
+      if (this.statusParts.has(name)) throw new AnimaError('anima/status-duplicate', `status part "${name}" is already registered.`)
+      this.statusParts.set(name, part)
+      return () => {
+        if (this.statusParts.get(name) === part) this.statusParts.delete(name)
+      }
+    }, `anima.addStatusPart(${name})`)
+  }
+
+  /**
+   * Record one activity on her current day. Never throws: a full disk must not stop her.
+   * @param record - the record without timestamps.
+   */
+  recordActivity(record: NewActivity): void {
+    const at = this.clock.now()
+    try {
+      this.activity.append(this.dayKey(at), { ...record, at, real: Date.now() } as Parameters<ActivityLog['append']>[1])
+    } catch (error: unknown) {
+      this.ctx.logger.warn(`anima: activity log write failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
+   * One factual line about her self-model for the situation report (DESIGN §9):
+   * how many notes she keeps and when it last changed. It states what exists;
+   * it never suggests what to note.
+   */
+  selfModelReportLine(): string {
+    const notes = this.selfModel.entries().length
+    const last = this.selfModel.diffs().at(-1)
+    return `Your self-model: ${notes === 0 ? 'no notes yet' : `${notes} note${notes === 1 ? '' : 's'}`}${last === undefined ? '' : `, last changed ${formatLocal(last.at)}`}. self_note keeps what you learn about your own tastes, habits and opinions; only a few changes a day.`
+  }
+
+  /** Summary of one of her days (default today). */
+  daySummary(day = this.dayKey()): DaySummary {
+    return summarize(day, this.activity.read(day), this.ledger.peek(day))
+  }
+
+  /** Structured status: what `/anima status` shows, as data. */
+  statusView(): Record<string, unknown> {
+    const now = this.clock.now()
+    const state = this.selfState()
+    const day = this.todayLedger(now)
+    const mode = this.mode(now)
+    const parts: Record<string, unknown> = {}
+    for (const [name, part] of this.statusParts) {
+      try {
+        parts[name] = part()
+      } catch (error: unknown) {
+        parts[name] = { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    return {
+      character: { id: this.config.characterId, name: this.config.name, dataDir: this.config.dataDir },
+      paused: this.state.paused,
+      clock: { now, text: formatLocal(now), speed: this.clock.speed, phase: this.phase(now), mode, day: this.dayKey(now) },
+      energy: state.energy,
+      mood: state.mood,
+      needs: this.model.needs.map(need => ({ name: need.name, description: need.description, value: state.needs[need.name] ?? 0 })),
+      budgets: {
+        tokens: { day: day.tokens.day, night: day.tokens.night, dayBudget: this.config.modes.day.tokenBudget, nightBudget: this.config.modes.night.tokenBudget },
+        initiates: { used: day.initiates, perDay: this.config.initiate.perDay },
+        nightWakesLeft: this.nightWakesLeft(now),
+        overBudget: this.overBudget(now),
+      },
+      goals: this.goals.open().length,
+      approvals: this.approvals.list().length,
+      ownerLine: this.state.ownerLine?.name ?? null,
+      selfModel: { notes: this.selfModel.entries().length },
+      quotas: this.quota.usage(this.config.quotas, now),
+      parts,
+    }
+  }
+
+  private async platformViews(): Promise<{ platform: string; title: string; view: PlatformView }[]> {
+    const views = []
+    for (const provider of this.platforms.values()) {
+      let view: PlatformView
+      try {
+        view = await provider.view()
+      } catch (error: unknown) {
+        view = { health: 'down', summary: `status failed: ${error instanceof Error ? error.message : String(error)}`, details: {} }
+      }
+      views.push({ platform: provider.platform, title: provider.title, view })
+    }
+    return views
+  }
+
+  private registerOwnSurface(): void {
+    const owner = this.owner
+    const add = (dispose: () => void) => this.ctx.effect(() => dispose, 'anima.ownerSurface')
+    add(owner.addView('status', () => this.statusView()))
+    add(owner.addView('platforms', () => this.platformViews()))
+    add(owner.addView('goals', () => ({ goals: this.goals.all() })))
+    add(owner.addView('approvals', () => ({
+      ownerLine: this.state.ownerLine?.name ?? null,
+      pending: this.approvals.list().map(p => ({ id: p.id, summary: p.summary })),
+    })))
+    add(owner.addView('selfmodel', () => ({ entries: this.selfModel.entries(), diffs: this.selfModel.diffs().reverse() })))
+    add(owner.addView('constitution', () => ({ text: this.constitution(), path: this.constitutionPath })))
+    add(owner.addView('activity', (params) => {
+      const days = this.activity.days()
+      const day = params.day ?? this.dayKey()
+      return { day, days, summary: this.daySummary(day), records: this.activity.read(day) }
+    }))
+    add(owner.addView('owner', () => this.owner.names()))
+
+    add(owner.addAction('pause', () => { this.state.paused = true; return { paused: true } }))
+    add(owner.addAction('resume', () => { this.state.paused = false; return { paused: false } }))
+    add(owner.addAction('approve', args => ({ answered: this.approvals.answer(stringArg(args, 'id').toLowerCase(), true) })))
+    add(owner.addAction('deny', args => ({ answered: this.approvals.answer(stringArg(args, 'id').toLowerCase(), false) })))
+    add(owner.addAction('goal.add', (args) => {
+      const now = this.clock.now()
+      const dueText = optionalStringArg(args, 'due')
+      let due = typeof args.dueAt === 'number' ? args.dueAt : undefined
+      if (dueText !== undefined) {
+        due = parseWhen(dueText, now)
+        if (due === undefined) throw new AnimaError('anima/bad-time', `"${dueText}" is not a time like 2026-11-10 21:00 or 21:00.`)
+      }
+      return this.goals.add({ text: stringArg(args, 'text'), owner: 'owner', due, now })
+    }))
+    add(owner.addAction('goal.close', args => this.goals.close(stringArg(args, 'id'), {
+      status: args.status === 'dropped' ? 'dropped' : 'done',
+      reason: optionalStringArg(args, 'reason'),
+      by: 'owner',
+      now: this.clock.now(),
+    })))
+    add(owner.addAction('selfmodel.revert', args => this.selfModel.revert(stringArg(args, 'id'), optionalStringArg(args, 'reason') ?? 'reverted by the owner', this.clock.now(), Date.now())))
+    add(owner.addAction('constitution.save', (args) => {
+      const text = args.text
+      if (typeof text !== 'string') throw new AnimaError('anima/bad-args', '"text" must be a string.')
+      return this.saveConstitution(text)
+    }))
   }
 
   // ---- resolvers, commands, status ----
@@ -743,6 +1051,20 @@ function describeArgs(args: Readonly<Record<string, unknown>>): string {
   return ` with ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`
 }
 
+/**
+ * One-line description of a self-model change.
+ * @param diff - the change.
+ */
+export function describeDiff(diff: SelfDiff): string {
+  const quote = (text: string | undefined) => text === undefined ? '' : `"${text}"`
+  switch (diff.op) {
+    case 'add': return `${diff.id}: added ${diff.entryId} [${diff.section}] ${quote(diff.after)}`
+    case 'remove': return `${diff.id}: removed ${diff.entryId} [${diff.section}] ${quote(diff.before)}`
+    case 'change': return `${diff.id}: changed ${diff.entryId} [${diff.section}] ${quote(diff.before)} → ${quote(diff.after)}`
+    default: return `${diff.id}: reverted ${diff.revertOf ?? '?'} on ${diff.entryId} [${diff.section}] ${diff.after === undefined ? `(removed ${quote(diff.before)})` : `→ ${quote(diff.after)}`}`
+  }
+}
+
 function deniedHint(name: string, answer: ApprovalAnswer): string {
   switch (answer) {
     case 'denied': return `the owner said no to ${name}. Do not ask again for the same thing now.`
@@ -756,11 +1078,11 @@ function refusal(code: string, hint: string): PreToolDecision {
 }
 
 /** Read `<dataDir>/constitution.md`, writing the default first if it is missing. */
-function loadConstitution(config: ResolvedConfig): string {
+function loadConstitution(config: ResolvedConfig): { mtimeMs: number; text: string } {
   mkdirSync(config.dataDir, { recursive: true })
   const path = join(config.dataDir, 'constitution.md')
   if (!existsSync(path)) writeFileSync(path, `${defaultConstitution(config.name)}\n`, { flag: 'wx' })
   const text = readFileSync(path, 'utf8')
   if (text.trim() === '') throw new AnimaError('anima/constitution-empty', `${path} is empty. Write her constitution there, or delete the file to restore the default.`)
-  return text
+  return { mtimeMs: statSync(path).mtimeMs, text }
 }

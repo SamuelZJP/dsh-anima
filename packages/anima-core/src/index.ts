@@ -19,7 +19,10 @@ export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction
 export { billableTokens, emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
 export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
-export { AnimaCore, defaultConstitution, GATE_INFO_NAME, type BehaviorEvent, type ChannelAllowlist, type ChannelResolver, type OwnerReplyHandler, type SessionResolver } from './service.ts'
+export { ActivityLog, summarize, type ActivityRecord, type DaySummary, type GateRecord, type NewActivity, type OwnerRecord, type OwnerSource, type WakeRecord } from './activity.ts'
+export { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
+export { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfEntry, type SelfModelLimits, type SelfSection } from './selfmodel.ts'
+export { AnimaCore, defaultConstitution, describeDiff, GATE_INFO_NAME, type BehaviorEvent, type ChannelAllowlist, type ChannelResolver, type OwnerReplyHandler, type SessionResolver } from './service.ts'
 export { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, type OwnerReply, type PendingApproval } from './approvals.ts'
 
 /** Cordis plugin name. */
@@ -49,7 +52,7 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     ctx.effect(() => ctx.commands.register({
       name: COMMAND,
       description: 'Anima owner controls: /anima help lists subcommands',
-      input: { hint: 'status | pause | resume | goal … | chat <text> | self [text] | outbox | approve <id> | help' },
+      input: { hint: 'status | pause | resume | goal … | selfmodel … | chat <text> | self [text] | outbox | approve <id> | help' },
       handler: invocation => ctx.anima.dispatchCommand(invocation),
     }), 'anima.command')
   })

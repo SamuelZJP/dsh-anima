@@ -7,7 +7,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, formatLocal, type BehaviorEvent, type SessionInfo } from '@anima/core'
+import { AnimaError, formatLocal, stringArg, type BehaviorEvent, type SessionInfo } from '@anima/core'
 import type {} from '@anima/core'
 import type { Stimulus, StimulusEvent } from '@anima/life'
 import type {} from '@anima/life'
@@ -113,6 +113,16 @@ export class AnimaMemory extends Service {
       usage: 'memory list [text] | memory forget <id> — inspect or forget memories (all scopes)',
       run: args => this.command(args),
     })
+
+    // Owner surface shared with the Anima page (DESIGN §12).
+    core.addOwnerView('memory', (params) => {
+      const status = params.status === 'archived' || params.status === 'superseded' || params.status === 'all' ? params.status : 'active'
+      const limit = Math.min(200, Math.max(1, Number(params.limit ?? 50) || 50))
+      const offset = Math.max(0, Number(params.offset ?? 0) || 0)
+      const page = this.store.browse({ query: params.query, scope: params.scope, status, limit, offset })
+      return { ...page, limit, offset, counts: this.store.counts(), scopes: this.store.scopes(), pending: this.store.pendingCount() }
+    })
+    core.addOwnerAction('memory.forget', args => ({ forgotten: this.store.forget(stringArg(args, 'id')) }))
 
     ctx.effect(() => {
       const timer = setInterval(() => this.tick(), TICK_MS)
@@ -250,7 +260,7 @@ export class AnimaMemory extends Service {
   }
 
   private consolidationText(segments: ReadonlyMap<string, Segment>): string {
-    const parts = ['Sort these conversations into memory. Call memory_write for what is worth keeping (segment label, kind, text); skip small talk. Stop when every segment is done.']
+    const parts = ['Sort these conversations into memory. Call memory_write for what is worth keeping (segment label, kind, text); skip small talk. If you learned something lasting about your own tastes, habits or opinions, keep it in your self-model with self_note instead. Stop when every segment is done.']
     for (const [label, segment] of segments) {
       const display = segment.channelKey === undefined ? undefined : this.ctx.animaLife.router.channel(segment.channelKey)?.display
       const people = [...new Map(segment.lines.filter(line => line.speakerId !== undefined).map(line => [line.speakerId!, line.speaker])).entries()]
@@ -432,7 +442,7 @@ export class AnimaMemory extends Service {
       description: 'Write one memory from a conversation segment you are sorting. Who may hear it is set by the segment.',
       parameters: {
         segment: { type: 'string', required: true, description: 'Segment label, e.g. s1.' },
-        kind: { type: 'string', enum: ['episode', 'fact', 'self'], required: true, description: 'episode (what happened, dated), fact (about a person or the world), self (about yourself).' },
+        kind: { type: 'string', enum: ['episode', 'fact', 'self'], required: true, description: 'episode (what happened, dated), fact (about a person or the world), self (a passing thought about yourself; lasting tastes, habits and opinions go to self_note).' },
         text: { type: 'string', required: true, description: 'The memory as a self-contained sentence; name people and dates.' },
         about: { type: 'string', description: 'Person id from the segment\'s People list, for facts about someone.' },
         replaces: { type: 'string', description: 'Id of an older memory this one corrects (e.g. m4); the old one is kept as history.' },
@@ -496,18 +506,19 @@ export class AnimaMemory extends Service {
     ]
   }
 
-  private command(args: string): { kind: 'success' | 'error'; text: string } {
+  private async command(args: string): Promise<{ kind: 'success' | 'error'; text: string }> {
     const [verb = '', ...rest] = args.split(/\s+/)
     const text = rest.join(' ').trim()
     switch (verb.toLowerCase()) {
       case 'list': {
-        const all = this.store.list({ query: text, limit: 50 })
+        const all = await this.ctx.anima.ownerView('memory', { query: text, status: 'all', limit: '50' }).then(v => (v as { memories: Memory[] }).memories)
         if (all.length === 0) return { kind: 'success', text: 'No memories.' }
         return { kind: 'success', text: all.map(memory => `${memoryLine(memory, true)}${memory.status === 'active' ? '' : ` [${memory.status}${memory.replacedBy === undefined ? '' : ` by ${memory.replacedBy}`}]`}`).join('\n') }
       }
       case 'forget': {
         if (text === '') return { kind: 'error', text: 'Usage: /anima memory forget <id>' }
-        return this.store.forget(text) ? { kind: 'success', text: `Forgot ${text}.` } : { kind: 'error', text: `No memory "${text}".` }
+        const { forgotten } = await this.ctx.anima.ownerAction('memory.forget', { id: text }, 'command') as { forgotten: boolean }
+        return forgotten ? { kind: 'success', text: `Forgot ${text}.` } : { kind: 'error', text: `No memory "${text}".` }
       }
       default:
         return { kind: 'error', text: 'Usage: /anima memory list [text] | memory forget <id>' }

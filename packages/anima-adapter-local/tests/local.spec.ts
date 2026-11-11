@@ -28,7 +28,7 @@ class RecordingHost implements SessionHost {
   isBusy() { return false }
 }
 
-async function setup() {
+async function setup(config: Partial<local.Config> = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'anima-local-'))
   onTestFinished(() => rmSync(dataDir, { recursive: true, force: true }))
   const ctx = new Context()
@@ -38,7 +38,7 @@ async function setup() {
   await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new RecordingHost()
   await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
-  const fiber = await ctx.plugin(local, { ownerName: 'Sam' })
+  const fiber = await ctx.plugin(local, { ownerName: 'Sam', ...config })
   return { ctx, host, dataDir, fiber }
 }
 
@@ -136,5 +136,41 @@ describe('/anima chat --as / --in (dev test channels)', () => {
     expect(ctx.anima.describeSession(aliceSession)).toBeUndefined()
     await ctx.plugin(local, { ownerName: 'Sam' })
     expect(ctx.anima.describeSession(aliceSession)).toMatchObject({ kind: 'conversation' })
+  })
+})
+
+function command(ctx: Context, rawInput: string) {
+  return ctx.anima.dispatchCommand({ rawInput, agent: { id: 'x' }, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
+}
+
+describe('local owner line (dev)', () => {
+  it('is off by default', async () => {
+    const { ctx } = await setup()
+    expect(ctx.anima.ownerLine).toBeUndefined()
+  })
+
+  it('asks approvals in owner-line.jsonl and takes "yes <id>" from /anima chat without reaching her', async () => {
+    const { ctx, host, dataDir } = await setup({ ownerLine: true })
+    expect(ctx.anima.ownerLine?.name).toMatch(/local owner line/)
+    const answer = ctx.anima.requestApproval('She wants to call open_conversation.')
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const asked = readFileSync(join(dataDir, 'local', 'owner-line.jsonl'), 'utf8')
+    expect(asked).toMatch(/\[Anima approval a1\] She wants to call open_conversation/)
+    expect(await command(ctx, ' chat yes a1')).toEqual({ kind: 'success', text: 'Allowed a1.' })
+    expect(await answer).toBe('approved')
+    expect(host.delivered).toEqual([])
+  })
+})
+
+describe('activity: wakes', () => {
+  it('records each delivery that wakes her', async () => {
+    const { ctx } = await setup()
+    await command(ctx, ' chat hello there')
+    const wakes = ctx.anima.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'wake')
+    expect(wakes).toEqual([expect.objectContaining({ stimulus: 'message', session: 'conversation', sessionId: ownerSession, channel: 'local:owner:private:owner' })])
+    const outbox = await ctx.anima.ownerView('outbox') as { held: unknown[]; delaySeconds: number }
+    expect(outbox.held).toEqual([])
+    const status = await ctx.anima.ownerView('status') as { parts: { life: { sessions: { conversations: unknown[] } } } }
+    expect(status.parts.life.sessions.conversations).toHaveLength(1)
   })
 })

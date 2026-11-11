@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-10 (Phase 5) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-11 (Phase 6) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -18,7 +18,7 @@ Anima is a DSH plugin that gives one AI character a persistent personality, memo
 
 **Non-goals for the first version**
 
-- Desktop pet, voice/TTS, stickers, slang learning, multi-character switching, a custom web console.
+- Desktop pet, voice/TTS, stickers, slang learning, multi-character switching, a standalone web console. The owner's view is a page inside DSH's own web UI (section 12), not a separate app.
 - Running several characters on one DSH instance (the design keeps a `characterId` key so this stays possible later).
 - Deploying or managing the QQ runtime (NapCatQQ) itself; it remains a separately installed program.
 
@@ -95,11 +95,12 @@ Adapters turn platform events into stimuli, anima-life routes each to one sessio
 | `anima-memory` | Service + tools | Memory store, `memory_*` tools, auto-injection, consolidation and decay |
 | `anima-life` | Service + tools | Stimulus routing, session identity, heartbeat and triage, `open_conversation`, outbox |
 | `anima-adapter-qq`, `anima-adapter-bili`, `anima-adapter-local` | Platform plugins | Connection, channels, stimuli, platform behaviors |
+| `anima-page` | Owner page (Host routes + browser bundle) | The Anima page in DSH's web UI (section 12); reads and writes only through `anima-core`'s owner surface |
 | preset `conversation` | Agent preset | Tool set and prompt for chat sessions |
 | preset `self` | Agent preset | Tool set and prompt for the Self session |
 | bundle `anima` | Bundle | Installs all of the above into a DSH profile |
 
-Dependencies point one way: adapters depend on `anima-core` and `anima-life` interfaces; the core packages never import an adapter.
+Dependencies point one way: adapters depend on `anima-core` and `anima-life` interfaces; the core packages never import an adapter. `anima-page` depends on `anima-core` only.
 
 ## 5. Stimuli and session routing
 
@@ -288,7 +289,7 @@ One memory store serves every platform and session. Each memory records where it
 | Working | Current session context | The session (DSH compaction) | Always |
 | Episodic | Dated summaries of conversations and events | Decays | When recalled |
 | Semantic | Facts about people, the world, herself; each with source, confidence, time | Durable, revisable | When recalled; key facts pinned per person |
-| Self | Her self-model notes, preferences, lessons | Slow-changing | A short digest always |
+| Self | Her self-model (section 9): lasting tastes, habits and opinions, kept with `self_note`. Passing thoughts about herself stay `self`-kind memories | Slow-changing | The self-model digest always; `self` memories when recalled |
 
 ### Audience scopes
 
@@ -326,7 +327,7 @@ Anima keeps its own record of inbound channel messages (from the `anima/stimulus
 Consolidation is a behavior (`memory_consolidate`) she performs at night (her one night wake may consolidate instead of only resting) or when idle. A fallback job runs it when the oldest unconsolidated transcript line is older than `consolidation.fallbackHours` (default 24) on her clock.
 
 1. Code claims pending transcript lines (up to `consolidation.maxInputTokens`, default 6000), groups them into one segment per session, and delivers them with the memories she already has for each segment's audience to the consolidation session of her day, on `consolidation.model` (a cheap model).
-2. There she writes episodes, facts and self notes with `memory_write`; the scope comes from the segment. When a new fact contradicts an old one, `replaces` marks the old one `superseded` and keeps it as history.
+2. There she writes episodes, facts and passing thoughts about herself with `memory_write`; the scope comes from the segment. What she learned that is lasting about her own tastes, habits or opinions goes to her self-model with `self_note` (Phase 6), which this session offers with the full self-model and its note ids. When a new fact contradicts an old one, `replaces` marks the old one `superseded` and keeps it as history.
 3. When that turn ends, the lines are marked consolidated. A run that does not finish within `consolidation.timeoutSeconds` (real time) returns its lines to pending.
 4. Decay is plain code, run once per her day.
 
@@ -350,9 +351,14 @@ Her personality has three layers with different owners and rates of change, asse
 | Self-model | What she has learned about herself: tastes, habits, opinions | She, via `self_note`; owner can review and revert | Slowly; rate-limited, every change logged as a diff |
 | State | Needs, energy, phase, mood (section 7) | Code and `self_feel` | Constantly |
 
-- The constitution is read-only to her and always wins over the self-model.
-- Self-model edits are capped (e.g. a few per day) so drift is gradual and visible.
-- The prompt section differs by session kind: conversation sessions get the constitution, a self-model digest, current mood in one line, and this person's profile; the Self session also gets needs, goals and budgets.
+- The constitution is read-only to her and always wins over the self-model. It lives in `<dataDir>/constitution.md`; the owner edits it there or on the Anima page. A save keeps the previous text as `constitution.md.bak`, and running sessions get the new text on their next request.
+- **Self-model (Phase 6).** Short notes in four sections (`tastes`, `habits`, `opinions`, `other`), kept in `<dataDir>/self-model.json`. She edits them with `self_note(section, text?, replaces?, reason)`: text alone adds a note, `replaces` with text changes one, `replaces` alone removes one. Limits: `selfModel.maxEntries` (40) and `maxEntryChars` (200).
+- **Every change is a diff** in `<dataDir>/self-model-log.jsonl`: id `d<n>`, time on her clock and real time, who (`her` or `owner`), op, note id, text before and after, reason, session. The owner reverts a diff with `/anima selfmodel revert <dId>` or on the page; a revert is itself a diff, and is refused when the note changed again since.
+- **Where notes come from:** Self, conversations and the consolidation session may call `self_note`. In the Phase 6 demo she kept her self-knowledge as `self`-kind memories during consolidation (as Phase 3 told her to), never in the self-model, so consolidation now offers `self_note` for lasting traits and keeps `memory_write kind: self` for passing thoughts (owner decision, 2026-11-11).
+- **In her report:** every situation report carries one factual line, "Your self-model: N notes, last changed … self_note keeps what you learn about your own tastes, habits and opinions; only a few changes a day." It was added in the Phase 6 demo: with only the tool and the digest, she described a new habit in chat and never recorded it in about half a simulated day. Like the Bilibili line, it states what exists and never suggests what to note.
+- **The cap is a gate quota:** `self_note` 3 per 24 h by default (`quotas`), so drift is gradual and visible.
+- **Digest in prompts:** the persona row adds the self-model as a DSH prompt context (`anima-self-model`), a logged snapshot re-sent only when its text changes. Self gets every note with its id; conversation sessions get a short digest (newest first, `selfModel.digestChars`, 600); other session kinds get none. It is framed under the constitution: "Your constitution above always wins over this."
+- The prompt differs by session kind: conversation sessions get the constitution and the self-model digest (current mood in one line and person profiles are later work); the Self session also gets needs, goals and budgets through its situation reports.
 
 ## 10. Policy, permissions and safety
 
@@ -461,14 +467,40 @@ Bilibili is a place she watches, not one where she talks. `anima-adapter-bili` r
 
 ## 12. Observability and owner control
 
-Everything she does is already a DSH session event, so the owner's view is mostly DSH's own session UI plus a few owner commands; no custom console in the first version.
+Everything she does is already a DSH session event, so the owner's view is DSH's own session UI, a few owner commands, and (from Phase 6) an Anima page in DSH's web UI.
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
 - **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
-- **Audit trail**: every gated call records behavior, decision, reason and trigger.
+- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome). Recording never decides anything.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
-A small web panel can be added later on the same commands and projections.
+### Anima page (Phase 6)
+
+An **Anima** entry in the DSH web UI sidebar opens a page with tabs, the same shape as other DSH plugin pages. It is built on the same service methods as the owner commands, so the page and the commands never disagree, and every change it makes goes through the same code paths and is logged.
+
+- **Status**: clock, phase, energy, needs, mood, budgets, next heartbeat; adapter health (QQ connection, Bilibili login and risk control).
+- **Persona**: edit the constitution; review her self-model diffs and revert them.
+- **Memory**: search and browse by scope, including the archive (section 8); forget an entry.
+- **Goals, approvals and outbox**: list, approve or deny, cancel held messages.
+- **Activity**: gate decisions (allowed and refused, with codes and reasons), wakes and token use per day. It doubles as the monitoring view for the formal test.
+- **Platforms**: QQ connection and allowlist, Bilibili login with the QR code shown on the page.
+- **Settings**: Anima's Config fields, edited on the page.
+
+**How it is built (Phase 6, DSH-INTEGRATION §8e).** `anima-page` is one package with two halves:
+- **Host half:** two authenticated owner-only routes on DSH's `/api` channel, `GET /api/anima/view?name=…` and `POST /api/anima/action`.
+- **Browser half:** a bundle that registers the sidebar entry and the page. DSH builds it with esbuild into its client-module format; React comes from DSH.
+
+**Owner surface.** Everything the page and the commands read or change is a named **owner view** or **owner action** on the `anima` service:
+- Each plugin registers its own: core (status, goals, approvals, self-model, constitution, activity, pause and resume), life (outbox, heartbeat, its part of status), memory (browse and forget), and adapters (`providePlatform`: health, details, actions such as `bili.login`).
+- The `/anima` commands are text renderers over the same actions, and every action is written to the activity log with its source.
+- The page polls the views, because DSH has no push channel for plugin routes.
+
+**Settings.** The tab shows each Anima row's effective config and its profile override:
+- **Editable rows:** `anima-core`, `anima-life` and `anima-memory`. A save goes through DSH's config editor, which validates the whole config against the row's schema, writes the active profile's `cordis.patch.yml` and restarts that row.
+- **Read-only rows:** adapter rows, with secrets hidden.
+- A home patch or `--patch` overlay still wins, and the tab says so.
+
+**Approvals in development.** `anima-adapter-local` can provide the owner line (`ownerLine: true`, dev only), so approvals can be answered on the page without QQ.
 
 ## 13. Relationship to surfcore
 
@@ -520,7 +552,7 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Memory scope | Code sets the scope from the session's audience; `memory_remember` can only narrow (`keep: self`); recall and auto-injection filter by the current session's audience | 8 |
 | Transcript | Anima records inbound messages and outbound `say` calls in the memory DB; consolidation reads that, not DSH's logs | 8 |
 | Consolidation | Her night wake may consolidate; it runs in its own short session per day on a cheap model; fallback after `fallbackHours` (24); decay is plain code once a day | 7, 8 |
-| Memory scope (Phase 3) | No embeddings, no archive UI; owner commands `/anima memory list|forget`; auto-injection budget is a Config field, default 800 tokens | 8, 12 |
+| Memory scope (Phase 3) | No embeddings; owner commands `/anima memory list|forget`; auto-injection budget is a Config field, default 800 tokens. The archive browser comes with the Anima page (Phase 6) | 8, 12 |
 | Night (from Phase 3) | At most one wake-up per night; it can rest or consolidate | 7 |
 | QQ runtime | NapCatQQ, replacing SnowLuma (no longer public). The adapter talks only OneBot v11, so LLOneBot or another runtime works by config | 1, 11 |
 | QQ transport | `anima-adapter-qq` is a WebSocket client of the runtime's OneBot v11 forward WebSocket server, on Node's built-in `WebSocket` (no dependency); token as `?access_token=`; reconnect with backoff; heartbeat and `bot_offline` health | 11 |
@@ -533,17 +565,30 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Observations | Adapters record what she watched through `animaMemory.observe` with scope `public` or `self` only | 8 |
 | Owner approvals | Over the owner line (QQ private chat): id + plain `yes`/`no <id>`; timeout (600 s) = denied; core config `approve` forces approval for named behaviors; friend requests use it and are never auto-accepted | 10 |
 | Outbox | Her initiated messages wait `outbox.delaySeconds` (default 45, real time); cancel via `/anima outbox cancel <id>` or `cancel <id>` on the owner line | 10 |
+| Owner UI | An Anima page inside DSH's web UI (sidebar entry, tabs), built on the owner-command service methods; no standalone console | 12 |
+| Roadmap after Phase 5 | Phase 6 self-model and Anima page; Phase 7 QQ refinement; then a formal 7-day test in the development environment | 14 |
+| Formal test | Runs on this development machine in `anima-dev`, not in production, so data is easy to collect; it carries the QQ week, need tuning and Bilibili uptake; its test plan and pass criteria are written before it starts | 14 |
+| Postponed | More Bilibili behaviors and WeChat (strict platform risk control); embedding search (necessity to be studied); dreaming; production packaging | 8, 11, 14 |
+| Self-model (Phase 6) | Notes in four sections edited by `self_note`; every change a diff with time and reason in `self-model-log.jsonl`; owner revert by diff id; cap is a gate quota (3 per 24 h); digest as a logged DSH prompt context, full for Self and short for conversations | 9 |
+| Anima page mechanism | One package `anima-page`: Host routes `/api/anima/view` and `/api/anima/action` (Connection fetch routes, owner-authenticated), browser bundle on slots `sidebar.panellist` and `main`, built with esbuild (dev dependency); polling, no push | 12 |
+| Owner surface | Named owner views and actions on the `anima` service, registered by each plugin; commands and page call the same ones; each action logged with its source | 12 |
+| Activity log | Gate decisions, wakes and owner actions per her day in `<dataDir>/activity/`; the Ledger keeps 14 days | 12 |
+| Settings editing | Through DSH's config editor into the active profile patch; core, life and memory rows only; a higher layer still wins | 12 |
+| Self-knowledge flow | Lasting tastes, habits and opinions go to the self-model through `self_note`, also from the consolidation session; `self`-kind memories keep passing thoughts about herself (owner decision after the Phase 6 demo) | 8, 9 |
+| Constitution editing | Owner saves on the page; previous text kept as `.bak`; persona rows re-register on save, so running sessions get it next request | 9 |
 
 ### Still open
 
 - [x] **Intent handoff**: yes; see decisions (Phase 2).
-- [ ] **Dreaming**: what night heartbeats do beyond consolidation; deferred until after Phase 3.
-- [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tune from Phase 2 test runs.
-- [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before real people talk to her.
+- [ ] **Dreaming**: what night heartbeats do beyond consolidation; postponed until after the formal test, whose night data shows whether more is needed.
+- [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tuned from the formal test.
+- [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before the formal test, where real people talk to her.
 - [x] **Outbox delay**: built in Phase 4 (section 10).
 - [x] **Session-log upload**: turned off in `anima-dev` (owner decision, Phase 4; DSH-INTEGRATION §12).
-- [ ] **Close-view uptake**: on her own she chose the text tier all day; the close view came after an owner notice. Decide whether the tool description or her report should present the tier more plainly, or whether rare use is right.
-- [ ] **Week on QQ**: the unattended week was cancelled for now; run it later if group wake rates need measuring.
+- [ ] **Close-view uptake**: on her own she chose the text tier all day; the close view came after an owner notice. Decide whether the tool description or her report should present the tier more plainly, or whether rare use is right; the formal test measures it.
+- [ ] **Week on QQ**: folded into the formal test (Phase 4 exit).
+- [ ] **Embedding search**: whether full-text search is enough; study it with the formal test's recall data before building anything.
+- [ ] **Production packaging**: today she installs only as a linked checkout (`workspace:*`, unbuilt `lib/` not committed). Not needed for the formal test, which runs in development.
 
 ### Phased roadmap
 
@@ -552,4 +597,8 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 2. **Phase 2 — Autonomy.** Self state, heartbeat with triage, `open_conversation`, goals, self-set alarms. Exit: over a test day she initiates at least once on her own and rests otherwise, within budget.
 3. **Phase 3 — Memory.** Store, scoped recall, auto-injection, nightly consolidation, decay. Exit: a private fact is recalled in that private chat and not in a group. Done 2026-11-10 (DSH-INTEGRATION §3).
 4. **Phase 4 — QQ.** `anima-adapter-qq` on NapCatQQ (OneBot v11), private and group chats on an allowlist, group triage, owner-DM approvals, the outbox. Exit: a week on a test account with no runaway wakes. Supervised runs passed 2026-11-10 (DSH-INTEGRATION §3). The owner cancelled the week-long run for now, so the phase closes on the supervised runs; the runaway-wake check is a gate quota (`group_wake`) plus the per-group counters in `life.json`, not yet a measured week.
-5. **Phase 5 — Bilibili (read-only).** `anima-adapter-bili`: skim, watch and close-view tiers in the Self session, QR login, risk-control back-off, viewing sessions, observations in memory. Exit: over a test day she browses on her own initiative during heartbeats, watches some videos and views at least one closely, and later brings one up with the owner in a chat, all within budget; evidence from the transcripts. Done 2026-11-10 (DSH-INTEGRATION §3). She browsed, watched and shared on her own; her one close view came after an owner notice said the tier exists. Bilibili public behaviors (comments, DMs, posts, likes) through approvals and WeChat come after.
+5. **Phase 5 — Bilibili (read-only).** `anima-adapter-bili`: skim, watch and close-view tiers in the Self session, QR login, risk-control back-off, viewing sessions, observations in memory. Exit: over a test day she browses on her own initiative during heartbeats, watches some videos and views at least one closely, and later brings one up with the owner in a chat, all within budget; evidence from the transcripts. Done 2026-11-10 (DSH-INTEGRATION §3). She browsed, watched and shared on her own; her one close view came after an owner notice said the tier exists.
+6. **Phase 6 — Self-model and the Anima page.** `self_note` with a daily cap, every change logged as a diff, a self-model digest in prompts, `/anima selfmodel` review and revert (section 9). The Anima page in DSH's web UI with its tabs, including the memory archive browser (section 12); starts with a spike on how a plugin adds a sidebar page. Exit: she changes her self-model on her own, the owner reviews and reverts one change from the page, and the page shows live status, memory (active and archive), approvals and activity. Done 2026-11-11 (DSH-INTEGRATION §3). Her first note came on her second simulated day, in a chat, after two owner-approved changes: a self-model line in her report and `self_note` in consolidation.
+7. **Phase 7 — QQ refinement.** Feature list fixed at the phase's plan step. Candidates: inbound images seen by the vision model instead of placeholders, outbound pokes and emoji reactions, the typing status, sturdier NapCat reconnect and offline handling (a development warning, no alerts). Qzone only through approvals, if at all.
+8. **Formal test — 7 days in development.** In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above.
+9. **Later.** More Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; dreaming; production packaging and deployment.
