@@ -15,7 +15,7 @@ export { resolveMemoryConfig, type ConsolidationConfig, type DecayConfig, type P
 export { decayStep, estimateTokens, gistOf, halfLife, type DecayInput, type DecayResult, type MemoryKind } from './decay.ts'
 export { buildBlock, memoryLine, selfQuery, type BlockInput } from './inject.ts'
 export { MemoryStore, rowId, searchTerms, type Memory, type MemoryStatus, type NewMemory, type Segment, type TranscriptLine } from './store.ts'
-export { AnimaMemory } from './service.ts'
+export { AnimaMemory, OBSERVATIONS, type Observation } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-memory'

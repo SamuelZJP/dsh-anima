@@ -4,7 +4,7 @@
  * @module @anima/core/gate
  */
 
-import type { AllowRule, ApproveRule, QuotaRule } from './config.ts'
+import type { AllowRule, ApproveRule, LimitRule, QuotaRule } from './config.ts'
 import type { Mode } from './rhythm.ts'
 import type { BehaviorMeta, EffectClass, SessionInfo } from './types.ts'
 
@@ -20,6 +20,8 @@ export interface Policy {
   readonly allow: readonly AllowRule[]
   /** Behaviors that always need owner approval. */
   readonly approve?: readonly ApproveRule[]
+  /** Limits on numeric facts of calls. */
+  readonly limits?: readonly LimitRule[]
   /** Effect classes allowed per mode; all when omitted. */
   readonly allowedEffects?: Readonly<Record<Mode, readonly EffectClass[]>>
   /** Self-initiated conversations per day; unlimited when omitted. */
@@ -68,6 +70,8 @@ export interface GateCall {
   readonly now: number
   /** Parsed call arguments. */
   readonly args?: Readonly<Record<string, unknown>>
+  /** Numeric facts from `meta.facts`, when the behavior has them. */
+  readonly facts?: Readonly<Record<string, number>>
 }
 
 /** Refusal codes the gate emits. */
@@ -85,6 +89,7 @@ export const GateCode = {
   notAllowed: 'anima/not-allowed',
   notAllowlisted: 'anima/not-allowlisted',
   unknownChannel: 'anima/unknown-channel',
+  overLimit: 'anima/over-limit',
   denied: 'anima/denied',
 } as const
 
@@ -125,6 +130,7 @@ function counterKey(index: number, rule: QuotaRule, call: GateCall): string {
 function matches(rule: QuotaRule, call: GateCall): boolean {
   return (rule.effect === undefined || rule.effect === call.meta.effect)
     && (rule.behavior === undefined || rule.behavior === call.name)
+    && (rule.platform === undefined || rule.platform === call.meta.platform)
 }
 
 function describeScope(rule: QuotaRule): string {
@@ -177,6 +183,16 @@ export class QuotaBook {
     return undefined
   }
 
+  /** Entries for persistence; expired ones are dropped on the next read. */
+  toJSON(): Record<string, { at: number; amount: number }[]> {
+    return Object.fromEntries(this.entries)
+  }
+
+  /** Restore saved entries (from {@link toJSON}). */
+  load(saved: Readonly<Record<string, readonly { at: number; amount: number }[]>> | undefined): void {
+    for (const [key, list] of Object.entries(saved ?? {})) this.entries.set(key, list.map(entry => ({ at: entry.at, amount: entry.amount })))
+  }
+
   /** Count an allowed call against every rule it matches. */
   record(call: GateCall, quotas: readonly QuotaRule[]): void {
     const cost = call.meta.cost ?? 1
@@ -200,7 +216,7 @@ export class QuotaBook {
       const counters = [...this.entries.keys()].filter(key => key.startsWith(prefix))
       const used = counters.map(key => [key.slice(prefix.length), this.live(key, windowMs, now).reduce((s, e) => s + e.amount, 0)] as const)
         .filter(([, n]) => n > 0)
-      const filter = [rule.effect, rule.behavior].filter(Boolean).join(' ') || 'all'
+      const filter = [rule.platform === undefined ? undefined : `${rule.platform}_*`, rule.effect, rule.behavior].filter(Boolean).join(' ') || 'all'
       const detail = used.length === 0 ? 'unused' : used.map(([key, n]) => `${key} ${n}`).join(', ')
       return `${filter}: ${rule.limit} per ${describeWindow(rule.windowMinutes)} per ${rule.per} — ${detail}`
     })
@@ -209,7 +225,7 @@ export class QuotaBook {
 
 /**
  * Decide one behavior call. Checks, in order: Anima session, session kind,
- * platform, mode (night), channel allowlist, argument constraints, token
+ * platform, mode (night), channel allowlist, argument constraints, fact limits, token
  * budget, initiate rules (daily count, quiet hours, consent), quotas, and
  * last whether owner approval is needed (DESIGN §10). Does not record usage.
  * @param call - the call.
@@ -251,6 +267,13 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   }
   const constraint = meta.constraint?.(args)
   if (constraint !== undefined) return deny(GateCode.notAllowed, constraint)
+  for (const rule of policy.limits ?? []) {
+    if (rule.behavior !== name) continue
+    const value = call.facts?.[rule.fact]
+    if (value !== undefined && value > rule.max) {
+      return deny(GateCode.overLimit, `${name} allows ${rule.fact} up to ${rule.max}, and this call has ${Math.round(value * 100) / 100}. Choose something smaller or another tier.`)
+    }
+  }
   if (moment.overBudget && meta.effect !== 'internal') {
     return deny(GateCode.overBudget, `today's token budget for ${moment.mode === 'night' ? 'the night' : 'the day'} is used up. Only rest and other internal behaviors work until it renews.`)
   }

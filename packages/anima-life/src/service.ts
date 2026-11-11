@@ -24,7 +24,7 @@ import { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, type
 import { Outbox } from './outbox.ts'
 import { buildReport, type ChannelLine } from './report.ts'
 import { SessionRouter, type ModelChoice, type SessionHost } from './router.ts'
-import { senderLabel, wakes, type PublishedChannel, type Stimulus } from './stimulus.ts'
+import { senderLabel, wakes, type ExtraBlock, type PublishedChannel, type Stimulus } from './stimulus.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -109,9 +109,9 @@ export class DshSessionHost implements SessionHost<Agent> {
     this.ctx.get('sessionTitle')?.rename(agent.session, title)
   }
 
-  private message(text: string, summary: string, stimulus: string, ref?: string) {
+  private message(text: string, summary: string, stimulus: string, ref?: string, extra: readonly ExtraBlock[] = []) {
     return createUserMessage({
-      content: [{ type: 'text', text }],
+      content: [{ type: 'text', text }, ...extra],
       source: { kind: 'anima-stimulus', stimulus, form: 'notice', summary: boundContextSummary(summary), ...ref === undefined ? {} : { ref } },
     })
   }
@@ -124,8 +124,8 @@ export class DshSessionHost implements SessionHost<Agent> {
     }
   }
 
-  async deliver(agent: Agent, text: string, summary: string, stimulus: string, ref?: string): Promise<void> {
-    agent.followup(this.message(text, summary, stimulus, ref))
+  async deliver(agent: Agent, text: string, summary: string, stimulus: string, ref?: string, extra?: readonly ExtraBlock[]): Promise<void> {
+    agent.followup(this.message(text, summary, stimulus, ref, extra))
     await this.flush(agent)
   }
 
@@ -141,6 +141,31 @@ export class DshSessionHost implements SessionHost<Agent> {
   isBusy(agent: Agent): boolean {
     return agent.status === 'running'
   }
+}
+
+/** A close view to run in its own viewing session (DESIGN §11). */
+export interface ViewRequest {
+  /** Viewing key, unique per viewing (e.g. `bili:BV1xx:3`); names the session. */
+  readonly key: string
+  /** Title shown in the sidebar. */
+  readonly title: string
+  /** What she is looking at and why. */
+  readonly text: string
+  /** Frames with captions, in time order. */
+  readonly parts: readonly ExtraBlock[]
+  /** Vision-capable model of the viewing turn. */
+  readonly model?: ModelChoice
+  /** Real seconds the viewing may take. */
+  readonly timeoutSeconds: number
+  readonly signal?: AbortSignal
+}
+
+/** A viewing waiting for its note. */
+interface ViewWaiter {
+  resolve(note: string): void
+  reject(error: Error): void
+  /** Last assistant text, the fallback note. */
+  lastText: string
 }
 
 /** Durable life-loop state, `<dataDir>/life.json`. */
@@ -212,6 +237,8 @@ export class AnimaLife extends Service {
   readonly outbox: Outbox
   /** Batch whose turn is running in the group-triage session. */
   private triageTurn: string | undefined
+  /** Viewing sessions waiting for their note, by session id. */
+  private readonly views = new Map<string, ViewWaiter>()
 
   /**
    * @param ctx - root context.
@@ -391,6 +418,36 @@ export class AnimaLife extends Service {
   note(text: string): void {
     this.file.events.push(text)
     this.save()
+  }
+
+  // ---- viewing ----
+
+  /**
+   * Look closely at frames in a short viewing session of their own, on a
+   * vision model, and return her note (DESIGN §11). Only the note goes back to
+   * the caller, so the Self session stays text-only. Waits for `viewing_note`;
+   * a turn that ends without it yields its last text.
+   * @returns the viewing note.
+   */
+  async view(request: ViewRequest): Promise<string> {
+    const sessionId = this.router.viewingId(request.key)
+    if (this.views.has(sessionId)) throw new AnimaError('anima/view-busy', `viewing ${request.key} is already running.`)
+    let waiter!: ViewWaiter
+    const done = new Promise<string>((resolve, reject) => {
+      waiter = { resolve, reject, lastText: '' }
+    })
+    const onAbort = () => waiter.reject(new AnimaError('anima/view-aborted', 'the viewing was stopped.'))
+    this.views.set(sessionId, waiter)
+    const timer = setTimeout(() => waiter.reject(new AnimaError('anima/view-timeout', `the viewing did not finish within ${request.timeoutSeconds} s.`)), request.timeoutSeconds * 1000)
+    request.signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      await this.deliver({ type: 'view', key: request.key, title: request.title, text: request.text, parts: request.parts, ts: this.ctx.anima.clock.now() }, request.model === undefined ? {} : { model: request.model })
+      return await done
+    } finally {
+      clearTimeout(timer)
+      request.signal?.removeEventListener('abort', onAbort)
+      this.views.delete(sessionId)
+    }
   }
 
   // ---- group triage ----
@@ -642,8 +699,23 @@ export class AnimaLife extends Service {
         this.save()
         break
       }
+      case 'assistant/message': {
+        const waiter = info.kind === 'viewing' ? this.views.get(sessionId) : undefined
+        if (waiter !== undefined) {
+          const content = (data as { message?: { content?: { type: string; text?: string }[] } }).message?.content ?? []
+          const text = content.filter(block => block.type === 'text').map(block => block.text ?? '').join('').trim()
+          if (text !== '') waiter.lastText = text
+        }
+        break
+      }
       case 'turn/end': {
-        if (info.kind === 'group-triage') {
+        if (info.kind === 'viewing') {
+          const waiter = this.views.get(sessionId)
+          if (waiter !== undefined) {
+            if (waiter.lastText !== '') waiter.resolve(waiter.lastText)
+            else waiter.reject(new AnimaError('anima/view-no-note', 'the viewing ended without a note.'))
+          }
+        } else if (info.kind === 'group-triage') {
           // A batch turn that ended without a decision is remembered, never woken.
           if (this.triageTurn !== undefined) this.triage.decide(this.triageTurn, 'remember', 'turn-end')
           this.triageTurn = undefined
@@ -801,6 +873,26 @@ export class AnimaLife extends Service {
         return { decision }
       },
     }), { effect: 'internal', sessions: ['group-triage'] })
+
+    core.registerBehavior(defineTool({
+      name: 'viewing_note',
+      description: 'Finish this viewing with your note: what you saw, what stood out, what you think. The note is all you keep from it. Ends the viewing.',
+      parameters: {
+        note: { type: 'string', required: true, description: 'Your viewing note, in your own voice.' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { kept: { type: 'boolean', required: true, description: 'Always true.' } } },
+        render: () => [{ type: 'text', text: 'Note kept.' }],
+      },
+      execute: async (args, exec) => {
+        const waiter = exec.agent === undefined ? undefined : this.views.get(exec.agent.id)
+        if (waiter === undefined) throw new AnimaError('anima/no-view', 'no viewing is running in this session.')
+        if (args.note.trim() === '') throw new AnimaError('anima/empty-note', 'the note is empty.')
+        waiter.resolve(args.note.trim())
+        exec.concludeTurn()
+        return { kept: true }
+      },
+    }), { effect: 'internal', sessions: ['viewing'] })
 
     core.registerBehavior(defineTool({
       name: 'stay_silent',

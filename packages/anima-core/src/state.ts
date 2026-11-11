@@ -60,7 +60,7 @@ export interface SelfState {
 /** Default needs (DESIGN §7), starting values to be tuned from test runs. */
 export const DEFAULT_NEEDS: NeedSpec[] = [
   { name: 'connect', description: 'being with people you care about', baseline: 0.4, driftPerHour: 0.05, satisfiedBy: { local_say: 0.3 } },
-  { name: 'curiosity', description: 'finding out new things', baseline: 0.3, driftPerHour: 0.03, satisfiedBy: {} },
+  { name: 'curiosity', description: 'finding out new things', baseline: 0.3, driftPerHour: 0.03, satisfiedBy: { bili_view_closely: 0.25, bili_watch: 0.15, 'bili_*': 0.05 } },
   { name: 'expression', description: 'making or sharing something of your own', baseline: 0.3, driftPerHour: 0.02, satisfiedBy: {} },
   { name: 'rest', description: 'stopping and resting', baseline: 0.2, driftPerHour: 0.04, satisfiedBy: { rest: 0.1 } },
   { name: 'order', description: 'keeping your workspace, goals and memory tidy', baseline: 0.2, driftPerHour: 0.01, satisfiedBy: { 'goals_*': 0.1 } },

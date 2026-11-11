@@ -20,6 +20,8 @@ export interface QuotaRule {
   effect?: EffectClass
   /** Only this behavior (tool name); all when omitted. */
   behavior?: string
+  /** Only behaviors of this platform (e.g. `bili`); all when omitted. */
+  platform?: string
   /** One counter per channel, per platform, or one global counter. */
   per: QuotaScope
   /** Maximum total cost inside the window. */
@@ -38,6 +40,16 @@ export interface AllowRule {
 export interface ApproveRule {
   /** Tool name. */
   behavior: string
+}
+
+/** Owner limit on a numeric fact of a call (`BehaviorMeta.facts`), e.g. a video's length. */
+export interface LimitRule {
+  /** Tool name. */
+  behavior: string
+  /** Fact name, e.g. `durationSeconds`. */
+  fact: string
+  /** Largest allowed value. */
+  max: number
 }
 
 /** A model route for one kind of turn. */
@@ -105,6 +117,8 @@ export interface Config {
   dataDir: string
   /** Quotas checked by the policy gate. */
   quotas: QuotaRule[]
+  /** Limits on numeric facts of calls (DESIGN §10). */
+  limits: LimitRule[]
   /** Owner allow rules for `public` and `irreversible` behaviors. */
   allow: AllowRule[]
   /** Behaviors that always need owner approval. */
@@ -137,6 +151,15 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   { behavior: 'schedule_create', per: 'global', limit: 20, windowMinutes: 24 * 60 },
   // Group triage may wake a group's conversation at most this often (DESIGN §5).
   { behavior: 'group_wake', per: 'channel', limit: 6, windowMinutes: 60 },
+  // Bilibili browsing: calls per hour, and close views (tier 2) per day (DESIGN §11).
+  { platform: 'bili', per: 'platform', limit: 60, windowMinutes: 60 },
+  { behavior: 'bili_view_closely', per: 'global', limit: 3, windowMinutes: 24 * 60 },
+]
+
+/** Default limits: a close view looks at no more than 12 frames of a video up to 20 minutes. */
+export const DEFAULT_LIMITS: LimitRule[] = [
+  { behavior: 'bili_view_closely', fact: 'frames', max: 12 },
+  { behavior: 'bili_view_closely', fact: 'durationSeconds', max: 20 * 60 },
 ]
 
 /** Default model: DeepSeek-V4.1-Flash on the official API. */
@@ -175,10 +198,16 @@ export const Config: z<Config> = z.object({
   quotas: z.array(z.object({
     effect,
     behavior: z.string(),
+    platform: z.string(),
     per: z.union([z.const('channel'), z.const('platform'), z.const('global')]).required(),
     limit: z.number().min(1).required(),
     windowMinutes: z.number().min(1).required(),
   })).default(DEFAULT_QUOTAS).description('Sliding-window quotas checked by the policy gate.'),
+  limits: z.array(z.object({
+    behavior: z.string().required(),
+    fact: z.string().required(),
+    max: z.number().min(0).required(),
+  })).default(DEFAULT_LIMITS).description('Limits on numeric facts of calls, e.g. the length of a video she may view closely.'),
   allow: z.array(z.object({ behavior: z.string().required() })).default([])
     .description('Owner rules letting public or irreversible behaviors run without approval.'),
   approve: z.array(z.object({ behavior: z.string().required() })).default([])

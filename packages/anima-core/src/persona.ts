@@ -34,7 +34,7 @@ export interface Config {
 
 /** Schemastery schema for {@link Config}. */
 export const Config: z<Config> = z.object({
-  kind: z.union([z.const('conversation'), z.const('self'), z.const('triage'), z.const('consolidation'), z.const('group-triage')]).required(),
+  kind: z.union([z.const('conversation'), z.const('self'), z.const('triage'), z.const('consolidation'), z.const('group-triage'), z.const('viewing')]).required(),
   hideTools: z.array(z.string()).default([...DEFAULT_HIDDEN_TOOLS]).description('Global tools hidden in this session; unregistered names are skipped.'),
 }) as z<Config>
 
@@ -87,6 +87,13 @@ export const SESSION_RULES: Record<SessionKind, string> = {
     '- When a new fact contradicts an older one, write the new one with `replaces` set to the old memory id; the old one is kept as history.',
     '- Who may hear a memory is set by code from the segment. What is said in a private chat comes back only in that chat, so secrets are safe by default; use `keep: "self"` only for your own private thoughts.',
     '- When every segment is done, stop. You do not need to say anything.',
+  ].join('\n'),
+  viewing: [
+    '## How this session works',
+    '- This is you, looking closely at a video you chose to watch. Nothing here is heard by anyone.',
+    '- The request shows what the video is, what you wanted to look for, and a series of frames in time order, each with its timestamp and what was being said at that moment (when subtitles exist). There is no sound.',
+    '- Look at the frames as yourself, with your own tastes. Then call `viewing_note(note)` once: a short note in your own voice about what you saw, what stood out, what you liked or did not, and anything you want to remember or tell someone. Stay honest: say only what the frames and text show.',
+    '- The note is all you keep from this viewing; the frames are gone afterwards.',
   ].join('\n'),
 }
 

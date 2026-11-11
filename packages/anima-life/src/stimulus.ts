@@ -6,7 +6,11 @@
  */
 
 import { channelKey, type ChannelRef } from '@anima/core'
-import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId } from './identity.ts'
+import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+
+/** Extra content blocks a stimulus carries after its text (images of a close view). */
+export type ExtraBlock = Extract<ContentBlock, { type: 'text' | 'image' }>
 
 /** A channel an adapter publishes, with a display name. */
 export interface PublishedChannel extends ChannelRef {
@@ -98,6 +102,18 @@ export type Stimulus =
     readonly run: string
     readonly ts: number
   }
+  | {
+    /** A close look at a video she chose: text plus frames, to a short viewing session (DESIGN §11). */
+    readonly type: 'view'
+    /** Viewing key, naming the session (e.g. `bili:BV1xx:3`). */
+    readonly key: string
+    /** Session title suffix, e.g. the video title. */
+    readonly title: string
+    readonly text: string
+    /** Frames and their captions, in time order. */
+    readonly parts: readonly ExtraBlock[]
+    readonly ts: number
+  }
 
 /** Where a stimulus goes. */
 export type Route =
@@ -106,6 +122,7 @@ export type Route =
   | { readonly kind: 'triage'; readonly sessionId: string; readonly day: string }
   | { readonly kind: 'consolidation'; readonly sessionId: string; readonly day: string }
   | { readonly kind: 'group-triage'; readonly sessionId: string; readonly day: string }
+  | { readonly kind: 'viewing'; readonly sessionId: string; readonly title: string }
 
 /**
  * Whether a stimulus wakes a turn by default. Group messages wake only when
@@ -142,6 +159,8 @@ export function route(characterId: string, stimulus: Stimulus, selfGeneration = 
       return { kind: 'consolidation', sessionId: consolidationSessionId(characterId, stimulus.day), day: stimulus.day }
     case 'group-batch':
       return { kind: 'group-triage', sessionId: groupTriageSessionId(characterId, stimulus.day), day: stimulus.day }
+    case 'view':
+      return { kind: 'viewing', sessionId: viewingSessionId(characterId, stimulus.key), title: stimulus.title }
   }
 }
 
@@ -188,6 +207,8 @@ export function stimulusText(stimulus: Stimulus): string {
     }
     case 'consolidate':
       return `[consolidate]\n${stimulus.text}`
+    case 'view':
+      return `[viewing]\n${stimulus.text}`
   }
 }
 
@@ -201,6 +222,7 @@ export function stimulusSummary(stimulus: Stimulus): string {
     case 'consolidate': return 'Consolidating memories'
     case 'channel-event': return `Event in ${stimulus.channel.display}: ${stimulus.text}`
     case 'group-batch': return `Group batch ${stimulus.batch}: ${stimulus.channel.display}`
+    case 'view': return `Viewing closely: ${stimulus.title}`
   }
 }
 
@@ -209,5 +231,6 @@ export function stimulusRef(stimulus: Stimulus): string | undefined {
   if (stimulus.type === 'intent') return stimulus.intentId
   if (stimulus.type === 'consolidate') return stimulus.run
   if (stimulus.type === 'group-batch') return stimulus.batch
+  if (stimulus.type === 'view') return stimulus.key
   return undefined
 }

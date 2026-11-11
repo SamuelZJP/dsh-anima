@@ -15,3 +15,9 @@
     - id: anima-adapter-qq
       name: '@anima/adapter-qq'
       disabled: true
+    # Bilibili, read-only browsing on her own account (DESIGN §11). Disabled
+    # here so a profile never browses before the owner chose to; a patch sets
+    # disabled: false (config is optional; log in with /anima bili login).
+    - id: anima-adapter-bili
+      name: '@anima/adapter-bili'
+      disabled: true

@@ -208,6 +208,53 @@ The run found three gate problems, fixed in this phase. Each has tests.
 - A failed initiate (an approved probe for an unknown key) counted against her daily budget and used it up. Initiates now count only when the behavior succeeds.
 - An approval was asked for a call that the tool would refuse anyway (the unknown key). This is fixed by the first item.
 
+**Phase 5 demo (2026-11-10, Bilibili): exit check passed; the close view was prompted by the owner.**
+
+**Setup:**
+- A scratch `--patch` overlay set `anima-core` to `characterId: anima-bili2`, `name: 小鲸鱼`, `dataDir: ~/.anima/test-bili2`, `clock: { speed: 8, start: '2026-11-11T07:20' }`, and enabled `anima-adapter-bili` with default config.
+- Boot: `pnpm dsh --profile anima-dev --patch <scratch>/bili-day.yml --no-open`.
+- The owner logged her test account in with `/anima bili login`. The text QR has line gaps in the web UI and did not scan, so the owner scanned `login-qr.svg`. The cookie file was written with mode 0600.
+- A first run (`anima-bili`) was stopped after the logged-in probe found a bug, and the day restarted with the cookie copied over.
+- **Evidence:** decoded session logs, `life.json`, `state.json` and `memory.db`. All requests used `deepseek-official/deepseek-flash`.
+
+**Logged-in probe (her cookie):**
+- `nav`: `isLogin: true`.
+- `feed/all?type=video`: works.
+- `wbi/search/type`: now returns results (it gave only `v_voucher` anonymously).
+- `x/player/wbi/v2`: AI subtitles (`ai-zh`) on 5 of 6 searched videos.
+
+**Bug found and fixed by the probe:** for a multi-part video `view.duration` is the total of all parts, which reached 43 h on one series. The adapter now uses the length of part 1 (the `cid` it plays) for the 20-minute limit and the digest. A test covers it.
+
+**Day 1 (2026-11-11 on her clock), with nobody prompting her:**
+- 8 heartbeats: 3 `heartbeat_act`, the rest `rest`.
+- **07:30.** Triage escalated: "my curiosity itch is up — take a quick look at Bilibili". Self then:
+  - called `bili_popular` and `bili_feed`;
+  - watched two videos with `bili_watch`, one with AI subtitles;
+  - opened `i1` to the owner. The owner conversation sent a `local_say` about the «大肥鱼：我要做独立的鲸鲸！» video, tying it to her own name 小鲸鱼.
+- **12:00.** Self called `bili_popular`, then `bili_search("鲸鱼 纪录片")`, then `bili_watch` on a 4-minute sperm-whale film.
+  - She wrote a short piece into a `self` memory. Its danmaku section, viewers' wishes made on the whale, shaped the piece.
+  - **16:30.** She shared the piece with the owner (`i2`, sent).
+- **Consolidation:** her watches became `public` episodes (m1, m4) and the owner chats became `owner` episodes (m2, m5).
+- **No close view on day 1.** She chose the text tier every time.
+- **Ledger:** 25,542 of 300,000 billable day tokens; initiates 2 of 3; risk control never hit.
+
+**Day 2 morning (2026-11-12):**
+- At the owner's choice, an owner notice through `/anima self` said `bili_view_closely` exists and that she might try it.
+- She called `bili_feed`, then `bili_view_closely("BV1N3p56rEnj", focus: what the "big fat fish" really looks like)`.
+- **The viewing session (`anima-v-0691…`):**
+  - **Input:** one `user/message` with 15 blocks, the text plus **7 image blocks** (7 of 7 candidates at 360p). Each frame was paired with the AI subtitle line at its timestamp ("Frame 5 of 7, at 0:42 — said: 我要求赔偿精神损失费").
+  - **Model use:** one request, 3,741 input and 737 output tokens.
+  - **Note:** she called `viewing_note`. The note said what text alone could not show: the "whale" is a chibi mermaid figurine with a fish tail, standing on a bathroom sink, with an "AI 生成" (AI-generated) watermark.
+- **Self history stayed text-only:** Self received only the note.
+- **After the view:** memory m7 (`public` episode) holds it, and `<dataDir>/bili/cache` was empty afterwards. She opened `i4` and told the owner, correcting what she had said the day before.
+- **Ledger:** close-view quota 1 of 3; day tokens 13,128.
+
+**Issues seen:**
+- **Fixed:** an empty `tname` printed "· ·" / "(0:53, )".
+- **Open:**
+  - ~~the text QR is not scannable in the web UI~~ fixed 2026-11-11: the web UI shows command output as plain text in a `<pre>` (12/18 px lines, at most 260 px tall), where no text QR can scan. `/anima bili login` now serves the SVG on DSH's webserver at a one-time random path (`/anima/bili/qr/<32 hex>.svg`, removed when the login ends or expires) and prints the link. Hosts without a webserver still get the text QR. Checked live: the link opened the QR in the browser;
+  - `m6`, a note about herself written in the owner segment, took the owner scope, as the rules say (only `keep: "self"` narrows).
+
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
 - Edits to bundle or profile patch files hot-reload.
@@ -508,7 +555,7 @@ Anima packages talk through Cordis events declared in `interface Events` of `@de
 
 ### Bundle row disabled by default
 
-`bundle/cordis.patch.yml` lists `anima-adapter-qq` with `disabled: true`, so profiles without QQ boot (a disabled row may omit required config; `apps/cli/reference/README.md`). To enable it, a patch replaces the row's config and sets `disabled: false`. During development this is a `--patch` overlay, which leaves `~/.dsh` untouched:
+`bundle/cordis.patch.yml` lists `anima-adapter-qq` (and, since Phase 5, `anima-adapter-bili`) with `disabled: true`, so profiles without QQ boot (a disabled row may omit required config; `apps/cli/reference/README.md`). To enable it, a patch replaces the row's config and sets `disabled: false`. During development this is a `--patch` overlay, which leaves `~/.dsh` untouched:
 
 ```yaml
 - id: anima-adapter-qq
@@ -526,6 +573,24 @@ Anima packages talk through Cordis events declared in `interface Events` of `@de
 ### Group-triage preset
 
 A fifth Anima preset, `anima-group-triage` (`bundle/presets/group-triage.patch.yml`). Its sessions are `anima-g-<hash(characterId, day)>` in `<dataDir>/group-triage`. The model is selected per batch with `agent.model.select`, as for triage.
+
+## 8d. Phase 5 extension points (Bilibili, close views)
+
+### Images to a model (Verified in the Phase 5 demo, section 3)
+
+- A user message may carry image blocks: `{ type: 'image', attachment: ImageAttachmentRef }` (`packages/llm/llm/src/types.ts`, `ImageBlock`). A ref comes from the attachment service: `ctx.attachments.saveImage({ data, mediaType: 'image/jpeg', name? })` (`packages/attachment/attachment/src/index.ts`). The service is the `attachment-local` row of `dsh-base`.
+- `llm-deepseek` (`src/images.ts`, `prepareImages`) sends images only in `user` and `tool` messages, and only to a model whose catalog entry has `inputModalities` including `image`. Otherwise the request fails with `UNSUPPORTED_CONTENT`. `deepseek-flash` declares `['text', 'image']` (`src/models.ts:13`). The default limit is 600 images per request (`request-pricing.ts`), and images beyond the byte budget need an offload (`IMAGE_OFFLOAD_REQUIRED`).
+- Tool results can carry image blocks too; under PTC they are re-wrapped as a user message (`packages/core/tool-executor-ptc/src/ptc.ts:602`). Anima does not use this: frames go only to a viewing session, so Self history stays text-only.
+- Anima: `DshSessionHost.deliver(…, extra)` appends text and image blocks after the stimulus text in one `createUserMessage`, so the frames are logged as part of the `user/message` event.
+
+### Viewing sessions
+
+- Preset `anima-viewing` (`bundle/presets/viewing.patch.yml`), persona kind `viewing`. Sessions are `anima-v-<hash(characterId, key)>`, one per close view, in `<dataDir>/viewing`.
+- `animaLife.view()` selects the model with `agent.model.select`, delivers, and waits for the `viewing_note` behavior. The fallback is the last `assistant/message` text at `turn/end`; otherwise it times out.
+
+### Async facts in the gate
+
+The `tools/pre-execute` listener awaits `BehaviorMeta.facts(args)` before `decide()`, which is allowed because the waterfall is async. A slow fact lookup delays only that call.
 
 ## 9. Other extension points Anima will use (Read)
 
@@ -584,6 +649,11 @@ Re-check these on every DSH upgrade.
 | global `WebSocket` (client) | Node 24 built-in | QQ OneBot transport | Verified in unit tests (Phase 4) |
 | `exec.signal` on `tools/pre-execute` | `dsh-tools` | an aborted turn denies a pending owner approval | Read (Phase 4) |
 | Loader row `disabled: true` in a bundle, re-enabled by a patch | Cordis loader | optional QQ adapter row | Verified with `--dump-config` (Phase 4) |
+| `ImageBlock` in `createUserMessage`, `ctx.attachments.saveImage` | `dsh-llm`, `dsh-attachment` | close-view frames to a viewing session | Verified (Phase 5, section 3) |
+| catalog `inputModalities: ['text','image']` of `deepseek-flash` | `llm-deepseek` | viewing model | Verified (Phase 5: 7 images in one request) |
+| global `fetch`, `Response.headers.getSetCookie`, `node:crypto` md5, `Readable.fromWeb` | Node 24 built-ins | Bilibili client, WBI, downloads | Verified (Phase 5) |
+| system `ffmpeg` (`select` scene + `showinfo`, `-fps_mode vfr`) | OS binary | frame extraction | Verified (Phase 5) |
+| `ctx.webServer.register({ kind: 'exact', path, resource })`, `getOrigin()` (optional, read with `ctx.get`) | `dsh-host-webserver` | login QR page | Verified (Phase 5 follow-up; typed locally, no dependency added) |
 
 ## 12. Known gaps and risks
 

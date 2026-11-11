@@ -15,7 +15,7 @@ import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { audienceOf, chatPerson, describeScope, hears, learnScope, narrow, personOf, type Keep, type Scope, type SessionFacts } from './audience.ts'
+import { audienceOf, chatPerson, describeScope, hears, learnScope, narrow, personOf, PUBLIC, SELF, type Keep, type Scope, type SessionFacts } from './audience.ts'
 import type { Config } from './config.ts'
 import { buildBlock, memoryLine, selfQuery } from './inject.ts'
 import { MemoryStore, type Memory, type Segment } from './store.ts'
@@ -37,6 +37,24 @@ declare module '@deepseek-ai/dsh-llm' {
 const TICK_MS = 60_000
 const HOUR = 3_600_000
 const DAY = 24 * HOUR
+
+/** Transcript session id of observations (what she watched or read on her own). */
+export const OBSERVATIONS = 'anima-observations'
+
+/** Something she observed on her own (a video she watched), from an adapter. */
+export interface Observation {
+  /** What she observed, one or a few lines. */
+  readonly text: string
+  /** Who may hear it later: `public` for public content, `self` for her own thoughts. */
+  readonly scope: 'public' | 'self'
+  /**
+   * Store it as a memory right away (text the model already wrote, such as a
+   * viewing note). Without it the line goes to her transcript, and consolidation sorts it.
+   */
+  readonly memory?: { readonly kind?: MemoryKind; readonly importance?: number }
+  /** Session it came from. */
+  readonly source?: string
+}
 
 /** A consolidation run in progress. */
 interface Run {
@@ -135,6 +153,24 @@ export class AnimaMemory extends Service {
     this.store.record({ ts: event.at, sessionId: event.sessionId, channelKey: facts.info.channelKey, scope, dir: 'out', speaker: 'you', text: event.args.text })
   }
 
+  /**
+   * Record something she observed on her own (DESIGN §8). The caller picks
+   * `public` or `self`; nothing wider can be named.
+   * @returns the memory id when stored as a memory, else undefined.
+   */
+  observe(observation: Observation): string | undefined {
+    const scope: Scope = observation.scope === 'public' ? PUBLIC : SELF
+    const now = this.ctx.anima.clock.now()
+    if (observation.memory !== undefined) {
+      return this.store.remember({
+        kind: observation.memory.kind ?? 'episode', scope, text: observation.text,
+        importance: observation.memory.importance, source: observation.source, now,
+      }).id
+    }
+    this.store.record({ ts: now, sessionId: OBSERVATIONS, channelKey: undefined, scope, dir: 'in', speaker: 'you', text: observation.text })
+    return undefined
+  }
+
   // ---- automatic recall ----
 
   private async preStep(
@@ -221,7 +257,7 @@ export class AnimaMemory extends Service {
       const known = this.store.inScope(segment.scope, 12)
       parts.push([
         '',
-        `## ${label}: ${display ?? segment.channelKey ?? segment.sessionId}; heard by: ${describeScope(segment.scope)}`,
+        `## ${label}: ${segment.sessionId === OBSERVATIONS ? 'things you watched or read on your own' : display ?? segment.channelKey ?? segment.sessionId}; heard by: ${describeScope(segment.scope)}`,
         `People: ${people.length === 0 ? 'none' : people.map(([id, name]) => `${name} [${id}]`).join(', ')}`,
         `Memories you already have for this audience: ${known.length === 0 ? 'none' : ''}`,
         ...known.map(memory => memoryLine(memory, false)),

@@ -7,8 +7,8 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnimaError, channelKey, type SessionInfo, type SessionKind } from '@anima/core'
-import { route, stimulusRef, stimulusSummary, stimulusText, wakes, type PublishedChannel, type Route, type Stimulus } from './stimulus.ts'
-import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId } from './identity.ts'
+import { route, stimulusRef, stimulusSummary, stimulusText, wakes, type ExtraBlock, type PublishedChannel, type Route, type Stimulus } from './stimulus.ts'
+import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
 
 /** Preset ids of the session kinds (bundle/presets/*.patch.yml). */
 export const PRESETS: Record<SessionKind, string> = {
@@ -17,9 +17,10 @@ export const PRESETS: Record<SessionKind, string> = {
   triage: 'anima-triage',
   consolidation: 'anima-consolidation',
   'group-triage': 'anima-group-triage',
+  viewing: 'anima-viewing',
 }
 
-const CWD: Record<SessionKind, string> = { conversation: 'conversations', self: 'workspace', triage: 'triage', consolidation: 'consolidation', 'group-triage': 'group-triage' }
+const CWD: Record<SessionKind, string> = { conversation: 'conversations', self: 'workspace', triage: 'triage', consolidation: 'consolidation', 'group-triage': 'group-triage', viewing: 'viewing' }
 
 /** A model route to select for a session's next requests. */
 export interface ModelChoice {
@@ -43,7 +44,7 @@ export interface SessionHost<A extends HostAgent = HostAgent> {
   /** Set a new session's title. */
   rename(agent: A, title: string): void
   /** Queue a waking message and wait until it is durable. */
-  deliver(agent: A, text: string, summary: string, stimulus: Stimulus['type'], ref?: string): Promise<void>
+  deliver(agent: A, text: string, summary: string, stimulus: Stimulus['type'], ref?: string, extra?: readonly ExtraBlock[]): Promise<void>
   /** Queue context for the agent's next step without waking it. */
   inject(agent: A, text: string, summary: string, stimulus: string): Promise<void>
   /** Select the model of the agent's next requests. */
@@ -69,6 +70,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
   private readonly triage = new Map<string, string>()
   private readonly consolidation = new Map<string, string>()
   private readonly groupTriage = new Map<string, string>()
+  private readonly viewing = new Map<string, string>()
 
   constructor(private readonly host: SessionHost<A>, private readonly options: RouterOptions) {}
 
@@ -100,6 +102,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
     if (this.triage.has(sessionId)) return { kind: 'triage' }
     if (this.consolidation.has(sessionId)) return { kind: 'consolidation' }
     if (this.groupTriage.has(sessionId)) return { kind: 'group-triage' }
+    if (this.viewing.has(sessionId)) return { kind: 'viewing' }
     const entry = this.channels.get(sessionId)
     return entry === undefined ? undefined : { kind: 'conversation', channel: entry.channel, channelKey: entry.channelKey }
   }
@@ -131,6 +134,16 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
   groupTriageId(day: string): string {
     const id = groupTriageSessionId(this.options.characterId, day)
     this.groupTriage.set(id, day)
+    return id
+  }
+
+  /**
+   * Viewing session id of one close view, made known to {@link describe}.
+   * @param key - viewing key.
+   */
+  viewingId(key: string): string {
+    const id = viewingSessionId(this.options.characterId, key)
+    this.viewing.set(id, key)
     return id
   }
 
@@ -206,6 +219,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
     if (target.kind === 'triage') this.triage.set(target.sessionId, target.day)
     if (target.kind === 'consolidation') this.consolidation.set(target.sessionId, target.day)
     if (target.kind === 'group-triage') this.groupTriage.set(target.sessionId, target.day)
+    if (target.kind === 'viewing') this.viewing.set(target.sessionId, target.title)
     let agent: A | undefined
     if (stimulus.type === 'channel-event') {
       if (this.host.isArchived(target.sessionId)) return target.sessionId
@@ -216,7 +230,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
     }
     before?.(agent)
     const text = this.stamped(stimulusText(stimulus))
-    if (wake) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus))
+    if (wake) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus), stimulus.type === 'view' ? stimulus.parts : undefined)
     else await this.host.inject(agent, text, stimulusSummary(stimulus), stimulus.type)
     return target.sessionId
   }
@@ -241,6 +255,7 @@ function title(target: Route): string {
     case 'triage': return `Anima · triage ${target.day}`
     case 'consolidation': return `Anima · memory ${target.day}`
     case 'group-triage': return `Anima · groups ${target.day}`
+    case 'viewing': return `Anima · viewing ${target.title}`
     case 'conversation': return `Anima · ${target.channel.display}`
   }
 }

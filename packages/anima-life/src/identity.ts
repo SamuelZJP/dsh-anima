@@ -59,3 +59,13 @@ export function consolidationSessionId(characterId: string, day: string): string
 export function groupTriageSessionId(characterId: string, day: string): string {
   return `anima-g-${digest('group-triage', characterId, day)}`
 }
+
+/**
+ * Viewing session id of one close view (DESIGN §11): one short session per viewing.
+ * @param characterId - character identity.
+ * @param key - the viewing key, e.g. `bili:BV1xx:3`.
+ * @returns `anima-v-<24 hex>`.
+ */
+export function viewingSessionId(characterId: string, key: string): string {
+  return `anima-v-${digest('viewing', characterId, key)}`
+}

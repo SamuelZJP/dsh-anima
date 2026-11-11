@@ -291,6 +291,23 @@ describe('AnimaMemory', () => {
     expect(ctx.animaMemory.reportLine()).toMatch(/^Memory: 0 conversation lines not yet consolidated; last consolidation 2026-11-10 10:00\.$/)
   })
 
+  it('keeps what she watched as public: heard in the owner chat and by others, never widened further', async () => {
+    const { ctx, host } = await setup()
+    const id = ctx.animaMemory.observe({ text: 'You looked closely at BV1abc «Cat piano». Your viewing note: the cat plays a C major chord.', scope: 'public', memory: { kind: 'episode' } })
+    expect(ctx.animaMemory.store.get(id!)).toMatchObject({ scope: 'public', kind: 'episode' })
+    expect((await callAs(ctx, sessionOf(OWNER), 'memory_recall', { query: 'cat piano' })).text).toContain('C major')
+    expect((await callAs(ctx, sessionOf(ALICE), 'memory_recall', { query: 'cat piano' })).text).toContain('C major')
+    ctx.animaMemory.observe({ text: 'A private thought about the video.', scope: 'self', memory: {} })
+    expect((await callAs(ctx, sessionOf(OWNER), 'memory_recall', { query: 'private thought video' })).text).toBe('Nothing comes to mind.')
+
+    // A plain observation goes to the transcript as its own public segment for consolidation.
+    expect(ctx.animaMemory.observe({ text: 'You watched BV1xyz «Hotpot vlog» by Mao.', scope: 'public' })).toBeUndefined()
+    expect(await ctx.animaMemory.consolidate('her')).toBe(1)
+    const delivered = host.delivered.find(d => d.id === consolidationSessionId('anima', ctx.anima.dayKey()))!
+    expect(delivered.text).toContain('## s1: things you watched or read on your own; heard by: public')
+    expect(delivered.text).toContain('Hotpot vlog')
+  })
+
   it('runs the fallback when the oldest pending line is old enough', async () => {
     const { ctx, host } = await setup({ consolidation: { fallbackHours: 2 } as memory.Config['consolidation'] })
     await ctx.animaLife.deliver(message(ALICE, 'Alice', 'hello there'))

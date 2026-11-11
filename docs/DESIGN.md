@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-10 (Phase 4) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-10 (Phase 5) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -38,7 +38,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 
 ## 3. Core concepts
 
-Nine concepts carry the whole design; every later section is built from them.
+Ten concepts carry the whole design; every later section is built from them.
 
 | Concept | What it is | Owned by |
 | --- | --- | --- |
@@ -51,6 +51,7 @@ Nine concepts carry the whole design; every later section is built from them.
 | **Triage session** | One short-lived session per day of hers that runs the cheap heartbeat decision: rest, or wake the Self session to act. | Life loop |
 | **Group-triage session** | One short-lived session per day of hers that sorts buffered group chatter on a cheap model: ignore, remember, or wake the group (section 5). | Life loop |
 | **Consolidation session** | One short session per day of hers that sorts her transcript into memories, on a cheap model. | Memory (delivered by the life loop) |
+| **Viewing session** | One short session per close view of a video: frames in on a vision model, one text note out (section 11). | Life loop (asked by an adapter) |
 
 She also has **self state**: a small set of numbers (needs, energy, circadian phase, mood) that change over time and with behavior outcomes. It is shown to her, never acted on by code directly.
 
@@ -118,6 +119,7 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 | `alarm` | DSH `schedule` task she created | Self or the named session | Yes |
 | `intent` | Self session via `open_conversation` | Target conversation session | Yes |
 | `consolidate` | Memory (`memory_consolidate` or the fallback job) | Consolidation session of her day | Yes, on the consolidation model |
+| `view` | An adapter's close view (`animaLife.view`) | A new viewing session | Yes, on the viewing model |
 | `owner-command` | Owner's bound account or DSH UI | Handled by command, no model turn | No |
 
 ### Session identity
@@ -169,10 +171,11 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 | `cost` | Rough weight against her daily budget | `1` |
 | `rateKey` | What quota it counts against | `channel`, `platform`, `global` |
 | `audience` | Who will see the output, for memory scoping | derived from the channel |
-| `sessions` | Which session kinds may call it | `conversation`, `self`, `triage` |
+| `sessions` | Which session kinds may call it | `conversation`, `self`, `triage`, `viewing` |
 | `modes` | Heartbeat modes it works in (all by default) | `day` |
 | `target` | For `initiate`: which channel the call targets, read from its arguments, for consent | `args.channel` |
 | `constraint` | Owner rule on arguments | schedule target must be `this_session` |
+| `facts` | Numeric facts about a call, found before it runs and checked against the owner's `limits` (section 10) | a video's `durationSeconds`, `frames` |
 
 ### Effect classes
 
@@ -198,15 +201,16 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `rest(until?)` — end the current turn and suggest the next heartbeat time (triage and Self).
 - `heartbeat_act(reason)` — triage only, by day: wake the Self session to act.
 - `group_wake(batch, reason)`, `group_pass(batch, remember, reason?)` — group-triage session only (section 5).
+- `viewing_note(note)` — viewing session only: her note on a close view; it ends the viewing (section 11).
 
-Platform adapters add platform behaviors (`qq_history`, later `qq_poke`, `bili_post_dynamic`, `bili_comment`, …) with the same metadata.
+Platform adapters add platform behaviors (`qq_history`, `bili_watch`, later `qq_poke`, `bili_comment`, …) with the same metadata.
 
 ### Tool scoping by platform
 
 A session only sees the behaviors that fit it, so platform tools never mix.
 
 - **Conversation session**: core behaviors plus the behaviors of its own channel's platform only. A QQ chat sees `qq_*`, never `bili_*`. Tools are namespaced per platform with an underscore prefix (`qq_say`, `bili_comment`), because model providers only accept tool names matching `[A-Za-z0-9_-]{1,64}` (no dots).
-- **Self session**: core behaviors plus each platform's `observe` behaviors (e.g. `bili_browse_feed`). It reaches other platforms' channels only through `open_conversation`, so it never calls a platform's `say` directly.
+- **Self session**: core behaviors plus each platform's `observe` behaviors (e.g. `bili_feed`, `bili_watch`). It reaches other platforms' channels only through `open_conversation`, so it never calls a platform's `say` directly.
 - Scoping is applied when DSH resolves the tool set for a step, using each behavior's `sessions` and `platform` metadata.
 
 ### Workspace
@@ -300,9 +304,11 @@ Every memory carries a scope: `private:<personId>`, `group:<channel>`, `owner`, 
 | Self | `self` | everything |
 | Consolidation | from each transcript segment | only the segments it is given |
 | Triage | nothing | nothing |
+| Viewing | nothing (its note comes back to the adapter) | nothing |
 
 - **Person id**: `owner` for bound owner accounts; a hand-linked id from `anima-memory` config `persons: [{ id, accounts: ['qq:123', 'local:alice'] }]`; otherwise `platform:userId`. By adapter convention a private channel's `id` is the other party's user id.
 - **Narrow only**: `memory_remember` and `memory_write` take `keep: 'here' | 'self'`. `here` is the session's scope, and `self` is the only narrowing. The model never types a scope, so it cannot widen one. In a private chat `here` already means "only this person", which is how secrets stay private and can still be talked about with the person who told them.
+- **Observations**: what she watches or reads on her own reaches memory through `animaMemory.observe`, with scope `public` (public content, so any chat may hear it) or `self`. The adapter picks one of those two; nothing wider can be named. A plain observation is a transcript line that consolidation sorts (its own segment, "things you watched or read on your own"); text the model already wrote, such as a viewing note, is stored at once as an episode.
 - **Self → intent (open):** the Self session hears everything, and the free text of an `intent` is not checked by code against the target audience. Phase 3 relies on the conversation's own scoped recall and a persona rule; see Still open.
 
 ### Transcript
@@ -357,10 +363,10 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 1. **Session kind**: the behavior is allowed in this session (e.g. `open_conversation` only from Self).
 2. **Mode**: at night only `observe` and `internal` behaviors run (settable per mode); day-only behaviors such as `heartbeat_act` are refused (`anima/night`).
 3. **Effect class**: `public` and `irreversible` go to approval unless an owner rule whitelists them.
-4. **Quotas and budgets**: per channel, per platform, per day; the daily token budget (`anima/over-budget`); self-initiated conversations per day (default 3).
+4. **Quotas and budgets**: per channel, per platform (a rule can match all of one platform's behaviors, e.g. `bili_*` 60 per hour), per day; quota counters persist in `state.json`, so a daily limit survives a restart; the daily token budget (`anima/over-budget`); self-initiated conversations per day (default 3).
 5. **Time**: quiet hours; her own sleep phase (`anima/quiet-hours`).
 6. **Consent**: channels and people she may initiate with (default: the owner's channels only); never strangers by default (`anima/no-consent`).
-7. **Arguments**: owner rules on a behavior's arguments, e.g. alarm targets (`anima/not-allowed`).
+7. **Arguments**: owner rules on a behavior's arguments, e.g. alarm targets (`anima/not-allowed`). **Fact limits**: owner `limits: [{ behavior, fact, max }]` on numeric facts a behavior reports before it runs (`BehaviorMeta.facts`), e.g. a close view's video length and frame count (`anima/over-limit`). A failure to find the facts refuses the call.
 8. **Trust of the trigger**: the trust level of whoever caused this turn limits which classes are reachable. A group member cannot cause a public post.
 9. **Group health**: skip unprompted speech in groups dominated by other bots (surfcore's fish-guard idea, as a rule).
 
@@ -420,10 +426,38 @@ Unloading the plugin removes all of the above through Cordis effects.
 | --- | --- | --- | --- |
 | `anima-adapter-local` | DSH web UI | `say` to the owner without any external platform | Phase 1, for development |
 | `anima-adapter-qq` | NapCatQQ (any OneBot v11 runtime) | `qq_say` (reply, @), `qq_history`; inbound private/group messages, pokes, recalls, friend requests. Later: poke and emoji reactions, typing status, Qzone, files | Phase 4 |
-| `anima-adapter-bili` | Bilibili web API with her account | browse feed, watch info, comment, post dynamic, DMs | Phase 5 |
+| `anima-adapter-bili` | Bilibili web API with her account | Read-only, Self only: skim (`bili_feed`, `bili_popular`, `bili_search`), watch as text (`bili_watch`, `bili_comments`), close view (`bili_view_closely`). Later: comments, DMs, dynamics, likes (public behaviors through approvals) | Phase 5 |
 | `anima-adapter-wechat` | Deferred | `say` | Later |
 
 `anima-adapter-local` lets the whole system be built and tested before QQ is connected.
+
+### Bilibili (Phase 5): tiered viewing
+
+Bilibili is a place she watches, not one where she talks. `anima-adapter-bili` registers only `observe` behaviors for her Self session (by day), in three tiers. She picks the tier herself; no code scores whether a video is worth watching.
+
+| Tier | Behaviors | Returns |
+| --- | --- | --- |
+| 0 skim | `bili_feed` (follows; needs login), `bili_popular`, `bili_search(query)` | One compact line per video: bvid, title, uploader, length, counts, a short description |
+| 1 watch | `bili_watch(bvid)`, `bili_comments(bvid, page?)` | One text digest: metadata, subtitles (CC, else AI), a danmaku sample spread over the video, top comments; each section capped in config |
+| 2 close view | `bili_view_closely(bvid, focus?)` | Her viewing note |
+
+- **Close view.**
+  1. The adapter downloads a low-quality stream (360p) into a capped cache under the data directory.
+  2. `ffmpeg` extracts frames: the first frame, scene changes, and a fallback every N seconds. K of them, spread over time, are kept, each paired with the subtitle line at its moment.
+  3. The frames go as image blocks to a short **viewing session** (preset `anima-viewing`, a vision-capable model) through `animaLife.view`.
+  4. She writes a note with `viewing_note`, and only that note returns to Self. Self history stays text-only, the same pattern as consolidation.
+  5. The files are deleted afterwards. Audio is not used (DSH input is text and images).
+- **ffmpeg** is a required system binary while close views are enabled. Load fails with `anima/ffmpeg-missing` and an install hint.
+- **Limits, all in the gate:**
+  - `bili_*` 60 calls per hour (platform quota)
+  - `bili_view_closely` 3 per day
+  - `limits` of 12 frames and 1200 s of video, checked through `facts` before anything is downloaded
+  - the token budget
+  
+  The adapter only paces its HTTP requests (one at a time, a minimum gap) and backs off on Bilibili's risk control (`-352`, doubling from 60 s). The back-off shows in `/anima status` and in her report.
+- **Account.** A dedicated account, logged in by the owner with `/anima bili login` (QR). The cookie lives in `<dataDir>/bili/cookie.json` (0600). WBI signing uses `node:crypto`; there are no dependencies.
+- **Memory and needs.** A watch is a `public` observation; a close view's note is stored as a `public` episode, so she can bring a video up in any chat. The default `curiosity` need is satisfied by `bili_view_closely` 0.25, `bili_watch` 0.15 and other `bili_*` 0.05.
+- **Later:** comments, DMs, dynamics and likes as `public` behaviors through approvals; Bilibili conversation channels.
 
 ## 12. Observability and owner control
 
@@ -493,6 +527,10 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | QQ scope (Phase 4) | Inbound: private and group messages (text, @, reply, image placeholders), pokes, recalls, friend requests. Outbound: `qq_say` with reply and @; `qq_history`. Later: outbound pokes and reactions, typing, Qzone, files | 11 |
 | Allowlist | Only configured chats (owner + listed users and groups); enforced in the adapter, in `animaLife.deliver` and in the gate, never in prompts | 10 |
 | Group triage | Per-group buffer (default 60 s / 30 messages) → one cheap turn in a daily group-triage session: `group_wake` or `group_pass(remember)`; direct address and owner always wake; wake cap is a gate quota; fallbacks remember | 5 |
+| Bilibili scope (Phase 5) | Read-only `observe` behaviors in the Self session only, three tiers she chooses; no Bilibili channels; comment, DM, post and like are later work | 6, 11 |
+| Close views | 360p download → ffmpeg frames (scene + fallback) → viewing session on a vision model → text note only; files deleted; ffmpeg checked at load | 11 |
+| Fact limits | `BehaviorMeta.facts` + core `limits` rules (`anima/over-limit`), e.g. video length and frames; platform-wide quotas (`QuotaRule.platform`); quota counters persist | 10 |
+| Observations | Adapters record what she watched through `animaMemory.observe` with scope `public` or `self` only | 8 |
 | Owner approvals | Over the owner line (QQ private chat): id + plain `yes`/`no <id>`; timeout (600 s) = denied; core config `approve` forces approval for named behaviors; friend requests use it and are never auto-accepted | 10 |
 | Outbox | Her initiated messages wait `outbox.delaySeconds` (default 45, real time); cancel via `/anima outbox cancel <id>` or `cancel <id>` on the owner line | 10 |
 
@@ -504,6 +542,7 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 - [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before real people talk to her.
 - [x] **Outbox delay**: built in Phase 4 (section 10).
 - [x] **Session-log upload**: turned off in `anima-dev` (owner decision, Phase 4; DSH-INTEGRATION §12).
+- [ ] **Close-view uptake**: on her own she chose the text tier all day; the close view came after an owner notice. Decide whether the tool description or her report should present the tier more plainly, or whether rare use is right.
 - [ ] **Week on QQ**: the unattended week was cancelled for now; run it later if group wake rates need measuring.
 
 ### Phased roadmap
@@ -513,4 +552,4 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 2. **Phase 2 — Autonomy.** Self state, heartbeat with triage, `open_conversation`, goals, self-set alarms. Exit: over a test day she initiates at least once on her own and rests otherwise, within budget.
 3. **Phase 3 — Memory.** Store, scoped recall, auto-injection, nightly consolidation, decay. Exit: a private fact is recalled in that private chat and not in a group. Done 2026-11-10 (DSH-INTEGRATION §3).
 4. **Phase 4 — QQ.** `anima-adapter-qq` on NapCatQQ (OneBot v11), private and group chats on an allowlist, group triage, owner-DM approvals, the outbox. Exit: a week on a test account with no runaway wakes. Supervised runs passed 2026-11-10 (DSH-INTEGRATION §3). The owner cancelled the week-long run for now, so the phase closes on the supervised runs; the runaway-wake check is a gate quota (`group_wake`) plus the per-group counters in `life.json`, not yet a measured week.
-5. **Phase 5 — Bilibili and beyond.** `anima-adapter-bili`, public behaviors through approvals. WeChat is deferred.
+5. **Phase 5 — Bilibili (read-only).** `anima-adapter-bili`: skim, watch and close-view tiers in the Self session, QR login, risk-control back-off, viewing sessions, observations in memory. Exit: over a test day she browses on her own initiative during heartbeats, watches some videos and views at least one closely, and later brings one up with the owner in a chat, all within budget; evidence from the transcripts. Done 2026-11-10 (DSH-INTEGRATION §3). She browsed, watched and shared on her own; her one close view came after an owner notice said the tier exists. Bilibili public behaviors (comments, DMs, posts, likes) through approvals and WeChat come after.

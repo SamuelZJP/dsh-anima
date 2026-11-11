@@ -11,7 +11,7 @@ import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from
 import { AnimaCore } from './service.ts'
 
 export * from './types.ts'
-export { DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
+export { DEFAULT_LIMITS, DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type LimitRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
 export { decide, GateCode, OPEN_MOMENT, QuotaBook, visibleIn, type GateCall, type GateMoment, type Policy, type Verdict } from './gate.ts'
 export { AnimaClock, formatLocal, formatStamp, localDate, nextAtClock, parseClockTime, parseLocalDateTime, parseWhen, type ClockConfig } from './clock.ts'
 export { dayKey, inWindow, modeAt, nextWake, phaseAt, resolveRhythm, type Mode, type Phase, type Rhythm, type RhythmConfig } from './rhythm.ts'

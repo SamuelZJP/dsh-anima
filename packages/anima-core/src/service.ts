@@ -89,6 +89,8 @@ export function defaultConstitution(name: string): string {
 interface StateFile {
   self: SelfState
   days: Record<string, DayLedger>
+  /** Quota counters, so daily limits survive a restart. */
+  quotas?: Record<string, { at: number; amount: number }[]>
 }
 
 /** Anima core service. */
@@ -136,6 +138,7 @@ export class AnimaCore extends Service {
     }
     this.self = saved === undefined || saved.self.updatedAt > now ? initialState(this.model, now) : saved.self
     this.ledger = new Ledger(saved?.days ?? {})
+    this.quota.load(saved?.quotas)
     // Ids keep counting across restarts, so a late "yes a3" never approves a newer request.
     const approvalsPath = join(config.dataDir, 'approvals.json')
     const approvalSeq = { seq: readJson<{ seq: number }>(approvalsPath)?.seq ?? 0 }
@@ -151,12 +154,23 @@ export class AnimaCore extends Service {
       if (meta === undefined) return next()
       if (this.state.paused) return refusal(GateCode.paused, PAUSED_HINT)
       const args = exec.arguments !== null && typeof exec.arguments === 'object' ? exec.arguments as Record<string, unknown> : {}
+      let facts: Readonly<Record<string, number>> | undefined
+      if (meta.facts !== undefined) {
+        try {
+          facts = await meta.facts(args)
+        } catch (error: unknown) {
+          const code = error instanceof AnimaError ? error.code : 'anima/facts-failed'
+          const text = error instanceof Error ? error.message.replace(/^[a-z]+\/[a-z-]+:\s*/, '') : String(error)
+          return refusal(code, text)
+        }
+      }
       const call: GateCall = {
         name: exec.name,
         meta,
         session: exec.agent === undefined ? undefined : this.describeSession(exec.agent.id),
         now: this.clock.now(),
         args,
+        ...facts === undefined ? {} : { facts },
       }
       const verdict = decide(call, this.policy(), this.quota, this.moment(call.now))
       if (!verdict.allowed) return refusal(verdict.code, verdict.hint)
@@ -288,6 +302,7 @@ export class AnimaCore extends Service {
       quotas: this.config.quotas,
       allow: this.config.allow,
       approve: this.config.approve,
+      limits: this.config.limits,
       allowedEffects: { day: this.config.modes.day.allowedEffects, night: this.config.modes.night.allowedEffects },
       initiatePerDay: this.config.initiate.perDay,
     }
@@ -348,7 +363,7 @@ export class AnimaCore extends Service {
   }
 
   private save(): void {
-    writeJson(this.statePath, { self: this.self, days: this.ledger.toJSON() } satisfies StateFile)
+    writeJson(this.statePath, { self: this.self, days: this.ledger.toJSON(), quotas: this.quota.toJSON() } satisfies StateFile)
   }
 
   private onBehaviorSuccess(name: string): void {

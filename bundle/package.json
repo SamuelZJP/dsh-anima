@@ -26,11 +26,13 @@
         "./presets/self.patch.yml",
         "./presets/triage.patch.yml",
         "./presets/consolidation.patch.yml",
-        "./presets/group-triage.patch.yml"
+        "./presets/group-triage.patch.yml",
+        "./presets/viewing.patch.yml"
       ]
     }
   },
   "dependencies": {
+    "@anima/adapter-bili": "workspace:*",
     "@anima/adapter-local": "workspace:*",
     "@anima/adapter-qq": "workspace:*",
     "@anima/core": "workspace:*",

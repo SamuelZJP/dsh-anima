@@ -60,11 +60,12 @@ export function chatPerson(facts: SessionFacts, persons: readonly PersonLink[]):
  * - private chat: `private:<personId>`, or `owner` in the owner's own chat
  * - any other channel kind (group, thread): `group:<channelKey>`
  * - Self and consolidation: `self`
+ * - viewing: nothing (its note comes back through the adapter)
  * @returns the scope, or undefined where she learns nothing (triage, non-Anima sessions).
  */
 export function learnScope(facts: SessionFacts, persons: readonly PersonLink[]): Scope | undefined {
   const { info } = facts
-  if (info === undefined || info.kind === 'triage' || info.kind === 'group-triage') return undefined
+  if (info === undefined || info.kind === 'triage' || info.kind === 'group-triage' || info.kind === 'viewing') return undefined
   if (info.kind === 'self' || info.kind === 'consolidation') return SELF
   const person = chatPerson(facts, persons)
   if (person !== undefined) return person === 'owner' ? OWNER : `private:${person}`

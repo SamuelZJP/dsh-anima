@@ -12,12 +12,13 @@ export const EFFECT_CLASSES: readonly EffectClass[] = ['observe', 'internal', 'w
 /**
  * Kind of an Anima session. `triage` runs the cheap heartbeat decision (DESIGN §7);
  * `consolidation` sorts a night's transcript into memories (DESIGN §8);
- * `group-triage` sorts buffered group chatter: ignore, remember, or wake (DESIGN §5).
+ * `group-triage` sorts buffered group chatter: ignore, remember, or wake (DESIGN §5);
+ * `viewing` looks closely at frames of a video she chose and writes a note (DESIGN §11).
  */
-export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation' | 'group-triage'
+export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation' | 'group-triage' | 'viewing'
 
 /** All session kinds. */
-export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation', 'group-triage']
+export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation', 'group-triage', 'viewing']
 
 /** A place she can talk, identified by `platform:account:kind:id` (DESIGN §3). */
 export interface ChannelRef {
@@ -46,6 +47,7 @@ export type SessionInfo =
   | { readonly kind: 'triage' }
   | { readonly kind: 'consolidation' }
   | { readonly kind: 'group-triage' }
+  | { readonly kind: 'viewing' }
   | { readonly kind: 'conversation'; readonly channel: ChannelRef; readonly channelKey: string }
 
 /** Behavior metadata read by the gate and tool scoping (DESIGN §6). */
@@ -68,6 +70,12 @@ export interface BehaviorMeta {
   readonly target?: (args: Readonly<Record<string, unknown>>) => string | undefined
   /** Owner policy on arguments: a hint when these arguments are not allowed. */
   readonly constraint?: (args: Readonly<Record<string, unknown>>) => string | undefined
+  /**
+   * Numeric facts about a call (e.g. a video's `durationSeconds`), checked
+   * against the owner's `limits` rules before it runs. Failing to find the
+   * facts refuses the call with the error's message.
+   */
+  readonly facts?: (args: Readonly<Record<string, unknown>>) => Promise<Readonly<Record<string, number>>>
 }
 
 /** Structured Anima error with a stable `code` and a human-readable hint in the message. */

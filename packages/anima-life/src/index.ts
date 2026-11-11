@@ -9,8 +9,8 @@ import type {} from '@anima/core'
 import { AnimaLife } from './service.ts'
 import type { Config as LifeConfig } from './config.ts'
 
-export { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId } from './identity.ts'
-export { route, senderLabel, wakes, stimulusRef, stimulusSummary, stimulusText, type PublishedChannel, type Route, type Sender, type Stimulus } from './stimulus.ts'
+export { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
+export { route, senderLabel, wakes, stimulusRef, stimulusSummary, stimulusText, type ExtraBlock, type PublishedChannel, type Route, type Sender, type Stimulus } from './stimulus.ts'
 export { batchText, GroupTriage, type Batch, type Decision, type MessageStimulus, type TriageHooks, type TriageOptions } from './group-triage.ts'
 export { Outbox, type HeldMessage, type HoldResult } from './outbox.ts'
 export { Config, resolveLifeConfig } from './config.ts'
@@ -18,7 +18,7 @@ export { PRESETS, SessionRouter, type HostAgent, type ModelChoice, type RouterOp
 export { nextHeartbeat, type NextHeartbeat, type ScheduleInput } from './heartbeat.ts'
 export { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, type Intent, type Outcome, type OutcomeKind, type TrackerState } from './intent.ts'
 export { buildReport, formatSpan, type ChannelLine, type ReportInput } from './report.ts'
-export { alarmPrompts, AnimaLife, DshSessionHost, type LifeOptions, type StimulusEvent } from './service.ts'
+export { alarmPrompts, AnimaLife, DshSessionHost, type LifeOptions, type StimulusEvent, type ViewRequest } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-life'
