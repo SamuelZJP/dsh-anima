@@ -1,7 +1,8 @@
 /**
  * Intent outcomes (DESIGN §5): after Self hands an intent to a conversation,
  * the conversation's own events tell what happened: it spoke (`sent`), the say
- * failed (`failed`), the owner cancelled it in the outbox (`cancelled`), it chose `stay_silent` (`declined`), or the turn ended with
+ * failed (`failed`), the owner cancelled it in the outbox (`cancelled`), its platform
+ * stayed offline until the held message expired (`expired`), it chose `stay_silent` (`declined`), or the turn ended with
  * neither (`no-action`). After `sent`, the next owner message there is `replied`.
  * A pure state machine fed with session events.
  * @module @anima/life/intent
@@ -9,6 +10,8 @@
 
 /** Error code of a say the owner cancelled in the outbox. */
 export const OUTBOX_CANCELLED = 'anima/outbox-cancelled'
+/** Error code of a held say whose platform stayed offline until it expired. */
+export const OUTBOX_EXPIRED = 'anima/outbox-expired'
 
 /**
  * Whether a session's current turn is answering an intent (its say would be
@@ -30,7 +33,7 @@ export interface Intent {
 }
 
 /** What became of an intent. */
-export type OutcomeKind = 'sent' | 'failed' | 'cancelled' | 'declined' | 'no-action' | 'replied'
+export type OutcomeKind = 'sent' | 'failed' | 'cancelled' | 'expired' | 'declined' | 'no-action' | 'replied'
 
 /** One outcome. */
 export interface Outcome {
@@ -60,6 +63,7 @@ export function describeOutcome(outcome: Outcome): string {
     sent: 'sent — you spoke there',
     failed: 'failed — the message did not go out',
     cancelled: 'cancelled — the owner stopped the message in the outbox',
+    expired: 'expired — the platform stayed offline, so the message was never sent',
     declined: 'declined — you chose to stay silent there',
     'no-action': 'declined — the conversation ended without speaking',
     replied: 'they replied',
@@ -112,6 +116,7 @@ export class IntentTracker {
     const { name, reason } = call
     if (this.isSay(name)) {
       if (isError && errorText?.includes(OUTBOX_CANCELLED) === true) return this.settle(sessionId, 'cancelled')
+      if (isError && errorText?.includes(OUTBOX_EXPIRED) === true) return this.settle(sessionId, 'expired')
       if (isError) return this.settle(sessionId, 'failed', errorText)
       const outcome = this.settle(sessionId, 'sent')
       if (outcome !== undefined) this.state.awaitingReply = [...this.state.awaitingReply.filter(i => i.channelKey !== outcome.intent.channelKey), outcome.intent]

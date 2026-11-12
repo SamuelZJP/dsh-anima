@@ -32,7 +32,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
-    "@deepseek-ai/schemastery": "3.19.0"
+    "@deepseek-ai/schemastery": "3.19.0",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-llm": "0.2.2-rc.1"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
@@ -43,6 +45,7 @@
     "@deepseek-ai/dsh-tool-testkit": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
     "@deepseek-ai/schemastery": "3.19.0",
-    "@types/node": "^24.0.0"
+    "@types/node": "^24.0.0",
+    "@deepseek-ai/dsh-attachment": "0.2.2-rc.1"
   }
 }

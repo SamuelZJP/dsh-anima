@@ -125,7 +125,7 @@ describe('QQ adapter', () => {
     const mine = /msg (\d+)/.exec(said.text)![1]!
     server.push(groupMessage(GROUP, '2002', [{ type: 'reply', data: { id: mine } }, { type: 'text', data: { text: 'great' } }]))
     await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(3))
-    expect(host.inbox(groupSession)[2]).toContain(`(replying to msg ${mine}) great`)
+    expect(host.inbox(groupSession)[2]).toContain(`(replying to you, msg ${mine}: "sure!") great`)
 
     // A reply to someone else's message is chatter (get_msg says it is not hers).
     server.respond('get_msg', () => ({ sender: { user_id: 2002 } }))

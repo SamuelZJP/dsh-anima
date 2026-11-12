@@ -162,3 +162,46 @@ describe('Phase 2 gate checks', () => {
     expect(decide(withArgs(call('schedule_create', schedule, self), { target: 'this_session' }), policy, book, day).allowed).toBe(true)
   })
 })
+
+describe('Self → intent privacy (Phase 7)', () => {
+  const book = new QuotaBook()
+  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
+  const owner = 'qq:1:private:2'
+  const friend = 'qq:1:private:3'
+  const moment = { mode: 'day' as const, overBudget: false, initiatesUsed: 0, mayInitiate: () => true, ownerLine: true, channelKnown: () => true, ownerChannel: (key: string) => key === owner }
+  const policy: Policy = { quotas: [], allow: [], approve: [{ behavior: 'open_conversation', targets: 'others' }] }
+  const to = (channel: string): GateCall => ({ name: 'open_conversation', meta: openConversation, session: self, now: T0, args: { channel } })
+
+  it('lets intents to the owner through without approval', () => {
+    expect(decide(to(owner), policy, book, moment)).toEqual({ allowed: true })
+  })
+  it('asks the owner before an intent reaches anyone else', () => {
+    expect(decide(to(friend), policy, book, moment)).toMatchObject({ allowed: true, approval: expect.stringContaining('someone other than the owner') })
+  })
+  it('refuses it without an owner line', () => {
+    expect(decide(to(friend), policy, book, { ...moment, ownerLine: false })).toMatchObject({ allowed: false, code: GateCode.needsApproval })
+  })
+  it('keeps targets: all approving every call', () => {
+    expect(decide(to(owner), { ...policy, approve: [{ behavior: 'open_conversation' }] }, book, moment)).toMatchObject({ allowed: true, approval: expect.any(String) })
+  })
+  it('is the default', async () => {
+    const { resolveConfig } = await import('../src/config.ts')
+    expect(resolveConfig({}).approve).toEqual([{ behavior: 'open_conversation', targets: 'others' }])
+  })
+})
+
+describe('QQ quotas (Phase 7)', () => {
+  it('gives qq_poke and qq_react their own per-channel keys by default', async () => {
+    const { DEFAULT_QUOTAS } = await import('../src/config.ts')
+    const book = new QuotaBook()
+    const poke: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['conversation'] }
+    const at = (name: string, n: number): GateCall => ({ name, meta: poke, session: qqChat, now: T0 + n })
+    for (let i = 0; i < 3; i++) {
+      expect(decide(at('qq_poke', i), { quotas: DEFAULT_QUOTAS, allow: [] }, book).allowed).toBe(true)
+      book.record(at('qq_poke', i), DEFAULT_QUOTAS)
+    }
+    expect(decide(at('qq_poke', 4), { quotas: DEFAULT_QUOTAS, allow: [] }, book)).toMatchObject({ allowed: false, code: GateCode.overQuota })
+    // Reactions count separately.
+    expect(decide(at('qq_react', 5), { quotas: DEFAULT_QUOTAS, allow: [] }, book).allowed).toBe(true)
+  })
+})

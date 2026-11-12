@@ -20,8 +20,8 @@ import type {} from '@deepseek-ai/dsh-workspace'
 import { groupTriageModel, resolveLifeConfig, type Config as LifeConfig } from './config.ts'
 import { batchText, GroupTriage, type Batch, type MessageStimulus } from './group-triage.ts'
 import { nextHeartbeat } from './heartbeat.ts'
-import { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, type Outcome, type TrackerState } from './intent.ts'
-import { Outbox } from './outbox.ts'
+import { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, OUTBOX_EXPIRED, type Outcome, type TrackerState } from './intent.ts'
+import { Outbox, platformOf, type HeldMessage } from './outbox.ts'
 import { buildReport, type ChannelLine } from './report.ts'
 import { SessionRouter, type ModelChoice, type SessionHost } from './router.ts'
 import { senderLabel, wakes, type ExtraBlock, type PublishedChannel, type Stimulus } from './stimulus.ts'
@@ -190,6 +190,17 @@ interface LifeFile {
   groups: Record<string, Record<string, GroupDay>>
 }
 
+/** Health of one platform, as its adapter reported it. */
+interface PlatformHealth {
+  online: boolean
+  /** When it last changed, on her clock. */
+  since: number
+  reason?: string | undefined
+  /** Her Self session was told it went offline. */
+  notified: boolean
+  timer?: ReturnType<typeof setTimeout> | undefined
+}
+
 /** One group's counters for one of her days. */
 interface GroupDay {
   /** Wakes from messages that addressed her or came from the owner. */
@@ -239,6 +250,10 @@ export class AnimaLife extends Service {
   private triageTurn: string | undefined
   /** Viewing sessions waiting for their note, by session id. */
   private readonly views = new Map<string, ViewWaiter>()
+  /** Health of each platform as its adapter reports it (DESIGN §11). */
+  private readonly platforms = new Map<string, PlatformHealth>()
+  /** Pending express calls in conversation sessions, by `session|callId`. */
+  private readonly expressCalls = new Map<string, string>()
 
   /**
    * @param ctx - root context.
@@ -267,8 +282,11 @@ export class AnimaLife extends Service {
       error => ctx.logger.warn(`anima group triage: ${error instanceof Error ? error.message : String(error)}`),
     )
     ctx.effect(() => () => this.triage.dispose(), 'animaLife.groupTriage')
-    this.outbox = new Outbox(() => { this.file.outboxSeq += 1; this.save(); return this.file.outboxSeq }, outbox.delaySeconds * 1000)
-    ctx.effect(() => () => this.outbox.cancelAll(), 'animaLife.outbox')
+    this.outbox = new Outbox(() => { this.file.outboxSeq += 1; this.save(); return this.file.outboxSeq }, outbox.delaySeconds * 1000, outbox.offlineHoldMinutes * 60_000)
+    ctx.effect(() => () => {
+      this.outbox.cancelAll()
+      for (const health of this.platforms.values()) clearTimeout(health.timer)
+    }, 'animaLife.outbox')
     core.addOwnerReply((reply) => {
       if (reply.verb !== 'cancel' || !reply.id.startsWith('o')) return undefined
       return this.outbox.cancel(reply.id) ? `Cancelled ${reply.id}; it will not be sent.` : `No message ${reply.id} in the outbox (already sent or cancelled).`
@@ -326,7 +344,7 @@ export class AnimaLife extends Service {
     // Owner surface shared with the Anima page (DESIGN §12).
     core.addOwnerView('outbox', () => ({
       delaySeconds: this.config.outbox.delaySeconds,
-      held: this.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, intentId: m.intentId, text: m.text, sendsAt: m.sendsAt })),
+      held: this.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, intentId: m.intentId, text: m.text, sendsAt: m.sendsAt, offlineSince: m.offlineSince ?? null })),
     }))
     core.addOwnerAction('outbox.cancel', args => ({ cancelled: this.outbox.cancel(stringArg(args, 'id')) }))
     core.addOwnerAction('heartbeat', async () => {
@@ -545,17 +563,88 @@ export class AnimaLife extends Service {
    * @param text - the message, for the outbox listing.
    * @throws AnimaError `anima/outbox-cancelled` when it must not be sent.
    */
-  async holdOutgoing(sessionId: string, text: string): Promise<void> {
+  async holdOutgoing(sessionId: string, text: string, options: { onHeld?: (held: HeldMessage) => void } = {}): Promise<void> {
     const intent = answeringIntent(this.file.intents, sessionId)
     if (intent === undefined) return
     const core = this.ctx.anima
-    const result = await this.outbox.hold({ sessionId, channelKey: intent.channelKey, display: intent.display, text, intentId: intent.id }, (held) => {
-      if (!this.config.outbox.notifyOwner || core.channelInfo(intent.channelKey)?.isOwner === true) return
-      core.ownerLine?.send(`[Anima outbox ${held.id}] In ${this.config.outbox.delaySeconds} s she sends to ${held.display}: "${text}". Reply "cancel ${held.id}" to stop it.`)
-        .catch((error: unknown) => this.ctx.logger.warn(`anima: could not notify the owner about ${held.id}: ${String(error)}`))
+    const platform = platformOf(intent.channelKey)
+    const result = await this.outbox.hold({ sessionId, channelKey: intent.channelKey, display: intent.display, text, intentId: intent.id }, {
+      online: () => this.platformOnline(platform),
+      onHeld: (held) => {
+        options.onHeld?.(held)
+        if (!this.config.outbox.notifyOwner || core.channelInfo(intent.channelKey)?.isOwner === true) return
+        core.ownerLine?.send(`[Anima outbox ${held.id}] In ${this.config.outbox.delaySeconds} s she sends to ${held.display}: "${text}". Reply "cancel ${held.id}" to stop it.`)
+          .catch((error: unknown) => this.ctx.logger.warn(`anima: could not notify the owner about ${held.id}: ${String(error)}`))
+      },
     })
     if (result === 'cancelled') throw new AnimaError(OUTBOX_CANCELLED, 'the owner cancelled this message before it went out. Do not send it again now.')
+    if (result === 'expired') {
+      throw new AnimaError(OUTBOX_EXPIRED, `${platform} stayed offline for ${this.config.outbox.offlineHoldMinutes} min after the message was due, so it was never sent. Do not send it again now; you hear when ${platform} is back.`)
+    }
     if (core.paused) throw new AnimaError(OUTBOX_CANCELLED, 'Anima was paused while the message waited in the outbox, so it was not sent.')
+  }
+
+  // ---- platform health ----
+
+  /** Whether a platform is online as far as its adapter said; true when it never said. */
+  platformOnline(platform: string): boolean {
+    return this.platforms.get(platform)?.online !== false
+  }
+
+  /**
+   * An adapter reports its platform's health (DESIGN §11). Going offline, her
+   * Self session gets a notice once it has lasted `platforms.noticeAfterSeconds`;
+   * coming back, held outbox messages go out, and she is told it is back if she
+   * was told it went down. Logged; never alerts anyone.
+   * @param platform - platform id, e.g. `qq`.
+   * @param online - whether the account can send and receive now.
+   * @param reason - why it is offline, in a few words.
+   */
+  platformStatus(platform: string, online: boolean, reason?: string): void {
+    const core = this.ctx.anima
+    const health = this.platforms.get(platform) ?? { online: true, since: core.clock.now(), notified: false }
+    this.platforms.set(platform, health)
+    if (health.online === online) {
+      if (!online && reason !== undefined) health.reason = reason
+      return
+    }
+    health.online = online
+    health.since = core.clock.now()
+    clearTimeout(health.timer)
+    health.timer = undefined
+    const name = platform.toUpperCase()
+    core.recordActivity({ type: 'platform', platform, online, ...online || reason === undefined ? {} : { reason } })
+    if (!online) {
+      health.reason = reason
+      this.ctx.logger.warn(`anima: ${name} offline: ${reason ?? 'unknown reason'}`)
+      const since = health.since
+      const tell = () => {
+        if (health.online || health.since !== since) return
+        health.notified = true
+        this.tellSelf(`${name} went offline at ${formatLocal(since)}${health.reason === undefined ? '' : ` (${health.reason})`}. Nobody there can reach you, and you cannot reach anyone there until it is back; you will get a notice then.`, `${name} offline`, 'platform-offline')
+      }
+      const delayMs = this.config.platforms.noticeAfterSeconds * 1000
+      if (delayMs <= 0) tell()
+      else health.timer = setTimeout(tell, delayMs)
+      return
+    }
+    this.ctx.logger.info(`anima: ${name} back online`)
+    const released = this.outbox.release(platform)
+    if (health.notified) {
+      health.notified = false
+      this.tellSelf(`${name} is back online at ${formatLocal(health.since)}.${released === 0 ? '' : ` ${released} held message${released === 1 ? '' : 's'} went out now.`}`, `${name} back online`, 'platform-online')
+    }
+    health.reason = undefined
+  }
+
+  /** A logged notice for her Self session that does not wake it, also kept for her next report. */
+  private tellSelf(text: string, summary: string, stimulus: string): void {
+    this.file.events.push(text)
+    this.save()
+    void (async () => {
+      const self = await this.router.find(this.router.selfId)
+      if (self !== undefined) await this.host.inject(self, this.router.stamped(`[notice] ${text}`), summary, stimulus)
+    })().catch((error: unknown) => this.ctx.logger.warn(`anima: could not notify the Self session: ${String(error)}`))
   }
 
   /** Next scheduled heartbeat, on her clock. */
@@ -714,6 +803,7 @@ export class AnimaLife extends Service {
           const args = safeObject(raw)
           this.tracker.onToolCall(sessionId, callId, name, typeof args.reason === 'string' ? args.reason : undefined)
           if (this.ctx.anima.behavior(name)?.effect === 'express') {
+            this.expressCalls.set(`${sessionId}|${callId}`, name)
             this.file.lastContact[info.channelKey] = this.ctx.anima.clock.now()
             this.file.lastSpoke[info.channelKey] = this.ctx.anima.clock.now()
             this.save()
@@ -725,7 +815,12 @@ export class AnimaLife extends Service {
         if (info.kind !== 'conversation') break
         const message = (data as { message: { toolCallId: string; isError?: boolean; content?: { type: string; text?: string }[] } }).message
         const errorText = message.isError === true ? (message.content ?? []).map(block => block.text ?? '').join('') : undefined
-        this.report(this.tracker.onToolResult(sessionId, message.toolCallId, message.isError === true, errorText))
+        const outcome = this.tracker.onToolResult(sessionId, message.toolCallId, message.isError === true, errorText)
+        this.report(outcome)
+        const express = this.expressCalls.get(`${sessionId}|${message.toolCallId}`)
+        this.expressCalls.delete(`${sessionId}|${message.toolCallId}`)
+        // A reply outside an intent: her Self hears it was already answered (DESIGN §5, Phase 7).
+        if (express !== undefined && message.isError !== true && outcome === undefined) this.noteResponded(info.channelKey, express)
         this.save()
         break
       }
@@ -763,6 +858,14 @@ export class AnimaLife extends Service {
         break
       }
     }
+  }
+
+  /** One report line per channel: the latest time her conversation there responded. */
+  private noteResponded(key: string, behavior: string): void {
+    const display = this.router.channel(key)?.display ?? key
+    const prefix = `You responded in ${display} at `
+    this.file.events = this.file.events.filter(line => !line.startsWith(prefix))
+    this.file.events.push(`${prefix}${formatLocal(this.ctx.anima.clock.now())} (${behavior}); that conversation already handled what came in there.`)
   }
 
   // ---- behaviors ----
@@ -970,7 +1073,7 @@ export class AnimaLife extends Service {
       `Pending intents: ${[...intents.pending, ...intents.active].map(i => `${i.id} → ${i.display}`).join(', ') || 'none'}`,
       `Group triage: window ${this.config.groupTriage.windowSeconds} s; open buffers ${this.triage.open().map(b => `${b.channelKey} (${b.messages})`).join(', ') || 'none'}; undecided batches ${this.triage.undecided().map(b => b.id).join(', ') || 'none'}`,
       ...Object.entries(this.file.groups[core.dayKey()] ?? {}).map(([key, g]) => `  ${key} today: wakes ${g.direct} direct + ${g.triage} triage; batches ${g.batches} (remember ${g.remember}, ignore ${g.ignore}, fallback ${g.fallback})`),
-      `Outbox: delay ${this.config.outbox.delaySeconds} s; held ${this.outbox.list().map(m => `${m.id} → ${m.display}`).join(', ') || 'none'}`,
+      `Outbox: delay ${this.config.outbox.delaySeconds} s, offline hold ${this.config.outbox.offlineHoldMinutes} min; held ${this.outbox.list().map(m => `${m.id} → ${m.display}${m.offlineSince === undefined ? '' : ' (waiting for its platform)'}`).join(', ') || 'none'}`,
       `Self session: ${this.router.selfId}`,
       `Triage session today: ${this.router.triageId(core.dayKey())}`,
       ...this.router.known().map(({ sessionId, channel }) => `Conversation ${channel.display}: ${sessionId}`),

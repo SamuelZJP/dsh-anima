@@ -58,6 +58,8 @@ dsh-anima/
     anima-memory/        memory store, recall, consolidation
     anima-adapter-local/ dev adapter over the DSH web UI
     anima-adapter-qq/    QQ over OneBot v11 (NapCatQQ or any OneBot v11 runtime)
+    anima-adapter-bili/  Bilibili, read-only (skim, watch, close view)
+    anima-page/          the Anima page in DSH's web UI (Host routes + browser bundle)
   presets/               conversation, self, triage, group-triage, consolidation
   bundle/                anima bundle that installs everything into a DSH profile
 ```

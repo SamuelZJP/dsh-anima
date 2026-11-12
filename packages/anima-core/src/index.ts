@@ -11,7 +11,7 @@ import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from
 import { AnimaCore } from './service.ts'
 
 export * from './types.ts'
-export { DEFAULT_LIMITS, DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type LimitRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
+export { DEFAULT_APPROVE, DEFAULT_LIMITS, DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type LimitRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
 export { decide, GateCode, OPEN_MOMENT, QuotaBook, visibleIn, type GateCall, type GateMoment, type Policy, type Verdict } from './gate.ts'
 export { AnimaClock, formatLocal, formatStamp, localDate, nextAtClock, parseClockTime, parseLocalDateTime, parseWhen, type ClockConfig } from './clock.ts'
 export { dayKey, inWindow, modeAt, nextWake, phaseAt, resolveRhythm, type Mode, type Phase, type Rhythm, type RhythmConfig } from './rhythm.ts'
@@ -19,7 +19,7 @@ export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction
 export { billableTokens, emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
 export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
-export { ActivityLog, summarize, type ActivityRecord, type DaySummary, type GateRecord, type NewActivity, type OwnerRecord, type OwnerSource, type WakeRecord } from './activity.ts'
+export { ActivityLog, summarize, type ActivityRecord, type DaySummary, type GateRecord, type NewActivity, type OwnerRecord, type OwnerSource, type PlatformRecord, type WakeRecord } from './activity.ts'
 export { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
 export { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfEntry, type SelfModelLimits, type SelfSection } from './selfmodel.ts'
 export { AnimaCore, defaultConstitution, describeDiff, GATE_INFO_NAME, type BehaviorEvent, type ChannelAllowlist, type ChannelResolver, type OwnerReplyHandler, type SessionResolver } from './service.ts'

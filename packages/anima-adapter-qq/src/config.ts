@@ -38,6 +38,30 @@ export interface Config {
   reconnect: { maxSeconds: number }
   /** A missing OneBot heartbeat for this many intervals counts as a lost connection. */
   heartbeatGrace: number
+  /** Images she chooses to look at with `qq_look` (quotas are in the gate). */
+  look: {
+    /** Image, sticker and forward ids remembered (`<dataDir>/qq/media.json`); the oldest are forgotten first. */
+    cacheEntries: number
+    /** Largest image downloaded, in bytes. */
+    maxBytes: number
+    /** Real seconds a download may take. */
+    fetchTimeoutSeconds: number
+  }
+  /** Forwarded messages read with `qq_read_forward`. */
+  forward: {
+    /** Most messages shown of one forward. */
+    maxMessages: number
+    /** Most characters shown of one forward. */
+    maxChars: number
+  }
+  /** Characters of the quoted message shown with a reply. */
+  quoteChars: number
+  /** Typing status in private chats while her chosen message waits in the outbox. */
+  typing: {
+    enabled: boolean
+    /** Real seconds before the held message goes out when typing is shown. */
+    leadSeconds: number
+  }
 }
 
 const qqId = z.union([z.natural(), z.string().pattern(/^\d{4,12}$/)])
@@ -57,6 +81,20 @@ export const Config: z<Config> = z.object({
   callTimeoutSeconds: z.number().min(1).default(10),
   reconnect: z.object({ maxSeconds: z.number().min(1).default(60) }),
   heartbeatGrace: z.number().min(1.5).default(2.5),
+  look: z.object({
+    cacheEntries: z.natural().min(10).default(300).description('Image, sticker and forward ids remembered; the oldest are forgotten first.'),
+    maxBytes: z.natural().min(1024).default(5 * 1024 * 1024).description('Largest image qq_look downloads, in bytes.'),
+    fetchTimeoutSeconds: z.number().min(1).default(15).description('Real seconds an image download may take.'),
+  }).description('Images she chooses to look at (qq_look). Quotas are core quotas.'),
+  forward: z.object({
+    maxMessages: z.natural().min(1).default(50).description('Most messages qq_read_forward shows of one forward.'),
+    maxChars: z.natural().min(100).default(4000).description('Most characters qq_read_forward shows of one forward.'),
+  }).description('Forwarded messages (qq_read_forward).'),
+  quoteChars: z.natural().min(0).default(60).description('Characters of the quoted message shown with a reply; 0 shows only the message id.'),
+  typing: z.object({
+    enabled: z.boolean().default(true).description('Show typing in a private chat while her chosen message waits in the outbox.'),
+    leadSeconds: z.number().min(0).default(8).description('Real seconds before the held message goes out when typing is shown.'),
+  }).description('Typing status (private chats, outbox only).'),
 }) as unknown as z<Config>
 
 /** Validated config with ids as strings. */

@@ -25,6 +25,13 @@ export interface Config {
     delaySeconds: number
     /** Tell the owner on the owner line about each held message (not for the owner's own chat). */
     notifyOwner: boolean
+    /** Real minutes a held message waits for its platform to come back before it expires. */
+    offlineHoldMinutes: number
+  }
+  /** Platform health as adapters report it. */
+  platforms: {
+    /** Real seconds a platform must stay offline before her Self session is told (short drops stay quiet). */
+    noticeAfterSeconds: number
   }
 }
 
@@ -39,7 +46,11 @@ export const Config: z<Config> = z.object({
   outbox: z.object({
     delaySeconds: z.number().min(0).default(45).description('Real seconds her initiated message waits before it goes out; 0 sends at once.'),
     notifyOwner: z.boolean().default(false).description('Tell the owner on the owner line about each held message (not for the owner\'s own chat).'),
+    offlineHoldMinutes: z.number().min(0.01).default(30).description('Real minutes a held message waits for its platform to come back (after the delay) before it expires; she is told when it does.'),
   }).description('Outbox for messages she starts on her own.'),
+  platforms: z.object({
+    noticeAfterSeconds: z.number().min(0).default(60).description('Real seconds a platform must stay offline before her Self session gets a notice; it gets another when the platform is back.'),
+  }).description('Platform health notices to her Self session.'),
 }) as z<Config>
 
 /**

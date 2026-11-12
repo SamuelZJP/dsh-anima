@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-11 (Phase 6) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-11 (Phase 7) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -138,7 +138,8 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 2. The policy gate checks quota, quiet hours and consent for that channel.
 3. The life loop delivers an `intent` message into the target conversation session's inbox. It is logged there, so the conversation history explains why she spoke first.
 4. The conversation session, which holds the history with that person, writes the actual words and calls `say`, or declines by calling `stay_silent(reason)`.
-5. The outcome (sent, failed, declined, later reply) returns to the Self session as a short notice that does not wake it, and appears in the next heartbeat report. Needs move only through the `say` itself. A declined intent still counts against the daily initiate budget.
+5. The outcome (sent, failed, cancelled, expired, declined, later reply) returns to the Self session as a short notice that does not wake it, and appears in the next heartbeat report. Needs move only through the `say` itself. A declined intent still counts against the daily initiate budget.
+6. **Replies she already sent (Phase 7).** Her report lists owner messages ("Sam (owner) wrote to you in …"). When the conversation there answers on its own, outside an intent, the report also says "You responded in Sam (QQ) at 10:01 (qq_say); that conversation already handled what came in there." (one line per channel, the latest). In the Phase 6 demo, without it, Self twice opened reply intents for messages already answered.
 
 This keeps the reason (Self) apart from the wording (conversation), and keeps each chat's history complete in one place.
 
@@ -204,7 +205,7 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `group_wake(batch, reason)`, `group_pass(batch, remember, reason?)` — group-triage session only (section 5).
 - `viewing_note(note)` — viewing session only: her note on a close view; it ends the viewing (section 11).
 
-Platform adapters add platform behaviors (`qq_history`, `bili_watch`, later `qq_poke`, `bili_comment`, …) with the same metadata.
+Platform adapters add platform behaviors (`qq_history`, `qq_look`, `qq_poke`, `bili_watch`, later `bili_comment`, …) with the same metadata.
 
 ### Tool scoping by platform
 
@@ -310,7 +311,7 @@ Every memory carries a scope: `private:<personId>`, `group:<channel>`, `owner`, 
 - **Person id**: `owner` for bound owner accounts; a hand-linked id from `anima-memory` config `persons: [{ id, accounts: ['qq:123', 'local:alice'] }]`; otherwise `platform:userId`. By adapter convention a private channel's `id` is the other party's user id.
 - **Narrow only**: `memory_remember` and `memory_write` take `keep: 'here' | 'self'`. `here` is the session's scope, and `self` is the only narrowing. The model never types a scope, so it cannot widen one. In a private chat `here` already means "only this person", which is how secrets stay private and can still be talked about with the person who told them.
 - **Observations**: what she watches or reads on her own reaches memory through `animaMemory.observe`, with scope `public` (public content, so any chat may hear it) or `self`. The adapter picks one of those two; nothing wider can be named. A plain observation is a transcript line that consolidation sorts (its own segment, "things you watched or read on your own"); text the model already wrote, such as a viewing note, is stored at once as an episode.
-- **Self → intent (open):** the Self session hears everything, and the free text of an `intent` is not checked by code against the target audience. Phase 3 relies on the conversation's own scoped recall and a persona rule; see Still open.
+- **Self → intent (decided in Phase 7):** the Self session hears everything, so an intent's free text could carry one audience's secret to another. By default an `open_conversation` toward anyone but the owner waits for owner approval (core `approve: [{ behavior: open_conversation, targets: others }]`), and the approval request shows the intent and context text. Intents to the owner's own channels need none. The conversation's scoped recall and the persona rule stay. No code compares the intent's words with memories: that would be a keyword heuristic (principle 4) and give false confidence.
 
 ### Transcript
 
@@ -392,6 +393,11 @@ Approvals start simple and grow in two steps:
 
 **Outbox.** A message she starts on her own (a say in a conversation turn that answers an intent from Self) waits `outbox.delaySeconds` of real time (default 45) before it goes out. During the wait the owner can cancel it with `/anima outbox cancel <id>` or a `cancel <id>` reply on the owner line; optionally (`outbox.notifyOwner`) the owner is told about each held message to another person. The say tool blocks for the delay, so its result stays truthful: a cancelled message is an error `anima/outbox-cancelled`, and her Self hears the intent was `cancelled`. Pausing during the wait cancels too. Replies to people who wrote to her are not delayed.
 
+- **Through a disconnect (Phase 7).** When the delay ends while the channel's platform is offline (as its adapter reports through `animaLife.platformStatus`), the message keeps waiting, still cancellable, until the platform is back, then goes out. After `outbox.offlineHoldMinutes` (default 30, real time) it expires: the say returns `anima/outbox-expired` and her Self hears the intent `expired`. A reply to someone who wrote to her is not held; while offline it fails at once with the adapter's error (`anima/qq-offline`).
+- **Typing (QQ, Phase 7).** In a private chat, a held message shows the typing status once, `typing.leadSeconds` (8) before it goes out. Code never shows typing otherwise: it only accompanies a say she already chose.
+
+**Default approval for intents (Phase 7).** `approve` rules take `targets: all | others`. The default `approve: [{ behavior: open_conversation, targets: others }]` sends every intent toward someone other than the owner to the owner first (section 8, Self → intent). Without an owner line such intents are refused (`anima/needs-approval`).
+
 **Allowlist.** A platform adapter can restrict itself to listed channels (`anima.restrictChannels`). The adapter drops events from other chats before delivery, `animaLife.deliver` refuses channel stimuli for them, and the gate refuses that platform's behaviors in them and initiating toward them (`anima/not-allowlisted`). QQ lists the owner and the configured users and groups. A target key that no adapter published is refused before every other check, including approval (`anima/unknown-channel`), and the hint lists the keys she can reach; a `/anima self` notice lists them too. An `initiate` counts against the daily budget only when the behavior succeeds (a declined intent still counts, because `open_conversation` itself succeeded).
 
 ### Trust and injection
@@ -414,11 +420,11 @@ Each platform is one DSH plugin that implements a small adapter contract; the co
 
 An adapter plugin, when loaded:
 
-1. **Connects** to its platform runtime and reports health. QQ connects as a WebSocket client to the runtime's OneBot v11 forward WebSocket server (URL and access token in config). It reconnects with backoff (1 s doubling, capped), and treats lost heartbeats (none for 2.5 intervals) and the `bot_offline` notice as health signals, shown in `/anima status` and as a line in her report while QQ is down.
+1. **Connects** to its platform runtime and reports health. QQ connects as a WebSocket client to the runtime's OneBot v11 forward WebSocket server (URL and access token in config). It reconnects with backoff (1 s doubling, capped), and treats lost heartbeats (none for 2.5 intervals) and the `bot_offline` notice as health signals, shown in `/anima status` and as a line in her report while QQ is down. From Phase 7 it reports each change to `animaLife.platformStatus(platform, online, reason)`: the log and the Platforms tab say "OFFLINE since … : <reason>", her Self session gets a logged notice once the platform has been down `platforms.noticeAfterSeconds` (60, so short drops stay quiet) and another when it is back, and held outbox messages wait for it. This is a development warning: nobody is alerted.
 2. **Publishes channels**: friends, groups and other places she can talk, with display names and the bound account ids.
 3. **Emits stimuli**: converts platform events into the normalized `message`, `mention`, `platform-event` types.
 4. **Registers behaviors**: at least `say` for its channels, plus platform-specific ones, each with metadata.
-5. **Normalizes content**: messages arrive as segments (text, image, quote, mention, face) and leave the same way; images are passed to the model as attachments.
+5. **Normalizes content**: messages arrive as segments (text, image, quote, mention, face) and leave the same way. Images are never attached to a turn on their own: a placeholder carries a short id, and she opens it with a look behavior when she wants to see it (QQ: `qq_look`, below).
 
 Unloading the plugin removes all of the above through Cordis effects.
 
@@ -431,11 +437,21 @@ Unloading the plugin removes all of the above through Cordis effects.
 | Adapter | Runtime | First behaviors | Status |
 | --- | --- | --- | --- |
 | `anima-adapter-local` | DSH web UI | `say` to the owner without any external platform | Phase 1, for development |
-| `anima-adapter-qq` | NapCatQQ (any OneBot v11 runtime) | `qq_say` (reply, @), `qq_history`; inbound private/group messages, pokes, recalls, friend requests. Later: poke and emoji reactions, typing status, Qzone, files | Phase 4 |
+| `anima-adapter-qq` | NapCatQQ (any OneBot v11 runtime) | `qq_say` (reply, @), `qq_history`; inbound private/group messages, pokes, recalls, friend requests. Phase 7: `qq_look`, `qq_read_forward`, quoted-reply snippets, `qq_poke`, `qq_react`, typing during the outbox hold, offline notices. Later: Qzone (only through approvals, if at all), files | Phases 4, 7 |
 | `anima-adapter-bili` | Bilibili web API with her account | Read-only, Self only: skim (`bili_feed`, `bili_popular`, `bili_search`), watch as text (`bili_watch`, `bili_comments`), close view (`bili_view_closely`). Later: comments, DMs, dynamics, likes (public behaviors through approvals) | Phase 5 |
 | `anima-adapter-wechat` | Deferred | `say` | Later |
 
 `anima-adapter-local` lets the whole system be built and tested before QQ is connected.
+
+### QQ refinement (Phase 7)
+
+- **Ids in placeholders.** `image` and `mface` segments render as `[image #i3: summary]` / `[sticker #i4: summary]`, forwards as `[forwarded messages #f2]`. An id belongs to the chat it was sent in, and a call from another chat is refused (`anima/no-image`, `anima/no-forward`). The id book keeps `look.cacheEntries` (300) entries in `<dataDir>/qq/media.json`, so ids in her history survive a restart.
+- **`qq_look(id)`** (observe, conversation sessions). It refuses when the chat's model does not take images (`anima/no-vision`), then fetches the bytes (the segment's URL, else OneBot `get_image`), capped at `look.maxBytes` (5 MB), stores them with DSH's attachment service and returns the picture itself in the tool result, so she sees it in the chat where she talks about it. The stored attachment is the look cache: a second look downloads nothing. A looked-at image stays in that chat's history (cached) until compaction, which is why looks are capped.
+- **`qq_read_forward(id)`** (observe, conversation sessions): the forward's messages as `name: text` lines, from the content the runtime sent inline or from `get_forward_msg`; nested forwards inline to depth 2; images inside get their own ids; capped at `forward.maxMessages` (50) and `forward.maxChars` (4000).
+- **Quoted replies** show who wrote the original and a snippet: `(replying to Cat, msg 123: "first 60 chars…")` (`quoteChars`), from a cache of recent messages, else `get_msg`.
+- **`qq_poke(userId?)`, `qq_react(messageId, emoji)`** (express, conversation sessions). A private poke goes to the other person; in a group the user id is required. A reaction is one Unicode emoji or a QQ face id.
+- **Limits, all in the gate:** `qq_look` 10 per hour per channel and 30 per day; `qq_read_forward` 10 per hour per channel; `qq_poke` 3 and `qq_react` 10 per hour per channel, besides the express quota; the allowlist and unknown-channel default deny as for every QQ behavior.
+- **Typing and offline handling**: section 10 (outbox) and the adapter contract above.
 
 ### Bilibili (Phase 5): tiered viewing
 
@@ -471,7 +487,7 @@ Everything she does is already a DSH session event, so the owner's view is DSH's
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
 - **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
-- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome). Recording never decides anything.
+- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome), and (Phase 7) every platform going offline or coming back, with the reason. Recording never decides anything.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
 ### Anima page (Phase 6)
@@ -576,13 +592,17 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Settings editing | Through DSH's config editor into the active profile patch; core, life and memory rows only; a higher layer still wins | 12 |
 | Self-knowledge flow | Lasting tastes, habits and opinions go to the self-model through `self_note`, also from the consolidation session; `self`-kind memories keep passing thoughts about herself (owner decision after the Phase 6 demo) | 8, 9 |
 | Constitution editing | Owner saves on the page; previous text kept as `.bak`; persona rows re-register on save, so running sessions get it next request | 9 |
+| QQ scope (Phase 7) | Images and stickers opened by id with `qq_look` (tool-result image on the chat's own model, no viewing session); forwards by id with `qq_read_forward`; quoted-reply snippets; `qq_poke`, `qq_react`; typing only during the outbox hold in private chats; offline notices to Self and held outbox messages; no alerts. Qzone, voice, sending images: out | 10, 11 |
+| Self → intent privacy | Default owner approval for `open_conversation` toward anyone but the owner (`approve … targets: others`); no word-matching check in code | 8, 10 |
+| Duplicate replies | When her conversation answers outside an intent, her next report says "You responded in … at …", one line per channel, so Self does not open stale reply intents | 5 |
+| Platform health | Adapters report `animaLife.platformStatus`; Self gets a notice after `platforms.noticeAfterSeconds` down and when back; held outbox messages wait up to `outbox.offlineHoldMinutes`, then expire and she is told | 10, 11 |
 
 ### Still open
 
 - [x] **Intent handoff**: yes; see decisions (Phase 2).
 - [ ] **Dreaming**: what night heartbeats do beyond consolidation; postponed until after the formal test, whose night data shows whether more is needed.
 - [ ] **Default need tuning**: drift rates and baselines; first values in section 7, tuned from the formal test.
-- [ ] **Self → intent privacy**: Self hears every scope, and an intent's free text is not checked against the target conversation's audience. Phase 3 relies on scoped recall in the conversation and a persona rule; decide whether a code check is needed before the formal test, where real people talk to her.
+- [x] **Self → intent privacy**: decided in Phase 7 (owner approval for intents toward anyone but the owner; section 8).
 - [x] **Outbox delay**: built in Phase 4 (section 10).
 - [x] **Session-log upload**: turned off in `anima-dev` (owner decision, Phase 4; DSH-INTEGRATION §12).
 - [ ] **Close-view uptake**: on her own she chose the text tier all day; the close view came after an owner notice. Decide whether the tool description or her report should present the tier more plainly, or whether rare use is right; the formal test measures it.
@@ -599,6 +619,6 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 4. **Phase 4 — QQ.** `anima-adapter-qq` on NapCatQQ (OneBot v11), private and group chats on an allowlist, group triage, owner-DM approvals, the outbox. Exit: a week on a test account with no runaway wakes. Supervised runs passed 2026-11-10 (DSH-INTEGRATION §3). The owner cancelled the week-long run for now, so the phase closes on the supervised runs; the runaway-wake check is a gate quota (`group_wake`) plus the per-group counters in `life.json`, not yet a measured week.
 5. **Phase 5 — Bilibili (read-only).** `anima-adapter-bili`: skim, watch and close-view tiers in the Self session, QR login, risk-control back-off, viewing sessions, observations in memory. Exit: over a test day she browses on her own initiative during heartbeats, watches some videos and views at least one closely, and later brings one up with the owner in a chat, all within budget; evidence from the transcripts. Done 2026-11-10 (DSH-INTEGRATION §3). She browsed, watched and shared on her own; her one close view came after an owner notice said the tier exists.
 6. **Phase 6 — Self-model and the Anima page.** `self_note` with a daily cap, every change logged as a diff, a self-model digest in prompts, `/anima selfmodel` review and revert (section 9). The Anima page in DSH's web UI with its tabs, including the memory archive browser (section 12); starts with a spike on how a plugin adds a sidebar page. Exit: she changes her self-model on her own, the owner reviews and reverts one change from the page, and the page shows live status, memory (active and archive), approvals and activity. Done 2026-11-11 (DSH-INTEGRATION §3). Her first note came on her second simulated day, in a chat, after two owner-approved changes: a self-model line in her report and `self_note` in consolidation.
-7. **Phase 7 — QQ refinement.** Feature list fixed at the phase's plan step. Candidates: inbound images seen by the vision model instead of placeholders, outbound pokes and emoji reactions, the typing status, sturdier NapCat reconnect and offline handling (a development warning, no alerts). Qzone only through approvals, if at all.
+7. **Phase 7 — QQ refinement.** Fixed at the plan step (section 11, "QQ refinement"): images and stickers she chooses to look at (`qq_look`), forwards (`qq_read_forward`) and quoted-reply snippets, `qq_poke` and `qq_react`, typing during the outbox hold, offline notices and held outbox messages (a development warning, no alerts), the duplicate-reply fix, and the Self → intent privacy decision. Exit: in `anima-dev` with the real NapCat account she looks at an image someone sends and talks about it, reads a forward, pokes or reacts once, and the offline notice appears when NapCat is stopped. Done 2026-11-11 (DSH-INTEGRATION §3): she chose `qq_look`, `qq_read_forward` and `qq_poke` herself, and the offline and back-online notices reached her Self session. Qzone only through approvals, if at all.
 8. **Formal test — 7 days in development.** In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above.
 9. **Later.** More Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; dreaming; production packaging and deployment.

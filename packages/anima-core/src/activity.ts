@@ -1,6 +1,6 @@
 /**
- * Activity log (DESIGN §12): what the gate decided, what woke her, and what
- * the owner changed, one JSONL file per her day under `<dataDir>/activity/`.
+ * Activity log (DESIGN §12): what the gate decided, what woke her, what
+ * the owner changed, and when a platform went offline or came back, one JSONL file per her day under `<dataDir>/activity/`.
  * It is the evidence the Anima page's Activity tab and the formal test read.
  * Recording never decides anything.
  * @module @anima/core/activity
@@ -55,11 +55,21 @@ export interface OwnerRecord {
   readonly error?: string
 }
 
+/** A platform went offline or came back, as its adapter reported it (a development warning, Phase 7). */
+export interface PlatformRecord {
+  readonly type: 'platform'
+  readonly at: number
+  readonly real: number
+  readonly platform: string
+  readonly online: boolean
+  readonly reason?: string
+}
+
 /** Any activity record. */
-export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord
+export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord
 
 /** Activity record without its timestamps, as producers hand it in. */
-export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'>
+export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'>
 
 /** Day summary for the Activity tab. */
 export interface DaySummary {

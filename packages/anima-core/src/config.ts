@@ -40,7 +40,20 @@ export interface AllowRule {
 export interface ApproveRule {
   /** Tool name. */
   behavior: string
+  /**
+   * Which call targets need approval: `all` (default), or `others` for calls
+   * whose target channel is not one of the owner's own (DESIGN §8, Self → intent privacy).
+   */
+  targets?: 'all' | 'others' | undefined
 }
+
+/**
+ * Default approvals: an intent into anyone's chat but the owner's waits for the
+ * owner, who sees its text first (Self hears every scope; DESIGN §8).
+ */
+export const DEFAULT_APPROVE: ApproveRule[] = [
+  { behavior: 'open_conversation', targets: 'others' },
+]
 
 /** Owner limit on a numeric fact of a call (`BehaviorMeta.facts`), e.g. a video's length. */
 export interface LimitRule {
@@ -165,6 +178,13 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   { behavior: 'bili_view_closely', per: 'global', limit: 3, windowMinutes: 24 * 60 },
   // Her self-model changes slowly: a few edits per day (DESIGN §9).
   { behavior: 'self_note', per: 'global', limit: 3, windowMinutes: 24 * 60 },
+  // QQ (Phase 7): images she looks at ride the chat's later requests, so looks are capped;
+  // pokes and reactions have their own keys besides the express quota.
+  { behavior: 'qq_look', per: 'channel', limit: 10, windowMinutes: 60 },
+  { behavior: 'qq_look', per: 'global', limit: 30, windowMinutes: 24 * 60 },
+  { behavior: 'qq_read_forward', per: 'channel', limit: 10, windowMinutes: 60 },
+  { behavior: 'qq_poke', per: 'channel', limit: 3, windowMinutes: 60 },
+  { behavior: 'qq_react', per: 'channel', limit: 10, windowMinutes: 60 },
 ]
 
 /** Default limits: a close view looks at no more than 12 frames of a video up to 20 minutes. */
@@ -221,7 +241,10 @@ export const Config: z<Config> = z.object({
   })).default(DEFAULT_LIMITS).description('Limits on numeric facts of calls, e.g. the length of a video she may view closely.'),
   allow: z.array(z.object({ behavior: z.string().required() })).default([])
     .description('Owner rules letting public or irreversible behaviors run without approval.'),
-  approve: z.array(z.object({ behavior: z.string().required() })).default([])
+  approve: z.array(z.object({
+    behavior: z.string().required(),
+    targets: z.union([z.const('all'), z.const('others')]).description('all (default), or others: only calls whose target is not one of the owner\'s channels.'),
+  })).default(DEFAULT_APPROVE as never)
     .description('Behaviors that always need owner approval, whatever their effect class.'),
   approvals: z.object({
     timeoutSeconds: z.number().min(1).default(600).description('Real seconds before an unanswered approval request counts as denied.'),

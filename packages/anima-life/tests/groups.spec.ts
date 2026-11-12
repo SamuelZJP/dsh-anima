@@ -10,7 +10,7 @@ import Tools, { defineTool } from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { AnimaLife, conversationSessionId, groupTriageSessionId, IntentTracker, Outbox, selfSessionId, type ModelChoice, type PublishedChannel, type SessionHost, type StimulusEvent } from '../src/index.ts'
+import { AnimaLife, conversationSessionId, groupTriageSessionId, describeOutcome, IntentTracker, Outbox, selfSessionId, type ModelChoice, type PublishedChannel, type SessionHost, type StimulusEvent } from '../src/index.ts'
 
 interface FakeAgent { id: string; inbox: string[]; models: ModelChoice[] }
 
@@ -232,7 +232,7 @@ describe('outbox', () => {
   })
 
   it('cancels when paused during the wait, and notifies the owner for other channels', async () => {
-    const { ctx, sent } = await setup({ outbox: { notifyOwner: true } }, { initiate: { consent: { owner: true, channels: [groupKey] } } })
+    const { ctx, sent } = await setup({ outbox: { notifyOwner: true } }, { initiate: { consent: { owner: true, channels: [groupKey] } }, approve: [] })
     const lines: string[] = []
     ctx.anima.provideOwnerLine({ name: 'test', send: async (text) => { lines.push(text) } })
     await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: groupKey, intent: 'hello group' })
@@ -256,5 +256,37 @@ describe('outbox', () => {
   it('sends at once with a zero delay', async () => {
     const outbox = new Outbox(() => 1, 0)
     expect(await outbox.hold({ sessionId: 's', channelKey: 'k', display: 'd', text: 't', intentId: 'i1' })).toBe('send')
+  })
+})
+
+describe('outbox through a disconnect (Phase 7)', () => {
+  it('waits past the delay while offline, then sends on release', async () => {
+    let online = false
+    const outbox = new Outbox(() => 1, 10, 60_000)
+    const held = outbox.hold({ sessionId: 's', channelKey: 'qq:1:private:2', display: 'd', text: 't', intentId: 'i1' }, { online: () => online })
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(outbox.list()[0]?.offlineSince).toBeDefined()
+    expect(outbox.release('local')).toBe(0)
+    online = true
+    expect(outbox.release('qq')).toBe(1)
+    expect(await held).toBe('send')
+  })
+
+  it('expires after the offline hold, and holds even with a zero delay', async () => {
+    const outbox = new Outbox(() => 1, 0, 20)
+    const held = outbox.hold({ sessionId: 's', channelKey: 'qq:1:private:2', display: 'd', text: 't', intentId: 'i1' }, { online: () => false })
+    expect(outbox.list()).toHaveLength(1)
+    expect(await held).toBe('expired')
+    expect(outbox.counts.expired).toBe(1)
+  })
+
+  it('reports an expired say as an expired intent', () => {
+    const tracker = new IntentTracker({ pending: [], active: [], awaitingReply: [] }, name => name === 'qq_say')
+    tracker.open({ id: 'i1', sessionId: 'c', channelKey: 'k', display: 'Owner', intent: 'hi', at: 0 })
+    tracker.onUserMessage('c', 'i1')
+    tracker.onToolCall('c', 'x', 'qq_say')
+    const outcome = tracker.onToolResult('c', 'x', true, 'Error: anima/outbox-expired: …')
+    expect(outcome).toMatchObject({ kind: 'expired' })
+    expect(describeOutcome(outcome!)).toContain('expired — the platform stayed offline')
   })
 })

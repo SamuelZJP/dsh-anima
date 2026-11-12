@@ -7,7 +7,12 @@
  * @module @anima/adapter-qq
  */
 
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type {} from '@deepseek-ai/dsh-llm'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AnimaError, formatLocal } from '@anima/core'
 import type {} from '@anima/core'
@@ -15,11 +20,13 @@ import type { PublishedChannel } from '@anima/life'
 import type {} from '@anima/life'
 import { Config as ConfigSchema, resolveQqConfig, type Config as QqConfig, type ResolvedQqConfig } from './config.ts'
 import { displayNameOf, normalizeMessage, outgoing, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type Segment } from './normalize.ts'
+import { emojiId, fetchCapped, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
 import { OneBotClient, type Health } from './onebot.ts'
 
 export { resolveQqConfig, type AllowEntry, type ResolvedQqConfig } from './config.ts'
 export { displayNameOf, normalizeMessage, outgoing, parseCQ, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type RenderContext, type Rendered, type Segment } from './normalize.ts'
 export { backoff, connectUrl, OneBotClient, type ClientOptions, type Health } from './onebot.ts'
+export { emojiId, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-adapter-qq'
@@ -32,6 +39,14 @@ export const PLATFORM = 'qq'
 export const SAY_TOOL = 'qq_say'
 /** The history behavior. */
 export const HISTORY_TOOL = 'qq_history'
+/** Look at an image or sticker by its id. */
+export const LOOK_TOOL = 'qq_look'
+/** Read a forwarded message by its id. */
+export const FORWARD_TOOL = 'qq_read_forward'
+/** Poke someone. */
+export const POKE_TOOL = 'qq_poke'
+/** React to a message with an emoji. */
+export const REACT_TOOL = 'qq_react'
 
 /** Plugin config. */
 export type Config = QqConfig
@@ -42,6 +57,8 @@ export const Config = ConfigSchema
 const SENT_IDS = 500
 /** Most messages `qq_history` returns. */
 const HISTORY_MAX = 30
+/** Recent message texts kept for quoted-reply snippets. */
+const RECENT_TEXTS = 500
 
 /** Channel key of a QQ chat. */
 export function qqChannelKey(account: string, kind: 'private' | 'group', id: string): string {
@@ -83,7 +100,22 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   }
   const login = { ready: false, nickname: undefined as string | undefined, problem: undefined as string | undefined }
   const counts = { delivered: 0, dropped: 0, sent: 0 }
-  const render = { selfId: config.account, herName, name: (id: string) => names.get(id) }
+  const media = new MediaBook(join(core.config.dataDir, 'qq', 'media.json'), config.look.cacheEntries)
+  /** Rendering for one chat: images, stickers and forwards get ids that belong to it. */
+  const renderIn = (chat: string) => ({
+    selfId: config.account, herName, name: (id: string) => names.get(id),
+    ref: (kind: Parameters<MediaBook['idFor']>[1], data: Readonly<Record<string, unknown>>) => media.idFor(chat, kind, data),
+  })
+  /** Recent message texts by id, for quoted replies: who wrote it and what. */
+  const recent = new Map<string, { who: string; text: string }>()
+  const keep = (messageId: string, who: string, text: string) => {
+    if (messageId === '') return
+    recent.delete(messageId)
+    recent.set(messageId, { who, text })
+    if (recent.size > RECENT_TEXTS) recent.delete(recent.keys().next().value!)
+  }
+  /** Whether QQ can send and receive now, and since when and why not (real time). */
+  const offline = { down: true, since: Date.now(), reason: 'not connected yet' as string }
   let queue: Promise<void> = Promise.resolve()
 
   const client = new OneBotClient({
@@ -92,9 +124,13 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     callTimeoutMs: config.callTimeoutSeconds * 1000,
     maxBackoffMs: config.reconnect.maxSeconds * 1000,
     heartbeatGrace: config.heartbeatGrace,
-    onOpen: () => { void verifyLogin() },
-    onClose: () => { login.ready = false },
+    onOpen: () => { void verifyLogin().finally(updateHealth) },
+    onClose: () => {
+      login.ready = false
+      updateHealth()
+    },
     onEvent: (event) => {
+      if (event.post_type === 'meta_event' || event.notice_type === 'bot_offline') updateHealth()
       // One at a time, so a group's messages reach her in order.
       queue = queue.then(() => handle(event)).catch((error: unknown) => ctx.logger.warn(`anima qq: ${error instanceof Error ? error.message : String(error)}`))
     },
@@ -103,6 +139,34 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     client.start()
     return () => client.stop()
   }, 'anima-adapter-qq.client')
+
+  /** Why QQ is not usable now, or undefined when it is. */
+  function downReason(): string | undefined {
+    const { health } = client
+    if (health.state !== 'open') return `${health.lastError ?? 'not connected'} (${health.state}${health.retryInMs === undefined ? '' : `, retry in ${Math.round(health.retryInMs / 1000)} s`})`
+    if (login.problem !== undefined) return login.problem
+    if (!login.ready) return 'connected, checking the login'
+    if (health.online === false) return health.lastError?.startsWith('bot offline') === true ? `NapCat reports the account offline (${health.lastError})` : 'the runtime reports the QQ account offline'
+    return undefined
+  }
+
+  /** Log each change of QQ's usability once, and tell anima-life (DESIGN §11). A development warning only. */
+  function updateHealth(): void {
+    const reason = downReason()
+    const down = reason !== undefined
+    if (down === offline.down) {
+      if (down) offline.reason = reason
+      return
+    }
+    offline.down = down
+    offline.since = Date.now()
+    offline.reason = reason ?? ''
+    life.platformStatus(PLATFORM, !down, reason)
+  }
+  ctx.effect(() => {
+    life.platformStatus(PLATFORM, false, offline.reason)
+    return () => {}
+  }, 'anima-adapter-qq.health')
 
   async function verifyLogin(): Promise<void> {
     try {
@@ -137,15 +201,38 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     send: async (text) => { await send('private', config.owner, [{ type: 'text', data: { text } }]) },
   })
 
-  /** Whether a replied-to message is one of hers. */
-  async function isHers(messageId: string): Promise<boolean> {
-    if (sentIds.has(messageId)) return true
+  /** Who wrote a message, as she knows them. */
+  function whoIs(userId: string, event?: OneBotEvent): string {
+    if (userId === config.account) return 'you'
+    if (userId === config.owner) return config.ownerName
+    return names.get(userId) ?? (event === undefined ? userId : displayNameOf(event))
+  }
+
+  /**
+   * A replied-to message: whether it is hers, and who wrote what. From the
+   * recent-message cache, else `get_msg` (the reply is always in the same chat).
+   */
+  async function quoted(messageId: string, chat: string): Promise<{ hers: boolean; who?: string; text?: string }> {
+    const known = recent.get(messageId)
+    if (known !== undefined) return { hers: known.who === 'you', who: known.who, text: known.text }
     try {
-      const msg = await client.call<{ sender?: { user_id?: number | string }; user_id?: number | string }>('get_msg', { message_id: Number(messageId) })
-      return String(msg?.sender?.user_id ?? msg?.user_id) === config.account
+      const msg = await client.call<OneBotEvent>('get_msg', { message_id: Number(messageId) })
+      const userId = String(msg?.sender?.user_id ?? msg?.user_id ?? '')
+      const who = whoIs(userId, msg)
+      const text = renderSegments(segmentsOf(msg?.message), renderIn(chat)).text
+      keep(messageId, who, text)
+      return { hers: userId === config.account, who, text }
     } catch {
-      return false
+      return { hers: sentIds.has(messageId) }
     }
+  }
+
+  /** `(replying to Cat, msg 123: "…")`, or just the id when nothing is known. */
+  function replyLabel(messageId: string, quote: { who?: string | undefined; text?: string | undefined } | undefined): string {
+    if (quote?.who === undefined || quote.text === undefined || config.quoteChars === 0) return `(replying to msg ${messageId})`
+    const text = [...quote.text]
+    const snippet = text.length > config.quoteChars ? `${text.slice(0, config.quoteChars).join('')}…` : quote.text
+    return `(replying to ${quote.who}, msg ${messageId}: ${JSON.stringify(snippet)})`
   }
 
   const drop = () => { counts.dropped += 1 }
@@ -162,10 +249,13 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
         return
       }
     }
+    const chat = qqChannelKey(config.account, message.kind, message.chatId)
+    const quote = message.replyTo === undefined ? undefined : await quoted(message.replyTo, chat)
     const addressed = message.kind === 'group'
-      ? message.mentionsHer || (message.replyTo !== undefined && await isHers(message.replyTo))
+      ? message.mentionsHer || quote?.hers === true
       : undefined
-    const text = message.replyTo === undefined ? message.text : `(replying to msg ${message.replyTo}) ${message.text}`
+    keep(message.messageId, isOwner ? config.ownerName : message.displayName, message.text)
+    const text = message.replyTo === undefined ? message.text : `${replyLabel(message.replyTo, quote)} ${message.text}`
     counts.delivered += 1
     await life.deliver({
       type: 'message',
@@ -184,7 +274,9 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     switch (event.post_type) {
       case 'message': {
         if (String(event.user_id) === config.account) return
-        const message = normalizeMessage(event, render)
+        const chatId = event.message_type === 'group' ? String(event.group_id ?? '') : String(event.user_id ?? event.sender?.user_id ?? '')
+        const kind = event.message_type === 'group' ? 'group' : 'private'
+        const message = normalizeMessage(event, renderIn(qqChannelKey(config.account, kind, chatId)))
         if (message !== undefined) await deliverMessage(message)
         return
       }
@@ -277,8 +369,24 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       const mention = args.mention ?? []
       if (mention.length > 0 && channel.kind !== 'group') throw new AnimaError('anima/bad-args', 'mention works only in group chats.')
       if (mention.some(id => !/^\d{4,12}$/.test(id))) throw new AnimaError('anima/bad-args', 'mention takes QQ user ids (digits), as shown with each message.')
-      await life.holdOutgoing(exec.agent!.id, args.text)
+      // Typing shows only while a message she chose waits in the outbox, in private chats.
+      let typing: ReturnType<typeof setTimeout> | undefined
+      try {
+        await life.holdOutgoing(exec.agent!.id, args.text, {
+          onHeld: (held) => {
+            if (channel.kind !== 'private' || !config.typing.enabled) return
+            typing = setTimeout(() => {
+              if (!login.ready) return
+              client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
+                .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
+            }, Math.max(0, held.sendsAt - Date.now() - config.typing.leadSeconds * 1000))
+          },
+        })
+      } finally {
+        clearTimeout(typing)
+      }
       const messageId = await send(channel.kind as 'private' | 'group', channel.id, outgoing(args.text, { replyTo: args.replyTo, mention }))
+      keep(messageId, 'you', args.text)
       return { sent: true, messageId }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
@@ -295,6 +403,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     },
     async execute(args, exec) {
       const channel = sessionChannel(exec.agent?.id)
+      const session = { channelKey: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
       const count = Math.max(1, Math.min(HISTORY_MAX, Math.round(args.count ?? 15)))
       const result = channel.kind === 'group'
         ? await client.call<{ messages?: OneBotEvent[] }>('get_group_msg_history', { group_id: Number(channel.id), count })
@@ -303,15 +412,235 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       const lines = messages.map((event) => {
         const userId = String(event.user_id ?? event.sender?.user_id ?? '')
         const who = userId === config.account ? 'you' : userId === config.owner ? `${config.ownerName} (owner)` : `${displayNameOf(event)} [qq ${userId}]`
-        const { text, replyTo } = renderSegments(segmentsOf(event.message), render)
+        const { text, replyTo } = renderSegments(segmentsOf(event.message), renderIn(session.channelKey))
+        keep(String(event.message_id ?? ''), userId === config.account ? 'you' : who, text)
         const when = typeof event.time === 'number' ? formatLocal(event.time * 1000) : '?'
-        return `${when} ${who} [msg ${String(event.message_id)}]: ${replyTo === undefined ? '' : `(replying to msg ${replyTo}) `}${text}`
+        return `${when} ${who} [msg ${String(event.message_id)}]: ${replyTo === undefined ? '' : `${replyLabel(replyTo, recent.get(replyTo))} `}${text}`
       })
       return { lines }
     },
   }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
 
-  core.addStatus(() => statusLines(config, client.health, login, counts))
+  /** The channel key of the calling conversation, and the channel. */
+  function sessionChat(exec: ToolExecution): { channel: PublishedChannel; key: string } {
+    const channel = sessionChannel(exec.agent?.id)
+    return { channel, key: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
+  }
+
+  /** Refuse when the chat's model route cannot take images (as DSH's read_image does), before anything enters history. */
+  async function assertVision(exec: ToolExecution): Promise<void> {
+    const agent = exec.agent as unknown as { session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined }; options?: { provider?: string; model?: string } } | undefined
+    const routed = agent?.session?.requestHeader?.()?.config
+    const provider = routed?.provider ?? agent?.options?.provider
+    const model = routed?.model ?? agent?.options?.model
+    const llm = ctx.get('llm')
+    if (provider === undefined || model === undefined || llm === undefined) {
+      throw new AnimaError('anima/no-vision', 'the model of this chat could not be determined, so the image is not shown.')
+    }
+    const info = await llm.resolveModelInfo(provider, model, exec.signal)
+    if (info.inputModalities?.includes('image') !== true) {
+      throw new AnimaError('anima/no-vision', `this chat's model (${model}) cannot see images; the image was not opened. Its placeholder text is all there is.`)
+    }
+  }
+
+  /** The bytes of an image: its URL first, then `get_image` through the runtime. */
+  async function imageBytes(entry: MediaEntry, signal: AbortSignal | undefined): Promise<Uint8Array> {
+    const { maxBytes, fetchTimeoutSeconds } = config.look
+    const timeout = fetchTimeoutSeconds * 1000
+    const problems: string[] = []
+    if (entry.url !== undefined) {
+      try {
+        return await fetchCapped(entry.url, maxBytes, timeout, signal)
+      } catch (error: unknown) {
+        problems.push(`url: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (entry.file !== undefined) {
+      try {
+        const info = await client.call<{ base64?: string; url?: string }>('get_image', { file: entry.file })
+        if (typeof info?.base64 === 'string' && info.base64 !== '') {
+          const data = Buffer.from(info.base64, 'base64')
+          if (data.byteLength > maxBytes) throw new Error(`the image is more than the ${maxBytes} bytes allowed`)
+          return new Uint8Array(data)
+        }
+        if (typeof info?.url === 'string' && /^https?:\/\//.test(info.url)) return await fetchCapped(info.url, maxBytes, timeout, signal)
+        problems.push('get_image gave no bytes or http URL')
+      } catch (error: unknown) {
+        if (error instanceof Error && /bytes allowed/.test(error.message)) throw new AnimaError('anima/look-too-large', error.message)
+        problems.push(`get_image: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    const tooLarge = problems.find(p => /bytes allowed/.test(p))
+    if (tooLarge !== undefined) throw new AnimaError('anima/look-too-large', `${tooLarge.replace(/^url: /, '')}.`)
+    throw new AnimaError('anima/look-failed', `the image could not be fetched (${problems.join('; ') || 'no source'}). It may have expired on QQ.`)
+  }
+
+  core.registerBehavior(defineTool({
+    name: LOOK_TOOL,
+    description: 'Look at an image or sticker someone sent in this chat, by the id in its placeholder (e.g. "#i3" in "[image #i3: …]"). You see the picture itself. Only open what you want to see; each look costs.',
+    parameters: {
+      id: { type: 'string', required: true, description: 'The image id from the placeholder, e.g. "#i3".' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true, description: 'The image id.' },
+          kind: { type: 'string', required: true, description: 'image or sticker.' },
+          summary: { type: 'string', description: 'The runtime\'s summary, if any.' },
+          image: {
+            type: 'object', additionalProperties: false, required: true,
+            properties: {
+              attachmentId: { type: 'string', required: true },
+              mediaType: { type: 'string', required: true },
+              bytes: { type: 'integer', required: true },
+              width: { type: 'integer', required: true },
+              height: { type: 'integer', required: true },
+              name: { type: 'string' },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: `The ${value.kind} #${value.id}${value.summary === undefined ? '' : ` (${value.summary})`}, ${value.image.width}x${value.image.height} px:` },
+        { type: 'image', attachment: value.image as unknown as ImageAttachmentRef },
+      ],
+    },
+    async execute(args, exec) {
+      const { key } = sessionChat(exec)
+      const entry = media.get(key, args.id)
+      if (entry === undefined || entry.kind === 'forward') {
+        throw new AnimaError('anima/no-image', `there is no image "${normalizeMediaId(args.id)}" in this chat. Use the id shown in an image placeholder here, e.g. #i3.`)
+      }
+      await assertVision(exec)
+      let ref = entry.ref as ImageAttachmentRef | undefined
+      if (ref === undefined) {
+        const attachments = ctx.get('attachments')
+        if (attachments === undefined) throw new AnimaError('anima/no-attachments', 'DSH has no attachment service, so images cannot be shown to a model.')
+        const data = await imageBytes(entry, exec.signal)
+        const mediaType = sniffImage(data)
+        if (mediaType === undefined) throw new AnimaError('anima/look-failed', 'the file is not a PNG, JPEG, GIF or WebP image.')
+        try {
+          ref = await attachments.saveImage({ data, mediaType, name: `qq-${entry.id}.${mediaType.slice(6)}` })
+        } catch (error: unknown) {
+          throw new AnimaError('anima/look-failed', `the image could not be stored for viewing: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        media.setRef(entry, { attachmentId: ref.attachmentId, mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height, ...ref.name === undefined ? {} : { name: ref.name } })
+      }
+      const summary = entry.summary?.replace(/^\[(.*)\]$/, '$1').trim()
+      return {
+        id: entry.id, kind: entry.kind, ...summary === undefined || summary === '' ? {} : { summary },
+        image: { attachmentId: String(ref.attachmentId), mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height, ...ref.name === undefined ? {} : { name: ref.name } },
+      }
+    },
+  }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
+
+  /** Lines of forwarded messages, capped; nested forwards are shown inline. */
+  function forwardLines(messages: readonly unknown[], chat: string, depth: number, out: string[], budget: { messages: number; chars: number; hidden: number }): void {
+    for (const raw of messages) {
+      const node = raw as OneBotEvent & { data?: { nickname?: string; user_id?: number | string; content?: unknown; message?: unknown } }
+      const isNode = node.type === 'node' && node.data !== undefined
+      const name = isNode ? String(node.data!.nickname ?? node.data!.user_id ?? '?') : (displayNameOf(node) || '?')
+      const segments = segmentsOf(isNode ? node.data!.content ?? node.data!.message : node.message)
+      if (budget.messages <= 0 || budget.chars <= 0) {
+        budget.hidden += 1
+        continue
+      }
+      const inner = depth < 2 ? segments.filter(seg => seg.type === 'forward' && Array.isArray(seg.data.content)) : []
+      const text = renderSegments(segments.filter(seg => !inner.includes(seg)), renderIn(chat)).text
+      const line = `${'  '.repeat(depth)}${name}: ${inner.length > 0 && text === '[empty message]' ? '[forwarded messages]' : text}`
+      const fits = [...line].slice(0, budget.chars).join('')
+      out.push(fits.length < line.length ? `${fits}…` : line)
+      budget.messages -= 1
+      budget.chars -= fits.length
+      for (const seg of inner) forwardLines(seg.data.content as unknown[], chat, depth + 1, out, budget)
+    }
+  }
+
+  core.registerBehavior(defineTool({
+    name: FORWARD_TOOL,
+    description: 'Read a forwarded chat record someone sent in this chat, by the id in its placeholder (e.g. "#f2" in "[forwarded messages #f2]").',
+    parameters: {
+      id: { type: 'string', required: true, description: 'The forward id from the placeholder, e.g. "#f2".' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { lines: { type: 'array', items: { type: 'string' }, required: true, description: 'One line per forwarded message.' } } },
+      render: (args, value) => [{ type: 'text', text: value.lines.length === 0 ? 'The forward is empty.' : `Forwarded messages #${normalizeMediaId(args.id)}:\n${value.lines.join('\n')}` }],
+    },
+    async execute(args, exec) {
+      const { key } = sessionChat(exec)
+      const entry = media.get(key, args.id)
+      if (entry === undefined || entry.kind !== 'forward') {
+        throw new AnimaError('anima/no-forward', `there is no forward "${normalizeMediaId(args.id)}" in this chat. Use the id shown in a forward placeholder here, e.g. #f2.`)
+      }
+      let messages = media.content(entry.id)
+      if (messages === undefined) {
+        if (entry.forwardId === undefined) throw new AnimaError('anima/forward-failed', 'this forward can no longer be fetched.')
+        try {
+          const result = await client.call<{ messages?: unknown[]; message?: unknown[] }>('get_forward_msg', { id: entry.forwardId, message_id: entry.forwardId })
+          messages = result?.messages ?? result?.message ?? []
+        } catch (error: unknown) {
+          if (error instanceof AnimaError && error.code === 'anima/qq-offline') throw error
+          throw new AnimaError('anima/forward-failed', `the forward could not be fetched (${error instanceof Error ? error.message.replace(/^[a-z]+\/[a-z-]+:\s*/, '') : String(error)}). It may have expired on QQ.`)
+        }
+      }
+      const lines: string[] = []
+      const budget = { messages: config.forward.maxMessages, chars: config.forward.maxChars, hidden: 0 }
+      forwardLines(messages, key, 0, lines, budget)
+      if (budget.hidden > 0) lines.push(`(${budget.hidden} more message${budget.hidden === 1 ? '' : 's'} not shown)`)
+      return { lines }
+    },
+  }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
+
+  core.registerBehavior(defineTool({
+    name: POKE_TOOL,
+    description: 'Poke someone in this QQ chat (a light nudge, no text). In a private chat it pokes the other person; in a group give their user id.',
+    parameters: {
+      userId: { type: 'string', description: 'QQ user id to poke (groups: required; private chats: only the other person).' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { poked: { type: 'string', required: true, description: 'Who was poked.' } } },
+      render: (_args, value) => [{ type: 'text', text: `poked ${value.poked}` }],
+    },
+    async execute(args, exec) {
+      const { channel } = sessionChat(exec)
+      const userId = args.userId?.trim() || (channel.kind === 'private' ? channel.id : '')
+      if (!/^\d{4,12}$/.test(userId)) throw new AnimaError('anima/bad-args', channel.kind === 'group' ? 'in a group, qq_poke needs the user id of the person (digits, as shown with each message).' : 'userId must be digits.')
+      if (channel.kind === 'private' && userId !== channel.id) throw new AnimaError('anima/bad-args', 'in a private chat you can only poke the person you are talking with.')
+      if (userId === config.account) throw new AnimaError('anima/bad-args', 'you cannot poke yourself.')
+      if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${offline.reason}); nobody was poked.`)
+      if (channel.kind === 'group') await client.call('group_poke', { group_id: Number(channel.id), user_id: Number(userId) })
+      else await client.call('friend_poke', { user_id: Number(userId) })
+      return { poked: whoIs(userId) }
+    },
+  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+
+  core.registerBehavior(defineTool({
+    name: REACT_TOOL,
+    description: 'React to a message in this QQ chat with one emoji (e.g. "👍", "😂", "❤️"), by its msg id. Lighter than a reply.',
+    parameters: {
+      messageId: { type: 'string', required: true, description: 'The "msg" number shown with the message.' },
+      emoji: { type: 'string', required: true, description: 'One emoji character, or a QQ face id (1–3 digits).' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { reacted: { type: 'string', required: true, description: 'The emoji.' } } },
+      render: (args, value) => [{ type: 'text', text: `reacted ${value.reacted} to msg ${args.messageId}` }],
+    },
+    async execute(args, exec) {
+      sessionChat(exec)
+      if (!/^-?\d{1,20}$/.test(args.messageId.trim())) throw new AnimaError('anima/bad-args', 'messageId is the "msg" number shown with a message.')
+      const id = emojiId(args.emoji)
+      if (id === undefined) throw new AnimaError('anima/bad-args', 'emoji must be exactly one emoji character (like 👍) or a QQ face id of 1–3 digits.')
+      if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${offline.reason}); no reaction was sent.`)
+      await client.call('set_msg_emoji_like', { message_id: Number(args.messageId.trim()), emoji_id: id, set: true })
+      return { reacted: args.emoji.trim() }
+    },
+  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+
+  core.addStatus(() => [
+    ...offline.down ? [`QQ OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}`] : [],
+    ...statusLines(config, client.health, login, counts),
+  ])
   // Owner surface shared with the Anima page (DESIGN §12); the access token is never shown.
   core.providePlatform({
     platform: PLATFORM,
@@ -321,8 +650,9 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       const ok = login.ready && health.state === 'open' && health.online !== false
       return {
         health: ok ? 'ok' : health.state === 'open' ? 'warn' : 'down',
-        summary: statusLines(config, health, login, counts)[0]!.replace(/^QQ: /, ''),
+        summary: `${offline.down ? `OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}. ` : ''}${statusLines(config, health, login, counts)[0]!.replace(/^QQ: /, '')}`,
         details: {
+          offline: offline.down ? { since: offline.since, reason: offline.reason } : null,
           url: config.url,
           account: config.account,
           nickname: login.nickname ?? null,
@@ -340,8 +670,8 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   })
   life.addReportLine(() => {
     const { health } = client
-    if (login.ready && health.state === 'open' && health.online !== false) return []
-    return [`QQ is offline since ${formatLocal(health.since)}; messages there cannot be sent or received now.`]
+    if (!offline.down) return []
+    return [`QQ is offline since ${formatLocal(offline.since)} (${offline.reason}); messages there cannot be sent or received now.`]
   })
 }
 
@@ -355,7 +685,7 @@ export function statusLines(config: ResolvedQqConfig, health: Health, login: { r
     ? `connected to ${config.url} as ${config.account}${login.nickname === undefined ? '' : ` (${login.nickname})`}${login.ready ? '' : ', not ready'}`
     : `${health.state}${health.retryInMs === undefined ? '' : `, retry in ${Math.round(health.retryInMs / 1000)} s`}`
   return [
-    `QQ: ${state}; account ${health.online === false ? 'OFFLINE' : health.online === true ? 'online' : 'status unknown'}; last heartbeat ${ago(health.lastHeartbeat)}; connects ${health.connects}`,
+    `QQ: ${state}; account ${health.state !== 'open' ? 'status unknown while disconnected' : health.online === false ? 'OFFLINE' : health.online === true ? 'online' : 'status unknown'}; last heartbeat ${ago(health.lastHeartbeat)}; connects ${health.connects}`,
     ...login.problem === undefined ? [] : [`QQ problem: ${login.problem}`],
     ...health.lastError === undefined ? [] : [`QQ last error: ${health.lastError}`],
     `QQ allowlist: owner ${config.owner}; users ${config.allow.users.map(u => u.id).join(', ') || 'none'}; groups ${config.allow.groups.map(g => g.id).join(', ') || 'none'}`,

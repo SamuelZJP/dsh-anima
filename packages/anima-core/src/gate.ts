@@ -52,6 +52,8 @@ export interface GateMoment {
    * to the behavior, which refuses it and lists the channels that exist.
    */
   readonly channelKnown?: (channelKey: string) => boolean
+  /** Whether a channel is one of the owner's own (for `approve` rules with `targets: others`). */
+  readonly ownerChannel?: (channelKey: string) => boolean
   /** Channel keys she may reach (known and allowlisted), listed when a call targets an unknown one. */
   readonly knownChannels?: () => readonly string[]
 }
@@ -293,9 +295,14 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
     const { rule } = over
     return deny(GateCode.overQuota, `limit of ${rule.limit} per ${describeWindow(rule.windowMinutes)} ${describeScope(rule)} reached for ${name}; next slot in about ${minutes} min. Do not retry now.`)
   }
-  const forced = policy.approve?.some(rule => rule.behavior === name) === true
+  const forced = policy.approve?.some(rule => rule.behavior === name
+    && (rule.targets !== 'others' || target === undefined || moment.ownerChannel?.(target) !== true)) === true
   if (forced || ((meta.effect === 'public' || meta.effect === 'irreversible') && !policy.allow.some(rule => rule.behavior === name))) {
-    const why = forced ? `the owner wants to approve every ${name}` : `${name} is a ${meta.effect} action`
+    const why = forced
+      ? target !== undefined && policy.approve?.some(rule => rule.behavior === name && rule.targets === 'others') === true
+        ? `the owner approves every ${name} toward someone other than the owner`
+        : `the owner wants to approve every ${name}`
+      : `${name} is a ${meta.effect} action`
     if (moment.ownerLine === true) return { allowed: true, approval: why }
     return deny(GateCode.needsApproval, `${why} and the owner has not allowed it. You can tell the owner what you wanted to do.`)
   }

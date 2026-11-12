@@ -385,6 +385,7 @@ export class AnimaCore extends Service {
       channelAllowed: key => this.channelAllowed(key),
       // Default deny: without a channel resolver no target is known.
       channelKnown: key => this.state.channels?.(key) !== undefined,
+      ownerChannel: key => this.state.channels?.(key)?.isOwner === true,
       // Only keys she may actually reach are offered in refusals.
       knownChannels: () => (this.state.channelList?.() ?? []).filter(key => this.channelAllowed(key) !== false),
     }
@@ -1048,7 +1049,7 @@ export class AnimaCore extends Service {
 function describeArgs(args: Readonly<Record<string, unknown>>): string {
   const text = JSON.stringify(args)
   if (text === '{}') return ''
-  return ` with ${text.length > 300 ? `${text.slice(0, 300)}…` : text}`
+  return ` with ${text.length > 800 ? `${text.slice(0, 800)}…` : text}`
 }
 
 /**

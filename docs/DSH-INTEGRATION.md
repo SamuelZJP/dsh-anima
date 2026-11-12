@@ -294,9 +294,33 @@ The run found three gate problems, fixed in this phase. Each has tests.
 - **Self-model uptake:** as above (report line, consolidation `self_note`).
 
 **Observed, not changed:**
-- **Stale intents:** Self's report says the owner wrote but not that her conversation replied. Twice Self opened a reply intent the conversation had already answered; the conversation declined one with `stay_silent`, and the owner denied the other.
+- **Stale intents:** Self's report says the owner wrote but not that her conversation replied. Twice Self opened a reply intent the conversation had already answered; the conversation declined one with `stay_silent`, and the owner denied the other. Fixed in Phase 7: the report now says "You responded in … at …" (DESIGN §5).
 - **Decay over gaps:** decay applies the whole gap since its last run to memories created in between. m8, written on 2026-12-15, was decayed as if 33 days old after a clock jump. This only matters across skipped days.
 - **Narrow pane:** at the pane's narrow width the Memory and Changes tables wrap tightly.
+
+**Phase 7 demo (2026-11-11, QQ refinement): exit check passed.**
+
+**Setup:**
+- NapCatQQ on another machine, her test account, reached through the SSH tunnel at `ws://127.0.0.1:3003` (token required; read from a 0600 file into `ANIMA_QQ_TOKEN` at boot, never written to the overlay).
+- A scratch `--patch` overlay set `anima-core` to `characterId: anima-p7`, `name: 小鲸鱼`, `dataDir: ~/.anima/test-p7` (constitution copied from `test-qq`), real clock; and enabled `anima-adapter-qq` with the owner and the test group on the allowlist. Default Phase 7 config otherwise.
+- Boot: `ANIMA_QQ_TOKEN=… pnpm dsh --profile anima-dev --patch <scratch>/p7.yml --no-open`. `~/.dsh` was not changed.
+- **Evidence:** decoded session logs, `life.json`, `activity/2026-11-11.jsonl`, the Platforms view (`api/anima/view?name=platforms`). All requests used `deepseek-official/deepseek-flash`.
+
+**Runs (owner's private chat, real time 17:18–17:26):**
+1. **Image.** The owner sent a photo. The stimulus read `[image #i1]` (NapCat gave no summary), with no image attached. She called `qq_look("#i1")` on her own. The `tool/result` held the text line and an `image/jpeg` 1920×1449 attachment. Her `qq_say` described what only the picture shows (Faker in the white T1 jersey with the Samsung Odyssey and Red Bull logos and four stars; a look-alike in a red-and-blue Twitch jacket). The owner's follow-up rendered as `(replying to Sam, msg …: "[image #i1]") 知道这是谁吗？`. The request after the look: 1,313 input tokens, 2,688 cache-read.
+2. **Forward.** A forwarded record arrived as `[forwarded messages #f1]`. She called `qq_read_forward("#f1")` (fetched with `get_forward_msg`): five lines of the Phase 4 group chat (小鲸鱼, 九命猫). She recognized her own lines in it.
+3. **Poke.** The owner poked her (`[pokes you]`). She chose `qq_poke` → `poked Sam` (`friend_poke`), then `qq_say` "戳回来了…". `qq_react` was not tried live (unit tests only).
+4. **Offline.** First `/anima self` (no text) created her Self session (`anima-self-409d…`), so the notice had a target. The owner stopped NapCat for about three minutes:
+   - The Platforms view: `OFFLINE since 2026-11-11 17:23: WebSocket error (closed). closed, retry in 60 s; …`, with `details.offline { since, reason }`.
+   - Self: `agent/inbox/spliced` at 17:24 (60 s later, `platforms.noticeAfterSeconds`), `[notice] QQ went offline at 2026-11-11 17:23 (WebSocket error (closed)). …`, source `stimulus: platform-offline`. It did not wake her.
+   - Back at 17:26 (the next 60 s reconnect): `[notice] QQ is back online at 2026-11-11 17:26.` (`platform-online`). Both lines are also in her report events.
+5. **Duplicate replies.** Her report events held one line `You responded in Sam (QQ) at 2026-11-11 17:21 (qq_say); that conversation already handled what came in there.` after two replies (the line is replaced, not repeated).
+
+**Found and fixed during the run:**
+- DSH's `ctx.logger` lines do not appear in the web-mode console, so "the log" did not show the transition. Platform transitions are now `platform` records in Anima's activity log (`{ type: 'platform', platform, online, reason }`), from `animaLife.platformStatus`; after a restart the boot transition (offline → online) was recorded.
+- While disconnected, the summary still said "account online" (the last heartbeat's value). It now says "status unknown while disconnected".
+
+**Not exercised live:** `qq_react`, typing (no intent was held in the outbox), the outbox hold and expiry across a disconnect, the intent-approval default (no intent toward anyone but the owner). All have unit tests.
 
 **Day-to-day:**
 - Code change: `pnpm build`, then restart `dsh`. Linked package code is not hot-reloaded by default; DSH's HMR watches only config unless the profile patch sets `hmr.config.root` (`packages/boot/hmr/README.md`).
@@ -588,6 +612,8 @@ Anima packages talk through Cordis events declared in `interface Events` of `@de
 | `send_private_msg`, `send_group_msg` | action | `qq_say` (segments `reply`, `at`, `text`); the returned `message_id` marks her messages |
 | `get_msg` | action | is a replied-to message hers (when not in her recent sent ids) |
 | `get_friend_msg_history`, `get_group_msg_history` (`count`) | action (NapCat extension, widely supported) | `qq_history` |
+| `get_msg` | action | also the quoted-reply snippet (Phase 7) when the message is not in the recent cache |
+| `get_image`, `get_forward_msg`, `group_poke`, `friend_poke`, `set_msg_emoji_like`, `set_input_status` | actions (Phase 7; section 8f) | `qq_look`, `qq_read_forward`, `qq_poke`, `qq_react`, typing |
 | `set_friend_add_request` (`flag`, `approve`) | action | answering a friend request after the owner decides |
 | `message` (`private`, `group`; array segments, CQ string fallback) | event | messages |
 | `notice` `notify`/`poke` with `target_id` = her | event | poke → waking message `[pokes you]` |
@@ -623,7 +649,7 @@ A fifth Anima preset, `anima-group-triage` (`bundle/presets/group-triage.patch.y
 
 - A user message may carry image blocks: `{ type: 'image', attachment: ImageAttachmentRef }` (`packages/llm/llm/src/types.ts`, `ImageBlock`). A ref comes from the attachment service: `ctx.attachments.saveImage({ data, mediaType: 'image/jpeg', name? })` (`packages/attachment/attachment/src/index.ts`). The service is the `attachment-local` row of `dsh-base`.
 - `llm-deepseek` (`src/images.ts`, `prepareImages`) sends images only in `user` and `tool` messages, and only to a model whose catalog entry has `inputModalities` including `image`. Otherwise the request fails with `UNSUPPORTED_CONTENT`. `deepseek-flash` declares `['text', 'image']` (`src/models.ts:13`). The default limit is 600 images per request (`request-pricing.ts`), and images beyond the byte budget need an offload (`IMAGE_OFFLOAD_REQUIRED`).
-- Tool results can carry image blocks too; under PTC they are re-wrapped as a user message (`packages/core/tool-executor-ptc/src/ptc.ts:602`). Anima does not use this: frames go only to a viewing session, so Self history stays text-only.
+- Tool results can carry image blocks too; under PTC they are re-wrapped as a user message (`packages/core/tool-executor-ptc/src/ptc.ts:602`). Close views do not use this: frames go only to a viewing session, so Self history stays text-only. QQ's `qq_look` (Phase 7) does, section 8f.
 - Anima: `DshSessionHost.deliver(…, extra)` appends text and image blocks after the stimulus text in one `createUserMessage`, so the frames are logged as part of the `user/message` event.
 
 ### Viewing sessions
@@ -709,6 +735,34 @@ export function apply(ctx) {
 - **Data.** Each tab polls `GET api/anima/view?name=<view>` (3–15 s) and posts changes to `api/anima/action`; both map to the `anima` service's owner views and actions (DESIGN §12).
 - **Settings.** `ctx.configEditor` is optional (`ctx.inject(['configEditor'], …)`); `edit()` validates the full candidate against the row's schema before writing the profile patch, and the Loader restarts the row.
 
+## 8f. Phase 7 extension points (QQ refinement)
+
+### An image in a tool result (Read at the pin; Verified in unit tests, live in section 3 once run)
+
+At `dsh-v0.2.2-rc.1` a tool result **can** carry an image straight to the calling session's model, so `qq_look` needs no viewing session:
+- `defineTool`'s `output.render` returns `ContentBlock[]` (`packages/core/tools/src/schema.ts:496`), and `ImageBlock` is one of them.
+- `llm-deepseek` sends images inside a `tool_result` (`src/serialize.ts`, the `input()` mapper of `role: 'tool'` messages) and accepts them only in user and tool messages (`src/images.ts`, `prepareImages`).
+- The precedent is DSH's own `read_image` (`packages/fs/tool-fs/src/read-image.ts`): it saves the bytes with `attachments.saveImage`, renders `[text, { type: 'image', attachment }]`, and **first** refuses when the calling route's model does not declare `image` input (`assertImageCapableRoute`: `exec.agent.session.requestHeader()?.config`, else `agent.options`, then `ctx.llm.resolveModelInfo(provider, model, signal).inputModalities`). An image that reached the history of a text-only model would fail every later request (`UNSUPPORTED_CONTENT`), so `qq_look` makes the same check before downloading (`anima/no-vision`).
+- Cost: the image stays in that session's history and rides every later request there (as a Files reference or inline, cache-read), until compaction removes it. Looks are capped by gate quotas.
+- `@anima/adapter-qq` now lists `@deepseek-ai/dsh-attachment` (types) and `@deepseek-ai/dsh-llm` (the `llm` service type) as peer dependencies at the pin, like `@anima/adapter-bili`.
+
+### NapCat actions (checked against NapCatQQ's source, `packages/napcat-onebot/action`, main branch, 2026-11-11)
+
+| Action | Params | Notes |
+| --- | --- | --- |
+| `get_image` | `{ file }` (the segment's `data.file`) | Returns `{ file, url, file_size, file_name, base64? }`. `file` is a path on NapCat's machine (useless over the SSH tunnel); `base64` only with NapCat's `enableLocalFile2Url`. `qq_look` fetches the segment's `url` (QQ CDN) first and uses this as a fallback |
+| inbound `image` segment | `data: { summary, file, sub_type, url, file_size }` | `mface` (sticker) has `url` and `summary` |
+| `get_forward_msg` | `{ id }` (the forward segment's `data.id`), or `message_id` | Returns `{ messages: OB11Message[] }`; inner forwards come inline (`data.content`) and cannot be fetched on their own. With NapCat's `parseMultMsg` the inbound forward segment already carries `data.content` |
+| `group_poke` / `friend_poke` | `{ group_id, user_id }` / `{ user_id }` | Same handler as `send_poke {user_id, group_id?}` |
+| `set_msg_emoji_like` | `{ message_id, emoji_id, set }` | NapCat sends `emoji_id` longer than 3 digits as a Unicode emoji (decimal code point, type 2), else a QQ face id (type 1) |
+| `set_input_status` | `{ user_id, event_type: 1 }` | Typing; private (C2C) chats only |
+
+All are NapCat extensions except `get_image` and `get_forward_msg` (go-cqhttp heritage), so another OneBot runtime may refuse them; the behaviors then return the runtime's error (`anima/qq-failed`).
+
+### Platform health into life
+
+`animaLife.platformStatus(platform, online, reason?)` is Anima's own API (no DSH API). Self notices go through `agent.inject`, the same as intent outcomes, so they are logged `user/message` events (`source.stimulus: 'platform-offline' | 'platform-online'`).
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
@@ -776,6 +830,7 @@ Re-check these on every DSH upgrade.
 | `ctx.connection.fetch.register({ path, methods, requestBody, fetch })` | `dsh-client-connection` (Host half) | owner routes `/api/anima/view`, `/api/anima/action` | Verified (Phase 6; 401 without the browser cookie) |
 | `ctx.systemPrompt.context({ name, order, text: () => string, interpolate, required })` | `dsh-system-prompt` | self-model digest | Verified (Phase 6: logged runtime-context snapshot updates after a note and after a revert) |
 | `ctx.configEditor.entries()`, `configuration()`, `edit(entry, change)`, `documentPath` (optional) | `dsh-config-editor` | Settings tab | Verified in the Phase 6 demo (typed locally) |
+| `ImageBlock` in a tool's `output.render`, `ctx.llm.resolveModelInfo(...).inputModalities`, `agent.session.requestHeader()` | `dsh-tools`, `dsh-llm`, `dsh-agent` | `qq_look` shows the image in the chat's own model; vision check first | Read (Phase 7; unit tests use fakes) |
 
 ## 12. Known gaps and risks
 

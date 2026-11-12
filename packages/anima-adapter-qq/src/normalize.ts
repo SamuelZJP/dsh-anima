@@ -54,7 +54,15 @@ export interface RenderContext {
   readonly herName: string
   /** Known display names by user id. */
   readonly name?: (userId: string) => string | undefined
+  /**
+   * A short id for an image, sticker or forward segment she can open later
+   * (`i3`, `f2`), or undefined to leave it without one.
+   */
+  readonly ref?: (kind: MediaKind, data: Readonly<Record<string, unknown>>) => string | undefined
 }
+
+/** Segment kinds that get a short id. */
+export type MediaKind = 'image' | 'sticker' | 'forward'
 
 /** Rendered message content. */
 export interface Rendered {
@@ -75,7 +83,8 @@ function bracketless(summary: string): string {
 
 /**
  * Render segments as text: `@name` for mentions, placeholders for media.
- * Images are described by their summary when the runtime sends one.
+ * Images are described by their summary when the runtime sends one; images,
+ * stickers and forwards carry a short id (`[image #i3: …]`) when `ctx.ref` gives one.
  */
 export function renderSegments(segments: readonly Segment[], ctx: RenderContext): Rendered {
   let mentionsHer = false
@@ -91,19 +100,26 @@ export function renderSegments(segments: readonly Segment[], ctx: RenderContext)
         break
       }
       case 'reply': replyTo = str(data.id); break
-      case 'image': {
+      case 'image':
+      case 'mface': {
+        const kind = type === 'image' ? 'image' : 'sticker'
+        const id = ctx.ref?.(kind, data)
         const summary = bracketless(str(data.summary))
-        parts.push(summary === '' ? '[image]' : `[image: ${summary}]`)
+        parts.push(`[${kind}${id === undefined ? '' : ` #${id}`}${summary === '' ? '' : `: ${summary}`}]`)
         break
       }
-      case 'mface': parts.push(`[sticker${str(data.summary) === '' ? '' : `: ${bracketless(str(data.summary))}`}]`); break
       case 'face': parts.push('[emoji]'); break
       case 'record': parts.push('[voice message]'); break
       case 'video': parts.push('[video]'); break
       case 'file': parts.push(`[file${str(data.name) === '' ? '' : `: ${str(data.name)}`}]`); break
       case 'json':
       case 'xml': parts.push('[card]'); break
-      case 'forward': parts.push('[forwarded messages]'); break
+      case 'forward': {
+        const id = ctx.ref?.('forward', data)
+        const count = Array.isArray(data.content) ? `: ${data.content.length} messages` : ''
+        parts.push(`[forwarded messages${id === undefined ? '' : ` #${id}`}${count}]`)
+        break
+      }
       case 'poke': parts.push('[poke]'); break
       default: parts.push(`[${type}]`)
     }
