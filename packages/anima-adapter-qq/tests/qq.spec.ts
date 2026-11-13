@@ -113,9 +113,10 @@ describe('QQ adapter', () => {
     const { ctx, host, server } = await setup({}, { groupTriage: { windowSeconds: 30 } })
     server.push(groupMessage(GROUP, '2002', [{ type: 'text', data: { text: 'lunch?' } }]))
     server.push(groupMessage(GROUP, '2002', [{ type: 'at', data: { qq: ACCOUNT } }, { type: 'text', data: { text: ' you in?' } }]))
-    await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(2))
-    expect(host.inbox(groupSession)[0]).toMatch(/^\(inject\) .*Bob \[qq 2002, msg \d+\]: lunch\?$/)
-    expect(host.inbox(groupSession)[1]).toMatch(/Bob \[qq 2002, msg \d+\] 叫你（群里所有人都会看到你的回答）: @Anima you in\?\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
+    await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(1))
+    expect(host.inbox(groupSession)[0]).toMatch(/2 条消息（Bob 2 条）：\n  \d\d:\d\d Bob \[qq 2002, msg \d+\]: lunch\?\n  \d\d:\d\d Bob \[qq 2002, msg \d+\] 叫你: @Anima you in\?\n（群里所有人都会看到你的回答。）\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
+    // The chat that woke her is marked read (Phase 9).
+    await vi.waitFor(() => expect(server.callsOf('mark_group_msg_as_read')).toEqual([expect.objectContaining({ params: { group_id: Number(GROUP) } })]))
 
     // She speaks; a reply to her message wakes the group.
     const said = await callAs(ctx, groupSession, 'qq_say', { text: 'sure!', replyTo: '7', mention: ['2002'] })
@@ -124,8 +125,8 @@ describe('QQ adapter', () => {
     expect(send.params).toEqual({ group_id: Number(GROUP), message: [{ type: 'reply', data: { id: '7' } }, { type: 'at', data: { qq: '2002' } }, { type: 'text', data: { text: ' ' } }, { type: 'text', data: { text: 'sure!' } }] })
     const mine = /msg (\d+)/.exec(said.text)![1]!
     server.push(groupMessage(GROUP, '2002', [{ type: 'reply', data: { id: mine } }, { type: 'text', data: { text: 'great' } }]))
-    await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(3))
-    expect(host.inbox(groupSession)[2]).toContain(`(replying to you, msg ${mine}: "sure!") great`)
+    await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(2))
+    expect(host.inbox(groupSession)[1]).toContain(`(replying to you, msg ${mine}: "sure!") great`)
 
     // A reply to someone else's message is chatter (get_msg says it is not hers).
     server.respond('get_msg', () => ({ sender: { user_id: 2002 } }))
@@ -189,7 +190,7 @@ describe('QQ adapter', () => {
     expect((await callAs(ctx, selfSessionId('anima'), 'qq_say', { text: 'x' })).text).toContain('anima/wrong-session')
     expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'x', mention: ['2002'] })).text).toContain('mention works only in group chats')
     // open_conversation to a QQ group nobody published is refused by the gate, listing the real channels.
-    expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: `qq:${ACCOUNT}:group:999`, intent: 'hi' })).text).toContain(`anima/unknown-channel: no channel "qq:${ACCOUNT}:group:999". Channels you can reach: qq:${ACCOUNT}:private:${OWNER}`)
+    expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: `qq:${ACCOUNT}:group:999`, intent: 'hi' })).text).toContain(`anima/unknown-channel: 没有「qq:${ACCOUNT}:group:999」这个地方。你能去的地方：qq:${ACCOUNT}:private:${OWNER}`)
   })
 
   it('asks the owner about friend requests and consumes the reply', async () => {

@@ -22,7 +22,7 @@ import { describeGoal, GoalStore, type Goal } from './goals.ts'
 import { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
 import { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfSection } from './selfmodel.ts'
 import { billableTokens, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
-import { dayKey, inWindow, modeAt, phaseAt, type Mode, type Phase } from './rhythm.ts'
+import { asleepAt, dayKey, dayStart, earliestBedtime, inWindow, latestBedtime, modeAt, phaseAt, wokenUntil, type Mode, type Phase, type SleepRecord } from './rhythm.ts'
 import { advance, describeNeeds, feel, initialState, satisfy, spendTurn, type SelfState, type StateModel } from './state.ts'
 import type { PlaceFacts } from './primer.ts'
 import { AnimaError, closesTurn, costOf, type BehaviorMeta, type SessionInfo, type SessionKind } from './types.ts'
@@ -39,6 +39,12 @@ declare module '@deepseek-ai/cordis' {
     'anima/behavior'(payload: BehaviorEvent): void
     /** The owner saved a new constitution; persona rows re-read it. */
     'anima/constitution'(text: string): void
+    /** She fell asleep: by `sleep`, or at the latest bedtime (Phase 9). */
+    'anima/sleep'(payload: { readonly by: 'her' | 'latest'; readonly at: number; readonly note?: string | undefined; readonly sessionId?: string | undefined }): void
+    /** The owner woke her on purpose (Phase 9). */
+    'anima/woken'(payload: { readonly at: number; readonly until: number }): void
+    /** The owner paused or resumed her. */
+    'anima/paused'(paused: boolean): void
   }
 }
 
@@ -53,6 +59,19 @@ export interface BehaviorEvent {
   readonly sessionId: string | undefined
   /** Time of the call on her clock. */
   readonly at: number
+}
+
+/** Bedtime facts at a time (Phase 9), on her clock. */
+export interface BedtimeInfo {
+  readonly earliest: number
+  readonly latest: number
+  readonly asleep: boolean
+  /** Asleep: since when, and how. */
+  readonly since?: number | undefined
+  readonly by?: 'her' | 'latest' | undefined
+  /** A deliberate wake today. */
+  readonly wokenAt?: number | undefined
+  readonly wokenUntil?: number | undefined
 }
 
 /** Maps a DSH session id to Anima session info; provided by `anima-life`. */
@@ -81,7 +100,15 @@ export type ChannelAllowlist = (channelKey: string) => boolean
 /** Name recorded in `ToolErrorInfo.name` for gate refusals. */
 export const GATE_INFO_NAME = 'AnimaPolicy'
 
-const PAUSED_HINT = 'the owner has paused all Anima behaviors. Do nothing more until resumed.'
+/** Real ms between checks for the latest bedtime passing (a poll, not a tunable: one check is cheap). */
+const BEDTIME_CHECK_MS = 10_000
+
+/** Minutes after midnight as `HH:mm`. */
+function formatClock(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+}
+
+const PAUSED_HINT = '主人让你先停一下：现在什么都做不了，等主人让你继续。'
 
 /**
  * Default constitution written to `<dataDir>/constitution.md` on first load.
@@ -105,6 +132,8 @@ interface StateFile {
   days: Record<string, DayLedger>
   /** Quota counters, so daily limits survive a restart. */
   quotas?: Record<string, { at: number; amount: number }[]>
+  /** When she went to sleep and when the owner woke her (Phase 9). */
+  sleep?: SleepRecord
 }
 
 /** Anima core service. */
@@ -141,6 +170,10 @@ export class AnimaCore extends Service {
   private readonly statusParts = new Map<string, () => unknown>()
   private self: SelfState
   private readonly ledger: Ledger
+  /** When she went to sleep and when the owner woke her (Phase 9). */
+  private sleepRecord: SleepRecord = {}
+  /** Whether the last bedtime check saw her asleep, so falling asleep is noticed once. */
+  private sleptSeen: boolean | undefined
 
   /**
    * @param ctx - root context with `tools`.
@@ -153,7 +186,7 @@ export class AnimaCore extends Service {
     this.activity = new ActivityLog(join(config.dataDir, 'activity'))
     this.selfModel = new SelfModelStore(join(config.dataDir, 'self-model.json'), join(config.dataDir, 'self-model-log.jsonl'), config.selfModel)
     this.clock = new AnimaClock(config.clock)
-    this.model = { needs: config.needs, energy: config.energy, mood: config.mood, rhythm: config.day }
+    this.model = { needs: config.needs, energy: config.energy, mood: config.mood, rhythm: config.day, asleep: t => asleepAt(t, config.day, this.sleepRecord) }
     this.goals = new GoalStore(join(config.dataDir, 'goals.json'))
     this.statePath = join(config.dataDir, 'state.json')
     const now = this.clock.now()
@@ -165,6 +198,7 @@ export class AnimaCore extends Service {
     // Two weeks of day counters: enough for the formal test's whole week.
     this.ledger = new Ledger(saved?.days ?? {}, 14)
     this.quota.load(saved?.quotas)
+    this.sleepRecord = saved?.sleep ?? {}
     // Ids keep counting across restarts, so a late "yes a3" never approves a newer request.
     const approvalsPath = join(config.dataDir, 'approvals.json')
     const approvalSeq = { seq: readJson<{ seq: number }>(approvalsPath)?.seq ?? 0 }
@@ -261,10 +295,25 @@ export class AnimaCore extends Service {
 
     this.registerOwnBehaviors()
 
+    // The latest bedtime, and the end of a deliberate wake, pass on her clock (Phase 9).
+    this.sleptSeen = this.asleep()
+    ctx.effect(() => {
+      const timer = setInterval(() => this.checkBedtime(), BEDTIME_CHECK_MS)
+      timer.unref?.()
+      return () => clearInterval(timer)
+    }, 'anima.bedtime')
+
     const core: Subcommand[] = [
       { name: 'status', usage: 'status — state, budgets, sessions and quota usage', run: () => ({ kind: 'success', text: this.statusText() }) },
       { name: 'pause', usage: 'pause — refuse every Anima behavior and stop heartbeats until resumed', run: async () => { await this.ownerAction('pause', {}, 'command'); return { kind: 'success', text: 'Anima paused. Every behavior is refused and heartbeats stop until /anima resume.' } } },
       { name: 'resume', usage: 'resume — lift a pause', run: async () => { await this.ownerAction('resume', {}, 'command'); return { kind: 'success', text: 'Anima resumed.' } } },
+      {
+        name: 'wake', usage: 'wake — wake her on purpose while she sleeps (only the owner can)',
+        run: async () => {
+          const result = await this.ownerAction('wake', {}, 'command') as { woken: boolean; until?: number }
+          return { kind: 'success', text: result.woken ? `She is awake now, until she sleeps again or ${formatLocal(result.until!)}.` : 'She is not asleep.' }
+        },
+      },
       { name: 'approve', usage: 'approve <id> — allow a pending approval request (same as replying "yes <id>" on the owner line)', run: args => this.answerCommand(args, true) },
       { name: 'deny', usage: 'deny <id> — deny a pending approval request', run: args => this.answerCommand(args, false) },
       { name: 'goal', usage: 'goal add <text> [due <YYYY-MM-DD HH:mm>] | goal list | goal close <id> [reason] — owner goals', run: args => this.goalCommand(args) },
@@ -320,12 +369,100 @@ export class AnimaCore extends Service {
 
   /** Phase at a time (default now). */
   phase(t = this.clock.now()): Phase {
-    return phaseAt(t, this.config.day)
+    return phaseAt(t, this.config.day, this.sleepRecord)
   }
 
   /** Heartbeat mode at a time (default now). */
   mode(t = this.clock.now()): Mode {
-    return modeAt(t, this.config.day)
+    return modeAt(t, this.config.day, this.sleepRecord)
+  }
+
+  /** Whether she is asleep at a time (default now): she went to sleep, or the latest bedtime passed (Phase 9). */
+  asleep(t = this.clock.now()): boolean {
+    return this.mode(t) === 'night'
+  }
+
+  /** The sleep record (read-only copy). */
+  sleepInfo(): Readonly<SleepRecord> {
+    return { ...this.sleepRecord }
+  }
+
+  /** Bedtime facts for her report and status (Phase 9), at `t`. */
+  bedtimeInfo(t = this.clock.now()): BedtimeInfo {
+    const asleep = this.asleep(t)
+    const start = this.dayStartOf(t)
+    const record = this.sleepRecord
+    const today = (at: number | undefined): at is number => at !== undefined && at >= start && at <= t
+    const latest = latestBedtime(t, this.config.day)
+    const chosen = today(record.since) && (!today(record.wokenAt) || record.since > record.wokenAt)
+    return {
+      earliest: earliestBedtime(t, this.config.day),
+      latest,
+      asleep,
+      ...asleep ? (chosen ? { since: record.since, by: record.by ?? 'her' } : { since: Math.max(latest, today(record.wokenAt) ? record.wokenUntil ?? latest : latest), by: 'latest' as const }) : {},
+      ...today(record.wokenAt) ? { wokenAt: record.wokenAt, wokenUntil: record.wokenUntil } : {},
+    }
+  }
+
+  /** One status line on sleep (Phase 9). */
+  private sleepLine(now: number): string {
+    const info = this.bedtimeInfo(now)
+    const window = `bedtime ${formatLocal(info.earliest).slice(11)}–${formatLocal(info.latest).slice(11)}`
+    const woken = info.wokenAt === undefined ? '' : `; woken by the owner at ${formatLocal(info.wokenAt)}${info.wokenUntil === undefined ? '' : ` until ${formatLocal(info.wokenUntil)}`}`
+    return info.asleep ? `Asleep since ${formatLocal(info.since!)} (${info.by === 'her' ? 'she chose it' : 'latest bedtime'}); ${window}${woken}` : `Awake; ${window}${woken}`
+  }
+
+  private dayStartOf(t: number): number {
+    return dayStart(t, this.config.day)
+  }
+
+  /**
+   * She goes to sleep now (Phase 9): by `sleep`, or at the latest bedtime.
+   * Night mode and the night budget start here; life holds chats in her inbox.
+   */
+  goToSleep(by: 'her' | 'latest', options: { note?: string | undefined; sessionId?: string | undefined; at?: number } = {}): void {
+    const at = options.at ?? this.clock.now()
+    this.selfState()
+    this.sleepRecord = { ...this.sleepRecord, since: at, by }
+    this.sleptSeen = true
+    this.save()
+    this.recordActivity({ type: 'sleep', by, ...options.note === undefined ? {} : { note: options.note }, ...options.sessionId === undefined ? {} : { sessionId: options.sessionId } })
+    this.ctx.emit('anima/sleep', { by, at, ...options.note === undefined ? {} : { note: options.note }, ...options.sessionId === undefined ? {} : { sessionId: options.sessionId } })
+  }
+
+  /**
+   * The owner wakes her on purpose (Phase 9): awake until she sleeps again or,
+   * past the latest bedtime, for `bedtime.wokenMinutes`.
+   * @returns whether she was asleep.
+   */
+  wakeByOwner(): { woken: boolean; until?: number } {
+    const now = this.clock.now()
+    if (!this.asleep(now)) return { woken: false }
+    this.selfState()
+    const until = wokenUntil(now, this.config.day)
+    this.sleepRecord = { ...this.sleepRecord, wokenAt: now, wokenUntil: until }
+    this.sleptSeen = false
+    this.save()
+    this.ctx.emit('anima/woken', { at: now, until })
+    return { woken: true, until }
+  }
+
+  /**
+   * Notice the latest bedtime (or the end of a deliberate wake) passing: record
+   * it once and tell life (Phase 9). Called on a short real-time interval.
+   */
+  checkBedtime(): void {
+    const now = this.clock.now()
+    const asleep = this.asleep(now)
+    const was = this.sleptSeen
+    this.sleptSeen = asleep
+    if (!asleep || was !== false) return
+    const record = this.sleepRecord
+    // Already recorded (she chose it): nothing to do.
+    if (record.since !== undefined && record.since <= now && record.since >= this.dayStartOf(now)) {
+      if (record.wokenAt === undefined || record.since > record.wokenAt) return
+    }
+    this.goToSleep('latest', { at: now })
   }
 
   /** Settings of a mode. */
@@ -366,8 +503,8 @@ export class AnimaCore extends Service {
 
   /** Why she may not initiate at `t`, or undefined. */
   quietReason(t = this.clock.now()): string | undefined {
-    if (this.mode(t) === 'night') return 'you are asleep'
-    if (this.config.quiet.some(window => inWindow(t, window.from, window.to))) return 'it is quiet hours'
+    if (this.mode(t) === 'night') return '你在睡觉'
+    if (this.config.quiet.some(window => inWindow(t, window.from, window.to))) return '现在是主人定的安静时段'
     return undefined
   }
 
@@ -402,6 +539,7 @@ export class AnimaCore extends Service {
       ownerChannel: key => this.state.channels?.(key)?.isOwner === true,
       // Only keys she may actually reach are offered in refusals.
       knownChannels: () => (this.state.channelList?.() ?? []).filter(key => this.channelAllowed(key) !== false),
+      beforeBedtime: now < earliestBedtime(now, this.config.day) ? { woke: formatClock(this.config.day.wake), earliest: formatClock(this.config.day.earliest) } : undefined,
     }
   }
 
@@ -444,7 +582,7 @@ export class AnimaCore extends Service {
   }
 
   private save(): void {
-    writeJson(this.statePath, { self: this.self, days: this.ledger.toJSON(), quotas: this.quota.toJSON() } satisfies StateFile)
+    writeJson(this.statePath, { self: this.self, days: this.ledger.toJSON(), quotas: this.quota.toJSON(), sleep: this.sleepRecord } satisfies StateFile)
   }
 
   private onBehaviorSuccess(name: string): void {
@@ -596,6 +734,23 @@ export class AnimaCore extends Service {
       return at
     }
     const self = { effect: 'internal', sessions: ['self'] } as const
+
+    // Bedtime (DESIGN §7, Phase 9): she chooses when to sleep inside the owner's window.
+    this.registerBehavior(defineTool({
+      name: 'sleep',
+      description: 'Go to sleep now. Works from your earliest bedtime on; at your latest bedtime you fall asleep anyway. While you sleep nothing reaches you: messages wait in your inbox until you wake. It ends this turn, so in a chat say goodnight first (say with more: true).',
+      parameters: {
+        note: { type: 'string', description: 'Optional note to yourself about the day or why now.' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { asleep: { type: 'boolean', required: true, description: 'Whether you are asleep now.' } } },
+        render: () => [{ type: 'text', text: '你睡着了。' }],
+      },
+      execute: async (args, exec) => {
+        if (!this.asleep()) this.goToSleep('her', { note: args.note, sessionId: exec.agent?.id })
+        return { asleep: true }
+      },
+    }), { effect: 'internal', sessions: ['self', 'conversation'], closes: true, bedtime: true })
 
     this.registerBehavior(defineTool({
       name: 'goals_add',
@@ -944,6 +1099,8 @@ export class AnimaCore extends Service {
     return {
       character: { id: this.config.characterId, name: this.config.name, dataDir: this.config.dataDir },
       paused: this.state.paused,
+      // Awake or asleep, and since when (Phase 9); the inbox is life's part.
+      sleep: this.bedtimeInfo(now),
       clock: { now, text: formatLocal(now), speed: this.clock.speed, phase: this.phase(now), mode, day: this.dayKey(now) },
       energy: state.energy,
       mood: state.mood,
@@ -998,8 +1155,23 @@ export class AnimaCore extends Service {
     }))
     add(owner.addView('owner', () => this.owner.names()))
 
-    add(owner.addAction('pause', () => { this.state.paused = true; return { paused: true } }))
-    add(owner.addAction('resume', () => { this.state.paused = false; return { paused: false } }))
+    add(owner.addAction('pause', () => {
+      const was = this.state.paused
+      this.state.paused = true
+      if (!was) this.ctx.emit('anima/paused', true)
+      return { paused: true }
+    }))
+    add(owner.addAction('resume', () => {
+      const was = this.state.paused
+      this.state.paused = false
+      if (was) this.ctx.emit('anima/paused', false)
+      return { paused: false }
+    }))
+    add(owner.addAction('wake', () => {
+      const result = this.wakeByOwner()
+      if (result.woken) this.recordActivity({ type: 'woken', ...result.until === undefined ? {} : { until: result.until } })
+      return result
+    }))
     add(owner.addAction('approve', args => ({ answered: this.approvals.answer(stringArg(args, 'id').toLowerCase(), true) })))
     add(owner.addAction('deny', args => ({ answered: this.approvals.answer(stringArg(args, 'id').toLowerCase(), false) })))
     add(owner.addAction('goal.add', (args) => {
@@ -1110,6 +1282,7 @@ export class AnimaCore extends Service {
     const lines = [
       `Character: ${this.config.name} (${this.config.characterId}), data in ${this.config.dataDir}`,
       `Paused: ${this.state.paused ? 'yes' : 'no'}`,
+      this.sleepLine(now),
       `Clock: ${formatLocal(now)} (${speed}); phase ${this.phase(now)}, mode ${this.mode(now)}, day ${this.dayKey(now)}`,
       ...this.stateText(),
       ...this.budgetText(now).map(line => `Budget: ${line}`),
@@ -1150,9 +1323,9 @@ export function describeDiff(diff: SelfDiff): string {
 
 function deniedHint(name: string, answer: ApprovalAnswer): string {
   switch (answer) {
-    case 'denied': return `the owner said no to ${name}. Do not ask again for the same thing now.`
-    case 'timeout': return `the owner did not answer in time, so ${name} was not allowed. You can mention it to the owner later.`
-    default: return `the owner could not be asked, so ${name} was not allowed.`
+    case 'denied': return `主人没有同意 ${name}。现在别再为同一件事去问了。`
+    case 'timeout': return `主人没有及时回答，所以 ${name} 没有做成。以后可以跟主人提一下。`
+    default: return `没办法问到主人，所以 ${name} 没有做成。`
   }
 }
 

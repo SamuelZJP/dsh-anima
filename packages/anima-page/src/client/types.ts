@@ -7,6 +7,8 @@
 export interface StatusView {
   character: { id: string; name: string; dataDir: string }
   paused: boolean
+  /** Awake or asleep and since when (Phase 9); absent from an older core. */
+  sleep?: { earliest: number; latest: number; asleep: boolean; since?: number; by?: 'her' | 'latest'; wokenAt?: number; wokenUntil?: number }
   clock: { now: number; text: string; speed: number; phase: string; mode: 'day' | 'night'; day: string }
   energy: number
   mood: { valence: number; arousal: number }
@@ -34,6 +36,8 @@ export interface LifePart {
   counts: { heartbeats: number; acts: number; rests: number; intents: number }
   intents: { id: string; display: string }[]
   outboxHeld: number
+  /** Her inbox per channel (Phase 9). */
+  inbox?: { key: string; display: string; count: number; first: number; last: number }[]
   sessions: { self: string; triage: string; conversations: { sessionId: string; display: string; channelKey: string }[] }
 }
 

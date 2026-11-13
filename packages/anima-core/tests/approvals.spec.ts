@@ -82,7 +82,7 @@ describe('gate: allowlist and approvals', () => {
     // A key nobody published is refused first (before consent and approval), listing the real channels.
     const unknown = decide(call('open_conversation', open, self, { channel: 'qq:owner:private:owner' }), { quotas: [], allow: [], approve: [{ behavior: 'open_conversation' }] }, book,
       moment({ channelAllowed: allowed, mayInitiate: () => false, ownerLine: true, channelKnown: () => false, knownChannels: () => ['qq:1:private:7'] }))
-    expect(unknown).toEqual({ allowed: false, code: GateCode.unknownChannel, hint: 'no channel "qq:owner:private:owner". Channels you can reach: qq:1:private:7.' })
+    expect(unknown).toEqual({ allowed: false, code: GateCode.unknownChannel, hint: '没有「qq:owner:private:owner」这个地方。你能去的地方：qq:1:private:7。' })
   })
   it('takes an allowed, known key on to consent and then approval', () => {
     const policy = { quotas: [], allow: [], approve: [{ behavior: 'open_conversation' }] }
@@ -151,7 +151,7 @@ describe('service: owner line', () => {
     registerEcho(ctx, 'core_open', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
     const sent: string[] = []
     ctx.anima.provideOwnerLine({ name: 'test', send: async (text) => { sent.push(text) } })
-    expect(textOf(await callAs(ctx, 's1', 'core_open', { text: 'qq:list' }))).toBe('Error: anima/unknown-channel: no channel "qq:list". Channels you can reach: qq:1:private:7.')
+    expect(textOf(await callAs(ctx, 's1', 'core_open', { text: 'qq:list' }))).toBe('Error: anima/unknown-channel: 没有「qq:list」这个地方。你能去的地方：qq:1:private:7。')
     expect(textOf(await callAs(ctx, 's1', 'core_open', { text: 'qq:1:group:9' }))).toContain('anima/not-allowlisted')
     expect(sent).toEqual([])
     expect(ctx.anima.todayLedger().initiates).toBe(0)

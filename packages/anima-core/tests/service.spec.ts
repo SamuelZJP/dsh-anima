@@ -31,7 +31,7 @@ describe('policy gate on tools/pre-execute', () => {
     expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
     const third = await callAs(ctx, 'chat-1', 'local_say')
     expect(third.isError).toBe(true)
-    expect(textOf(third)).toMatch(/^Error: anima\/over-quota: limit of 2 per 10 min in this channel reached for local_say/)
+    expect(textOf(third)).toMatch(/^Error: anima\/over-quota: 这个聊天里你这 10 分钟已经说了很多了（最多 2 次）/)
   })
 
   it('hides behaviors outside Anima sessions', async () => {
@@ -172,7 +172,7 @@ describe('Phase 2 core service', () => {
     registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
     expect((await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' })).isError).toBe(false)
     expect(ctx.anima.todayLedger().initiates).toBe(1)
-    expect(textOf(await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' }))).toMatch(/^Error: anima\/over-quota: you already started 1 of 1/)
+    expect(textOf(await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' }))).toMatch(/^Error: anima\/over-quota: 今天你已经主动找人聊了 1 次，最多 1 次/)
   })
 
   it('asks the channel resolver for owner consent', async () => {

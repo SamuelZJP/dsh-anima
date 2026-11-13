@@ -68,7 +68,7 @@ describe('closing behaviors through the pipeline', () => {
     const result = await callAs(ctx, 'c1', 'qq_say', { text: '1', also: ['2', '3', '4', '5', '6'] })
     expect(result.isError).toBe(true)
     expect(textOf(result)).toContain('anima/over-limit')
-    expect(textOf(result)).toContain('messages up to 5')
+    expect(textOf(result)).toContain('messages 最多 5')
   })
 
   it('lets a turn closer through while paused, and nothing else', async () => {

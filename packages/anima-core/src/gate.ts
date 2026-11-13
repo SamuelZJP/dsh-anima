@@ -56,6 +56,11 @@ export interface GateMoment {
   readonly ownerChannel?: (channelKey: string) => boolean
   /** Channel keys she may reach (known and allowlisted), listed when a call targets an unknown one. */
   readonly knownChannels?: () => readonly string[]
+  /**
+   * Before the earliest bedtime of her day, for refusing `sleep` (Phase 9): the time she woke and the
+   * earliest bedtime, both `HH:mm` of her day; undefined from the earliest bedtime on.
+   */
+  readonly beforeBedtime?: { readonly woke: string, readonly earliest: string } | undefined
 }
 
 /** Moment used when the caller gives none: day, nothing spent, consent everywhere. */
@@ -93,6 +98,7 @@ export const GateCode = {
   unknownChannel: 'anima/unknown-channel',
   overLimit: 'anima/over-limit',
   denied: 'anima/denied',
+  notBedtime: 'anima/not-bedtime',
 } as const
 
 /**
@@ -145,18 +151,53 @@ function matches(rule: QuotaRule, call: GateCall): boolean {
     && (rule.platform === undefined || rule.platform === call.meta.platform)
 }
 
-function describeScope(rule: QuotaRule): string {
-  switch (rule.per) {
-    case 'channel': return 'in this channel'
-    case 'platform': return 'on this platform'
-    case 'global': return 'in total'
-  }
-}
-
 function describeWindow(minutes: number): string {
   if (minutes % (24 * 60) === 0) return minutes === 24 * 60 ? 'day' : `${minutes / (24 * 60)} days`
   if (minutes % 60 === 0) return minutes === 60 ? 'hour' : `${minutes / 60} hours`
   return `${minutes} min`
+}
+
+/** A quota window in her words: 这一小时, 今天, 这 10 分钟. */
+function windowZh(minutes: number): string {
+  if (minutes === 24 * 60) return '这一天'
+  if (minutes % (24 * 60) === 0) return `这 ${minutes / (24 * 60)} 天`
+  if (minutes === 60) return '这一小时'
+  if (minutes % 60 === 0) return `这 ${minutes / 60} 小时`
+  return `这 ${minutes} 分钟`
+}
+
+/** Where a quota counts, in her words. */
+function scopeZh(rule: QuotaRule): string {
+  switch (rule.per) {
+    case 'channel': return '在这个地方'
+    case 'platform': return '在这个平台上'
+    case 'global': return '总共'
+  }
+}
+
+/** Session kinds in her words (the primer's names for her places of attention). */
+const KIND_ZH: Record<string, string> = {
+  self: '你的内心（Self）',
+  conversation: '聊天',
+  triage: '心跳',
+  consolidation: '整理记忆',
+  'group-triage': '扫视群聊',
+  viewing: '细看',
+}
+
+/**
+ * The refusal hint of a spent quota, in her world's terms (Phase 9): a say in
+ * a chat reads "you said a lot here this hour", not "express quota".
+ */
+export function quotaHint(name: string, meta: BehaviorMeta, rule: QuotaRule, minutes: number): string {
+  const later = `大约 ${minutes >= 120 ? `${Math.round(minutes / 60)} 小时` : `${minutes} 分钟`}后才行，现在别再试了。`
+  if (meta.effect === 'express' && rule.per === 'channel' && rule.behavior === undefined) {
+    return `这个聊天里你${windowZh(rule.windowMinutes)}已经说了很多了（最多 ${rule.limit} 次），过一会儿再说吧：${later}`
+  }
+  if (rule.per === 'global' && rule.behavior === undefined && rule.effect === undefined && rule.platform === undefined) {
+    return `你${windowZh(rule.windowMinutes)}做的事已经够多了（总共最多 ${rule.limit} 次），歇一歇：${later}`
+  }
+  return `${name} ${windowZh(rule.windowMinutes)}${scopeZh(rule)}最多 ${rule.limit} 次，已经到了；${later}`
 }
 
 /** Sliding-window usage counters, in memory (Phase 1: a restart resets them). */
@@ -251,32 +292,37 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   const { meta, session, name } = call
   const args = call.args ?? {}
   if (session === undefined) {
-    return deny(GateCode.notAnimaSession, `${name} only works in Anima sessions.`)
+    return deny(GateCode.notAnimaSession, `${name} 只在你自己的会话里能用。`)
   }
   if (!meta.sessions.includes(session.kind)) {
-    return deny(GateCode.wrongSession, `${name} is not available in the ${session.kind} session; it works in: ${meta.sessions.join(', ')}.`)
+    return deny(GateCode.wrongSession, `${name} 在${KIND_ZH[session.kind] ?? session.kind}里用不了；它在这些地方能用：${meta.sessions.map(kind => KIND_ZH[kind] ?? kind).join('、')}。`)
   }
   if (!platformFits(meta, session)) {
-    return deny(GateCode.wrongPlatform, `${name} belongs to platform "${meta.platform}", which this session cannot use directly.`)
+    return deny(GateCode.wrongPlatform, `${name} 属于 ${meta.platform}，在这里不能直接用。`)
   }
   const allowed = policy.allowedEffects?.[moment.mode]
   if ((meta.modes !== undefined && !meta.modes.includes(moment.mode)) || (allowed !== undefined && !allowed.includes(meta.effect))) {
-    return deny(GateCode.night, `${name} is not available while you are ${moment.mode === 'night' ? 'asleep' : 'awake'}${allowed === undefined ? '' : `; now only ${allowed.join(', ')} behaviors work`}.`)
+    return deny(GateCode.night, moment.mode === 'night'
+      ? `你现在睡着了：${name} 要等你醒来才能用，睡着时只能做内心里的事（记忆、休息）。`
+      : `${name} 只在夜里能用。`)
   }
   const target = meta.target?.(args)
   if (target !== undefined && moment.channelKnown?.(target) === false) {
     // Refused before any approval or count, with the real keys, so she never has to guess.
     const known = moment.knownChannels?.() ?? []
-    return deny(GateCode.unknownChannel, `no channel "${target}". Channels you can reach: ${known.length === 0 ? 'none' : known.join(', ')}.`)
+    return deny(GateCode.unknownChannel, `没有「${target}」这个地方。你能去的地方：${known.length === 0 ? '没有' : known.join('、')}。`)
   }
   const allowlisted = moment.channelAllowed
   if (allowlisted !== undefined) {
     if (meta.platform !== undefined && session.kind === 'conversation' && allowlisted(session.channelKey) === false) {
-      return deny(GateCode.notAllowlisted, `this chat is not on the owner's allowlist, so ${name} does not work here.`)
+      return deny(GateCode.notAllowlisted, `主人没有把这个聊天放进名单，${name} 在这里用不了。`)
     }
     if (target !== undefined && allowlisted(target) === false) {
-      return deny(GateCode.notAllowlisted, `${target} is not on the owner's allowlist; you cannot reach it.`)
+      return deny(GateCode.notAllowlisted, `主人没有把 ${target} 放进名单，你去不了那里。`)
     }
+  }
+  if (meta.bedtime === true && moment.beforeBedtime !== undefined) {
+    return deny(GateCode.notBedtime, `还不到睡觉的时候：你今天 ${moment.beforeBedtime.woke} 才起床，主人定的最早上床时间是今晚 ${moment.beforeBedtime.earliest}。`)
   }
   const constraint = meta.constraint?.(args)
   if (constraint !== undefined) return deny(GateCode.notAllowed, constraint)
@@ -284,27 +330,27 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
     if (rule.behavior !== name) continue
     const value = call.facts?.[rule.fact]
     if (value !== undefined && value > rule.max) {
-      return deny(GateCode.overLimit, `${name} allows ${rule.fact} up to ${rule.max}, and this call has ${Math.round(value * 100) / 100}. Choose something smaller or another tier.`)
+      return deny(GateCode.overLimit, `${name} 的 ${rule.fact} 最多 ${rule.max}，这次是 ${Math.round(value * 100) / 100}。换个小一点的，或者换一种看法。`)
     }
   }
   if (moment.overBudget && meta.effect !== 'internal') {
-    return deny(GateCode.overBudget, `today's token budget for ${moment.mode === 'night' ? 'the night' : 'the day'} is used up. Only rest and other internal behaviors work until it renews.`)
+    return deny(GateCode.overBudget, `${moment.mode === 'night' ? '今晚' : '今天'}能用的 token 预算用完了。在它恢复之前，你只能休息和做内心里的事。`)
   }
   if (meta.effect === 'initiate') {
     const limit = policy.initiatePerDay
     if (limit !== undefined && moment.initiatesUsed + costOf(meta, args) > limit) {
-      return deny(GateCode.overQuota, `you already started ${moment.initiatesUsed} of ${limit} conversations allowed today. Wait until tomorrow, or wait for others to reach out.`)
+      return deny(GateCode.overQuota, `今天你已经主动找人聊了 ${moment.initiatesUsed} 次，最多 ${limit} 次。等明天，或者等别人来找你。`)
     }
-    if (moment.quiet !== undefined) return deny(GateCode.quietHours, `${moment.quiet}; you cannot start conversations now.`)
+    if (moment.quiet !== undefined) return deny(GateCode.quietHours, `${moment.quiet}，现在不能主动找人说话。`)
     if (target !== undefined && !moment.mayInitiate(target)) {
-      return deny(GateCode.noConsent, `the owner has not allowed you to start conversations in ${target}.`)
+      return deny(GateCode.noConsent, `主人没有允许你主动去 ${target} 说话。`)
     }
   }
   const over = book.exceeded(call, policy.quotas)
   if (over !== undefined) {
     const minutes = Math.max(1, Math.ceil((over.freeAt - call.now) / 60_000))
     const { rule } = over
-    return deny(GateCode.overQuota, `limit of ${rule.limit} per ${describeWindow(rule.windowMinutes)} ${describeScope(rule)} reached for ${name}; next slot in about ${minutes} min. Do not retry now.`)
+    return deny(GateCode.overQuota, quotaHint(name, meta, rule, minutes))
   }
   const forced = policy.approve?.some(rule => rule.behavior === name
     && (rule.targets !== 'others' || target === undefined || moment.ownerChannel?.(target) !== true)) === true
@@ -315,9 +361,15 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
         : `the owner wants to approve every ${name}`
       : `${name} is a ${meta.effect} action`
     if (moment.ownerLine === true) return { allowed: true, approval: why }
-    return deny(GateCode.needsApproval, `${why} and the owner has not allowed it. You can tell the owner what you wanted to do.`)
+    return deny(GateCode.needsApproval, `${whyZh(name, meta, forced, target !== undefined && policy.approve?.some(rule => rule.behavior === name && rule.targets === 'others') === true)}，现在没有办法问主人，所以不行。你可以告诉主人你想做什么。`)
   }
   return { allowed: true }
+}
+
+/** Why a call needs the owner, in her words. */
+function whyZh(name: string, meta: BehaviorMeta, forced: boolean, others: boolean): string {
+  if (forced) return others ? `每次用 ${name} 去找主人以外的人，主人都要先同意` : `每次用 ${name}，主人都要先同意`
+  return `${name} 是${meta.effect === 'public' ? '公开的' : '做了就收不回的'}事，主人要先同意`
 }
 
 function deny(code: string, hint: string): Verdict {

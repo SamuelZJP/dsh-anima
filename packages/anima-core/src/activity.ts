@@ -86,11 +86,36 @@ export interface SpeechRecord {
   readonly reason?: string
 }
 
+/**
+ * Sleep and the inbox (Phase 9): she fell asleep (`sleep`, by her or at the
+ * latest bedtime), the owner woke her (`woken`), a chat message was held while
+ * she slept or was paused (`inbox-held`), or held messages went to their chat
+ * (`inbox-release`: answered from Self, or joined a new wake).
+ */
+export interface SleepActivity {
+  readonly type: 'sleep' | 'woken' | 'inbox-held' | 'inbox-release'
+  readonly at: number
+  readonly real: number
+  /** `sleep`: how. */
+  readonly by?: 'her' | 'latest'
+  /** `sleep`: her note; `inbox-release`: Self's note. */
+  readonly note?: string
+  readonly sessionId?: string
+  /** Inbox records: the channel key. */
+  readonly channel?: string
+  /** `inbox-held`: why held (`asleep`, `paused`); `inbox-release`: how (`answer`, `wake`, `intent`). */
+  readonly reason?: string
+  /** `inbox-release`: how many messages. */
+  readonly count?: number
+  /** `woken`: until when (her clock). */
+  readonly until?: number
+}
+
 /** Any activity record. */
-export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SpeechRecord
+export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SpeechRecord | SleepActivity
 
 /** Activity record without its timestamps, as producers hand it in. */
-export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SpeechRecord, 'at' | 'real'>
+export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SpeechRecord, 'at' | 'real'> | Omit<SleepActivity, 'at' | 'real'>
 
 /** Day summary for the Activity tab. */
 export interface DaySummary {
@@ -108,6 +133,20 @@ export interface DaySummary {
   readonly nightWakes: number
   /** Reminders steered into unclosed conversation turns, and turns that still ended unclosed (DESIGN §6). */
   readonly speech: { readonly reminders: number; readonly lostReplies: number }
+  /**
+   * Sleep and the inbox (Phase 9): times she went to sleep (by her, at the latest
+   * bedtime), deliberate wakes, held and released inbox messages, and how often
+   * she still met the night or pause refusal (a backstop she should rarely meet).
+   */
+  readonly sleep: {
+    readonly byHer: number
+    readonly atLatest: number
+    readonly woken: number
+    readonly held: number
+    readonly answered: number
+    readonly released: number
+    readonly backstop: { readonly night: number; readonly paused: number }
+  }
 }
 
 const DAY_FILE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -185,5 +224,17 @@ export function summarize(day: string, records: readonly ActivityRecord[], ledge
     initiates: ledger.initiates,
     nightWakes: ledger.nightWakes,
     speech: { reminders: records.filter(r => r.type === 'reminder').length, lostReplies: records.filter(r => r.type === 'lost-reply').length },
+    sleep: {
+      byHer: records.filter(r => r.type === 'sleep' && r.by === 'her').length,
+      atLatest: records.filter(r => r.type === 'sleep' && r.by === 'latest').length,
+      woken: records.filter(r => r.type === 'woken').length,
+      held: records.filter(r => r.type === 'inbox-held').length,
+      answered: records.filter(r => r.type === 'inbox-release' && r.reason === 'answer').reduce((n, r) => n + ((r as SleepActivity).count ?? 0), 0),
+      released: records.filter(r => r.type === 'inbox-release').reduce((n, r) => n + ((r as SleepActivity).count ?? 0), 0),
+      backstop: {
+        night: gates.filter(r => r.decision === 'refused' && r.code === 'anima/night').length,
+        paused: gates.filter(r => r.decision === 'refused' && r.code === 'anima/paused' && r.session !== undefined).length,
+      },
+    },
   }
 }

@@ -14,7 +14,7 @@ import { alarmPrompts, AnimaLife, buildReport, conversationSessionId, IntentTrac
 import type { ModelChoice, PublishedChannel, SessionHost } from '../src/index.ts'
 
 const at = (text: string) => new Date(text).getTime()
-const rhythm = resolveRhythm({ wake: '07:30', sleep: '23:30', wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
+const rhythm = resolveRhythm({ wake: '07:30', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
 const bounds = { rhythm, minMinutes: 20, maxMinutes: 240, defaultMinutes: 60 }
 
 describe('nextHeartbeat', () => {
@@ -43,6 +43,14 @@ describe('nextHeartbeat', () => {
     expect(next.nightWake).toBe(false)
     const asked = nextHeartbeat({ ...bounds, now: at('2026-11-10T22:00'), requested: at('2026-11-11T08:00'), nightWakesLeft: 1 })
     expect(formatLocal(asked.at)).toBe('2026-11-11 07:30')
+  })
+
+  it('never skips a night shorter than the maximum interval (Phase 9 supervised session)', () => {
+    // Bedtime 22:30–23:00, wake 23:20: a 4 h rest at 22:26 lands at 02:26 of her next day.
+    const short = resolveRhythm({ wake: '23:20', bedtime: { earliest: '22:30', latest: '23:00', wokenMinutes: 20 }, wakingMinutes: 20, evening: '18:00', windDownMinutes: 30 })
+    const next = nextHeartbeat({ ...bounds, rhythm: short, now: at('2026-11-13T22:26'), requested: at('2026-11-14T02:26'), nightWakesLeft: 1 })
+    expect(formatLocal(next.at)).toBe('2026-11-13 23:20')
+    expect(next.nightWake).toBe(false)
   })
 
   it('allows one night wake-up she asks for, then sleeps until wake', () => {

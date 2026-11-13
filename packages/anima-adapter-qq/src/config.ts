@@ -62,6 +62,14 @@ export interface Config {
     /** Real seconds before the held message goes out when typing is shown. */
     leadSeconds: number
   }
+  /** Spacing between the messages of one say (Phase 9): a typing time from each message's length. */
+  pacing: {
+    baseSeconds: number
+    perCharSeconds: number
+    maxSeconds: number
+  }
+  /** Mark a chat read when its messages reach her awake (Phase 9); held inbox messages stay unread. */
+  markRead: boolean
 }
 
 const qqId = z.union([z.natural(), z.string().pattern(/^\d{4,12}$/)])
@@ -94,7 +102,13 @@ export const Config: z<Config> = z.object({
   typing: z.object({
     enabled: z.boolean().default(true).description('Show typing in a private chat while her chosen message waits in the outbox.'),
     leadSeconds: z.number().min(0).default(8).description('Real seconds before the held message goes out when typing is shown.'),
-  }).description('Typing status (private chats, outbox only).'),
+  }).description('Typing status (private chats): during the outbox hold and between her messages.'),
+  pacing: z.object({
+    baseSeconds: z.number().min(0).default(1).description('Seconds before every message of a say after the first.'),
+    perCharSeconds: z.number().min(0).default(0.15).description('Seconds per character of that message.'),
+    maxSeconds: z.number().min(0).default(6).description('Most seconds before one message.'),
+  }).description('Spacing between the messages of one say, like typing time (Phase 9).'),
+  markRead: z.boolean().default(true).description('Mark a chat read on QQ when its messages reach her awake; messages held while she sleeps stay unread.'),
 }) as unknown as z<Config>
 
 /** Validated config with ids as strings. */

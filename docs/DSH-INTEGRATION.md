@@ -334,6 +334,10 @@ The run found three gate problems, fixed in this phase. Each has tests.
 
 *Phase 8 supervised QQ hour (2026-11-12).* Overlay `~/.anima/p8-qq/p8-qq.patch.yml` (outside the repo): `formal-1`'s QQ settings with the NapCat token written in, a new `characterId` and data dir, Bilibili off, and `clock.start` at 10:00 because the hour ran before her real wake time (at real 05:05 the gate refused her `open_conversation` and would have refused `qq_say` as night). Boot: `pnpm dsh --profile anima-dev --patch ~/.anima/p8-qq/p8-qq.patch.yml --no-open`. The owner chatted with her on QQ privately and in the test group; she also opened one intent to the owner after an `/anima self` notice. Result: 25 conversation turns, all `completed`; 26 `qq_say`, 1 `end_turn`, 2 `qq_look`, 1 `qq_react`; 0 reminders, 0 lost replies. One refused `qq_say` (express quota) led to counting a say once instead of per message. Pitfall: an overlay copied from `formal-1` that reads the token from the environment connects with no token when the variable is unset; NapCat accepts the upgrade and closes with 1005, which the adapter retries forever (the Anima page showed 241 connects).
 
+*Phase 9 scripted check (2026-11-13).* Overlay `~/.anima/check-p9/check.patch.yml` from the same `make-overlay.mjs` (run name from `ANIMA_CHECK`, default `check-p9`); boot `pnpm dsh --profile anima-dev --patch ~/.anima/check-p9/check.patch.yml --no-open`. The harness adds bursts of 3–5 lines with 3–10 s gaps (one covered by typing notices), and a night scene that moves her clock with `clock.setOverride`: bedtime talk at 22:40, messages from 4 friends, the owner, a group @ and group chatter at 00:50, an owner wake, 2 more friends at 03:10, and a heartbeat at 07:35. Result (93 min, DeepSeek-Flash): 210 conversation turns, 35 fresh first turns, 210 closed without a reminder (100 %), 0 lost replies, 0 errored turns, 135k billable tokens; 8 of 8 bursts one wake; she chose `sleep` herself at the bedtime talk; 6 messages held at night, 0 conversation turns started while asleep; the owner wake and the morning heartbeat each went to Self, which ran `inbox_read` then `inbox_answer` (6, then 2) and left the inbox empty; message gaps 1.45–6.0 s (avg 3.7 s, 68 gaps); 196 read marks. Nothing reached a real account.
+
+*Phase 9 supervised QQ sessions (2026-11-13).* Overlays `~/.anima/p9-qq/p9-qq.patch.yml` and `~/.anima/p9-qq-2/p9-qq-2.patch.yml` (outside the repo): `formal-1`'s QQ settings with the token written in, new `characterId` and data dir each, a compressed night (bedtime window 22:30–23:00, wake 23:40 then 23:20, `wokenMinutes` 20) and her clock started 10 and 5 minutes before the earliest bedtime. Boot `pnpm dsh --profile anima-dev --patch <overlay> --no-open`. The owner chatted privately and from the test account in the test group; the page's "Wake her" and the `heartbeat` owner action were used through `/api/anima/action`. Results and the three fixes they led to: DESIGN §14 item 9. Read marks went through (`read` 8 in the first session); `input_status` never arrived (section 8h).
+
 ## 4. Registering a tool (Verified)
 
 ```ts
@@ -799,6 +803,29 @@ A row `name` that is an absolute path or starts with `./` resolves to a file URL
 
 `defineTool` parameters accept `oneOf` (`packages/core/tools/src/schema.ts`, `OneOfValueSchemaSpec`), but with `text: oneOf [string, string[]]` DeepSeek-Flash sometimes wrote the string unquoted (`{"text": 最近我…}`). `llm-deepseek` rejects that stream (`tool input is invalid JSON`, code `MALFORMED_RESPONSE`), the turn ends with `reason.kind: 'error'` and no tool runs; once it happened in a session, later turns there failed the same way (47 of 211 turns in one scripted run). Say tools now take `text: string` plus `also: string[]`; the next 211-turn run had none. Errored turns never reach `agent/turn-stopping`, so Anima checks `turn/end.reason` for lost replies.
 
+## 8h. Phase 9 extension points (sleep, inbox, message rhythm)
+
+No new DSH API: the inbox, bedtime and settle window are Anima's own state; bursts and notices use the delivery calls of section 8g (`steer` for a burst, `followup` for Self, `inject` for context).
+
+### NapCat at the pin (checked 2026-11-12)
+
+- Her NapCat answers `get_version_info` with `NapCat.Onebot 4.18.42`, OneBot `v11` (one read-only call; nothing sent from her account).
+- NapCatQQ's GitHub repository was emptied on 2026-11-12 (main has only a README, "Ending"; no tags). The source was read from the last pull-request snapshot, `refs/pull/2175/head` (`a626852`, 2026-11-09). The version string is injected at build time, so the snapshot cannot be proven identical to 4.18.42.
+- **Typing (input status): reported, private chats only.** `packages/napcat-onebot/index.ts:303` turns the kernel's `onInputStatusPush` into a notice `{ post_type: 'notice', notice_type: 'notify', sub_type: 'input_status', user_id, group_id: 0, event_type, status_text }` (`event/notice/OB11InputStatusEvent.ts`; `status_text` such as "对方正在输入..."). Whether a "stopped typing" notice follows, and what each `event_type` means, is not visible in source. Anima therefore treats every notice with a non-empty `status_text` as typing, which restarts the quiet timer within `settleMaxSeconds`; a stop notice is not needed. Live check (Phase 9 supervised session, 2026-11-13): NapCat 4.18.42 delivered no `input_status` notice while the owner typed in the private chat (typing count 0 in the adapter's traffic), so on this runtime typing is not reported and the quiet timer alone settles a burst.
+- **Read marks: never automatic.** NapCat calls `MsgApi.setMsgRead` only from the actions `mark_private_msg_as_read {user_id}`, `mark_group_msg_as_read {group_id}`, `mark_msg_as_read`, `_mark_all_as_read` (`action/msg/MarkMsgAsRead.ts`). Before Phase 9 Anima never called them, so every chat with her stayed unread. From Phase 9 the QQ adapter marks a chat read when a burst from it wakes her (`anima/read`, config `markRead`); messages held in her inbox stay unread until they reach her.
+
+| OneBot v11 (NapCat) | Kind | Used for |
+| --- | --- | --- |
+| `notice` `notify` / `input_status` | event | `animaLife.typing(channel)`: keeps a private burst's settle window open |
+| `mark_private_msg_as_read`, `mark_group_msg_as_read` | action | a chat that woke her is read |
+| `set_input_status {user_id, event_type: 1}` | action | typing shown during the spacing wait between her messages (private chats) |
+
+### Anima APIs added
+
+- `anima.asleep(t?)`, `anima.bedtimeInfo(t?)`, `anima.goToSleep(by)`, `anima.wakeByOwner()`, `anima.checkBedtime()` (core); events `anima/sleep`, `anima/woken`, `anima/paused`.
+- `animaLife.typing(channel)`, `animaLife.inbox`, `animaLife.settlingChannels()`; event `anima/read`; `paceMessages`, `typingMs` (shared pacing helper).
+- Stimulus type `burst` (life), delivered with `steer` like a single message.
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
@@ -874,6 +901,7 @@ Re-check these on every DSH upgrade.
 | `ctx.systemPrompt.suppressRuntimeContext()`, `refreshContext` restoring required contexts | `dsh-system-prompt` | no coding-agent context in her sessions; the cwd line stays (required) | Verified in unit tests (Phase 8) |
 | `turn/end.data.reason` (`completed`, `aborted`, `error` with `code`) | `dsh-session`, `dsh-agent-loop` | an open turn that errored is a lost reply | Verified in the Phase 8 scripted check |
 | loader row `name` as an absolute file path in a `--patch` overlay | Cordis loader (`app-boot`) | scripted reliability check row | Verified with `--dump-config` and a dry boot (Phase 8) |
+| NapCat `notify/input_status` notice, `mark_*_msg_as_read` actions | NapCat 4.18.42 (OneBot extension) | typing keeps the settle window open; read marks (Phase 9) | Read in NapCat source (section 8h); verified with the fake OneBot in unit tests |
 
 ## 12. Known gaps and risks
 

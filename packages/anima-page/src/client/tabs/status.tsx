@@ -1,6 +1,6 @@
 /** Status tab: her clock, state, budgets, heartbeat and platform health. */
 import { view } from '../api.ts'
-import { count, healthClass, share } from '../format.ts'
+import { count, healthClass, share, stamp } from '../format.ts'
 import { usePoll } from '../hooks.ts'
 import type { PlatformEntry, StatusView } from '../types.ts'
 import { Bar, Card, Pill, Problem, useAction } from '../ui.tsx'
@@ -25,6 +25,12 @@ export function StatusTab() {
         <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run(s.paused ? 'resume' : 'pause', {}, () => s.paused ? 'Resumed.' : 'Paused: every behavior is refused and heartbeats stop.')}>
           {s.paused ? 'Resume' : 'Pause'}
         </button>
+        {s.sleep === undefined ? null : s.sleep.asleep
+          ? <Pill tone="warn">asleep since {stamp(s.sleep.since ?? 0)}{s.sleep.by === 'latest' ? ' (latest bedtime)' : ''}</Pill>
+          : <Pill tone="ok">awake{s.sleep.wokenAt !== undefined && s.sleep.wokenUntil !== undefined && s.clock.now < s.sleep.wokenUntil ? ` (woken by you, until ${stamp(s.sleep.wokenUntil)})` : ''}</Pill>}
+        {s.sleep?.asleep === true
+          ? <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run('wake', {}, () => 'She is awake now; her Self sees the inbox.')}>Wake her</button>
+          : null}
         {(s.speech?.lostReplies ?? 0) > 0 ? <Pill tone="bad">{s.speech!.lostReplies} lost {s.speech!.lostReplies === 1 ? 'reply' : 'replies'} today</Pill> : null}
         <span className="anima-muted">Updates every 5 s.</span>
       </div>
@@ -58,6 +64,16 @@ export function StatusTab() {
           <div className="anima-muted">day {count(tokens.day)} · night {count(tokens.night)}</div>
           <div style={{ marginTop: 6 }}>Conversations started {s.budgets.initiates.used} of {s.budgets.initiates.perDay} · night wakes left {s.budgets.nightWakesLeft}</div>
         </Card>
+      </div>
+      <div className="anima-section">
+        <h2>Sleep and inbox</h2>
+        {s.sleep === undefined ? null : <p>Bedtime window {stamp(s.sleep.earliest).slice(-5)}–{stamp(s.sleep.latest).slice(-5)}; she chooses inside it, and sleeps anyway at the latest.</p>}
+        {(life?.inbox ?? []).length === 0 ? <p className="anima-muted">Her inbox is empty.</p> : (
+          <table className="anima-table">
+            <thead><tr><th>Chat</th><th>Messages</th><th>First</th><th>Last</th></tr></thead>
+            <tbody>{life!.inbox!.map(entry => <tr key={entry.key}><td>{entry.display}</td><td>{entry.count}</td><td>{stamp(entry.first)}</td><td>{stamp(entry.last)}</td></tr>)}</tbody>
+          </table>
+        )}
       </div>
       <div className="anima-section">
         <h2>Needs</h2>

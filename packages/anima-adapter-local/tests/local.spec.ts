@@ -126,7 +126,8 @@ describe('/anima chat --as / --in (dev test channels)', () => {
     expect(quiet).toMatchObject({ kind: 'success', text: expect.stringContaining('into group triage') })
     expect(host.delivered).toEqual([])
     await chat(ctx, 'chat --as bob --in group:test @Anima are you coming?')
-    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[本地 群「group test」] Bob [local bob] 叫你（群里所有人都会看到你的回答）: @Anima are you coming?') }])
+    // The addressed message takes the buffered one into one burst (Phase 9).
+    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringMatching(/\[本地 群「group test」\] 2 条消息（Bob 2 条）：\n.*hotpot tonight\?\n.*Bob \[local bob\] 叫你: @Anima are you coming\?/) }])
   })
 
   it('remembers test channels across a reload', async () => {

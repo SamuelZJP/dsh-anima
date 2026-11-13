@@ -1,8 +1,8 @@
 # Formal test — 7 days in development
 
-Status: **ready for run `formal-2`, after Phase 8's exit check.** Run `formal-1` started 2026-11-11 19:45 and was stopped by the owner on day 0 (~20:10): her replies on QQ were lost because she wrote them as plain text, which is never sent. Phase 8 (DESIGN §14) closes a turn by an action, records any reply that is still lost, and gives her a Chinese primer of her environment. This plan was approved on 2026-11-11 and is reused for `formal-2`, with criterion P10 (lost replies) added and the paths moved to `~/.anima/formal-2/`. `formal-1`'s data stays in `~/.anima/formal-1/`. Once the test is running, changes to this plan are recorded in the run log with the day they took effect.
+Status: **ready for run `formal-2`; Phase 9 (DESIGN §14) is done (2026-11-13) and added the inbox and bedtime measures to this plan.** Run `formal-1` started 2026-11-11 19:45 and was stopped by the owner on day 0 (~20:10): her replies on QQ were lost because she wrote them as plain text, which is never sent. Phase 8 (DESIGN §14) closes a turn by an action, records any reply that is still lost, and gives her a Chinese primer of her environment. This plan was approved on 2026-11-11 and is reused for `formal-2`, with criterion P10 (lost replies) added and the paths moved to `~/.anima/formal-2/`. `formal-1`'s data stays in `~/.anima/formal-1/`. Once the test is running, changes to this plan are recorded in the run log with the day they took effect.
 
-This is roadmap item 9 in DESIGN §14. It replaces the Phase 4 week on QQ. It also measures the open questions there:
+This is roadmap item 10 in DESIGN §14. It replaces the Phase 4 week on QQ. It also measures the open questions there:
 - need tuning
 - close-view uptake
 - dreaming
@@ -35,7 +35,7 @@ This is roadmap item 9 in DESIGN §14. It replaces the Phase 4 week on QQ. It al
   - A fresh `~/.anima/formal-2/`, so the data holds only this week.
   - Her constitution is the 小鲸鱼 version from the Phase 7 demo (`test-p7`), copied in on day 0.
   - Memory starts empty.
-- **Clock:** real time, no test clock. Her day is 07:30–23:30 (default rhythm).
+- **Clock:** real time, no test clock. She wakes at 07:30 and goes to sleep inside the bedtime window 22:30–00:30 (default rhythm, Phase 9): by `sleep` when she chooses, at 00:30 anyway.
 - **Logs:** DSH runs in a terminal tab with stdout and stderr also written to `~/.anima/formal-2/dsh.log`.
 - **Machine:**
   - This machine, with the lid open, the Claude app open and idle sleep blocked.
@@ -106,6 +106,7 @@ Each run reads the files since the last snapshot and appends a block to `run-log
 - Initiations and their approval state; outbox held, sent, cancelled and expired.
 - Platform transitions with reasons. Bilibili back-off state.
 - Lost replies and close reminders since the last snapshot (activity `lost-reply` and `reminder` records), per channel. Any lost reply is an ALERT with its channel and time; the text she wrote stays out of the run log.
+- Sleep and inbox (Phase 9): awake or asleep and since when (Status tab or `/anima status`); messages held in her inbox per channel (`/anima inbox`, counts only); any conversation wake while she was asleep outside a deliberate wake is an ALERT (criterion P11).
 - Stop-condition checks (section 8), each with OK or ALERT.
 - One line on anything unusual seen in session logs since the last snapshot: loops, the same tool repeated, errors.
 
@@ -166,6 +167,7 @@ The test passes when every criterion holds on every day, apart from the exceptio
 | P8 | No duplicate replies | Self reports and approvals against sent messages | zero Self requests to answer an owner message her conversation had already answered (the Phase 6 `a3`/`a4` pattern) |
 | P9 | Stable | `dsh.log`, snapshots | DSH up for every snapshot, except restarts the owner chose; no repeating unhandled error |
 | P10 | No lost replies | activity `lost-reply` records, counted in every snapshot; the Status tab's warning | zero conversation turns that ended without a say or `end_turn` (DESIGN §6, Turn shape); close reminders are measured, not failures |
+| P11 | Asleep means unreachable | activity `wake` records with session `conversation` between a `sleep` record and the next wake time, minus those after a `woken` record and before it ended; `inbox-held` records | zero conversation wakes while she is asleep or paused; every chat message that arrives then has an `inbox-held` record (DESIGN §7, Phase 9). Messages she leaves unanswered are measured, not failures |
 
 ## 7. Measurements
 
@@ -183,6 +185,11 @@ These are recorded daily, not graded. Each one feeds an open question in DESIGN 
 | Tokens per session kind (conversation, Self, triage, group triage, consolidation, viewing) | budget defaults |
 | Close reminders per day and per channel; turns closed by a say, by `end_turn`, by a gesture then `end_turn`; says with a list or `more: true` | turn shape (Phase 8) |
 | Settle-window bursts and attention-window wakes per group (`group_attention` gate records) | message timing (Phase 8) |
+| Bedtime per night: when she slept, by `sleep` (her choice, with the time and the session it came from) or at the latest bedtime; sleeping hours and energy at wake | bedtime window (Phase 9) |
+| Inbox per night: messages held (`inbox-held`) per channel; at waking, how many she answered with `inbox_answer`, how many were released when the chat wrote again, and how many she left; minutes from wake to each answer | inbox (Phase 9) |
+| Deliberate wakes by the owner (`woken`), and what she did in them | owner wake (Phase 9) |
+| Night and pause refusals she still met (`anima/night`, `anima/paused` on her calls: the day summary's `sleep.backstop`) | refusals in her world (Phase 9) |
+| Burst sizes (messages per wake), typing-extended windows (expected 0: her NapCat sends no typing notice, DSH-INTEGRATION §8h), and gaps between the messages of her multi-message says | message rhythm (Phase 9) |
 
 ## 8. Incidents, hotfixes and stopping
 
@@ -220,6 +227,13 @@ Run `/anima pause`, then decide. Stop when:
    - open questions closed or narrowed with the numbers
    - the Phase 4 week closed
 4. Raw data stays in `~/.anima/formal-2/` until the owner decides to delete it.
+
+## Changes for formal-2 (Phase 9, 2026-11-12)
+
+- New criterion P11, asleep means unreachable: no conversation wakes while she sleeps or is paused, and every message then is held in her inbox.
+- New measures: bedtime per night, the inbox per night (held, answered, released, left), deliberate wakes, night and pause refusals she still met, burst sizes and message spacing.
+- The overlay sets `rhythm.bedtime` (the owner's window) instead of `rhythm.sleep`, which no longer loads.
+- Starts only after Phase 9's exit check (DESIGN §14 item 9).
 
 ## Changes for formal-2 (Phase 8, 2026-11-12)
 

@@ -324,7 +324,8 @@ describe('AnimaMemory', () => {
     const { ctx, host } = await setup()
     await ctx.animaLife.deliver(message(GROUP, 'Bob', 'hotpot tonight?', { addressed: false }))
     await ctx.animaLife.deliver(message(GROUP, 'Bob', 'Anima, you coming?', { addressed: true }))
-    expect(host.injected.map(d => d.id)).toEqual([sessionOf(GROUP)])
+    // One burst wakes the group; the transcript still records both lines (Phase 9).
+    expect(host.injected).toEqual([])
     expect(host.delivered.map(d => d.id)).toEqual([sessionOf(GROUP)])
     expect(ctx.animaMemory.store.pendingCount()).toBe(2)
   })

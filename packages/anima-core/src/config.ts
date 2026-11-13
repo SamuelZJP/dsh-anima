@@ -268,10 +268,15 @@ export const Config: z<Config> = z.object({
   }).description('Her clock, the single time source.'),
   rhythm: z.object({
     wake: hhmm.default('07:30'),
-    sleep: hhmm.default('23:30'),
+    bedtime: z.object({
+      earliest: hhmm.default('22:30').description('From this time she may go to sleep with sleep.'),
+      latest: hhmm.default('00:30').description('At this time she falls asleep anyway, if she is not asleep yet.'),
+      wokenMinutes: z.number().min(0).default(30).description('After the owner wakes her past the latest bedtime, minutes she stays awake unless she sleeps sooner.'),
+    }).description('The bedtime window: she chooses when to sleep inside it (Phase 9).'),
     wakingMinutes: z.number().min(0).default(60),
     evening: hhmm.default('18:00'),
-    windDownMinutes: z.number().min(0).default(60),
+    windDownMinutes: z.number().min(0).default(60).description('Length of winding down before the latest bedtime.'),
+    sleep: z.string().description('Removed in Phase 9: use bedtime { earliest, latest }. Set, it fails the load.'),
   }).description('Day rhythm.'),
   needs: z.array(z.object({
     name: z.string().pattern(/^[a-z][a-z0-9_-]*$/).required(),

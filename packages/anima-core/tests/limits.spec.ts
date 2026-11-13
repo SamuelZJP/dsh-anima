@@ -17,7 +17,7 @@ describe('fact limits (DESIGN §10)', () => {
     registerEcho(ctx, 'bili_view_closely', { ...watch, facts: async (args) => { seen.push(args); return { durationSeconds: Number(args.text) } } })
     const long = await callAs(ctx, SELF, 'bili_view_closely', { text: '1500' })
     expect(long.isError).toBe(true)
-    expect(textOf(long)).toMatch(/^Error: anima\/over-limit: bili_view_closely allows durationSeconds up to 1200, and this call has 1500/)
+    expect(textOf(long)).toMatch(/^Error: anima\/over-limit: bili_view_closely 的 durationSeconds 最多 1200，这次是 1500/)
     const short = await callAs(ctx, SELF, 'bili_view_closely', { text: '600' })
     expect(short.isError).toBe(false)
     expect(seen).toHaveLength(2)
@@ -77,7 +77,7 @@ describe('platform quotas', () => {
     await first.ctx.fiber.dispose()
     const second = await boot()
     const again = await callAs(second.ctx, SELF, 'bili_view_closely')
-    expect(textOf(again)).toMatch(/^Error: anima\/over-quota: limit of 1 per day in total/)
+    expect(textOf(again)).toMatch(/^Error: anima\/over-quota: bili_view_closely 这一天总共最多 1 次/)
   })
 })
 

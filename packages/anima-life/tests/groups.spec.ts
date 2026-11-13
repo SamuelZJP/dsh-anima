@@ -150,17 +150,16 @@ describe('group triage', () => {
     expect(stimuli.map(s => s.stimulus.type === 'message' ? s.stimulus.text : '')).toEqual(['y', 'z'])
   })
 
-  it('wakes at once when she is addressed or the owner speaks, flushing the buffer as context', async () => {
+  it('wakes when she is addressed or the owner speaks, with the buffer in the same burst', async () => {
     const { ctx, host } = await setup({ groupTriage: { windowSeconds: 60 } })
     await chatter(ctx, 'chatter')
     await chatter(ctx, '@Anima what do you think?', { addressed: true })
     const inbox = host.sessions.get(groupSession)!.inbox
-    expect(inbox).toHaveLength(2)
-    expect(inbox[0]).toMatch(/^\(inject\) .*chatter$/)
-    expect(inbox[1]).toContain('what do you think?')
+    expect(inbox).toHaveLength(1)
+    expect(inbox[0]).toMatch(/2 条消息（Bob 2 条）：\n.* chatter\n.*叫你: @Anima what do you think\?\n（群里所有人都会看到你的回答。）\n在这里回应/)
     expect(ctx.animaLife.triage.open()).toEqual([])
     await ctx.animaLife.deliver({ type: 'message', channel: group, sender: { platformUserId: '1', displayName: 'Sam', isOwner: true }, text: 'hi all', ts: 0 })
-    expect(inbox).toHaveLength(3)
+    expect(inbox).toHaveLength(2)
     expect(host.sessions.has(triageSession)).toBe(false)
     expect(ctx.anima.statusText()).toContain('wakes 2 direct + 0 triage')
   })
@@ -313,19 +312,18 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
     return { ...env, spoke, gate }
   }
 
-  it('waits for a private chat to settle, then wakes once with the burst as context', async () => {
+  it('waits for a private chat to settle, then wakes once with the whole burst', async () => {
     const { ctx, host, stimuli } = await setup({ conversation: { settleSeconds: 0.08 } })
     expect(await dm(ctx, '在吗')).toBe(ownerSession)
     await new Promise(resolve => setTimeout(resolve, 40))
     await dm(ctx, '问你个事')
     await dm(ctx, '明天有空吗')
     expect(host.sessions.has(ownerSession)).toBe(false)
-    await vi.waitFor(() => expect(host.sessions.get(ownerSession)?.inbox.length).toBe(3))
+    await vi.waitFor(() => expect(host.sessions.get(ownerSession)?.inbox.length).toBe(1))
     const inbox = host.sessions.get(ownerSession)!.inbox
-    expect(inbox[0]).toMatch(/^\(inject\) .*在吗$/)
-    expect(inbox[1]).toMatch(/^\(inject\) .*问你个事$/)
-    expect(inbox[2]).toMatch(/^\[.*对你说: 明天有空吗\n在这里回应：用 local_say 说话/)
-    expect(stimuli.map(s => s.delivery)).toEqual(['context', 'context', 'wake'])
+    expect(inbox[0]).toMatch(/^\[.*\] \[.*\] Sam（主人）发来 3 条：\n  \d\d:\d\d 在吗\n  \d\d:\d\d 问你个事\n  \d\d:\d\d 明天有空吗\n在这里回应：用 local_say 说话/)
+    // The transcript still gets each message on its own.
+    expect(stimuli.map(s => [s.stimulus.type, s.delivery])).toEqual([['message', 'context'], ['message', 'context'], ['message', 'wake']])
   })
 
   it('never delays an intent', async () => {
@@ -340,8 +338,8 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
     spoke('s1')
     await chatter(ctx, '哈哈对')
     await chatter(ctx, '你也去吗')
-    await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(2))
-    expect(host.sessions.get(groupSession)!.inbox[1]).toMatch(/你也去吗\n（这条没有叫你；你刚在这个群里说过话/)
+    await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(1))
+    expect(host.sessions.get(groupSession)!.inbox[0]).toMatch(/哈哈对\n.*你也去吗\n（你刚在这个群里说过话，所以这些直接到了你这里。）/)
     expect(host.sessions.has(triageSession)).toBe(false)
     expect(gate()).toEqual([expect.objectContaining({ decision: 'allowed', channel: groupKey, session: 'conversation' })])
     expect(ctx.anima.statusText()).toContain(`${groupKey} today: wakes 0 direct + 0 triage + 1 attention;`)
@@ -365,14 +363,15 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
     expect(off.gate()).toEqual([])
   })
 
-  it('an @ in a settling group takes the waiting burst as context', async () => {
-    const { ctx, host, spoke } = await withQqSay({ conversation: { settleSeconds: 5 } })
+  it('an @ in a settling group joins the waiting burst and settles with it', async () => {
+    const { ctx, host, spoke, gate } = await withQqSay({ conversation: { settleSeconds: 0.05 } })
     spoke('s1')
     await chatter(ctx, 'first')
     await chatter(ctx, '@her second', { addressed: true })
-    const inbox = host.sessions.get(groupSession)!.inbox
-    expect(inbox).toHaveLength(2)
-    expect(inbox[0]).toMatch(/^\(inject\) .*first$/)
-    expect(inbox[1]).toMatch(/叫你（群里所有人都会看到你的回答）: @her second\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
+    expect(host.sessions.has(groupSession)).toBe(false)
+    await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(1))
+    expect(host.sessions.get(groupSession)!.inbox[0]).toMatch(/first\n.*叫你: @her second\n（群里所有人都会看到你的回答。）\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
+    // An addressed burst needs no attention admission.
+    expect(gate()).toEqual([])
   })
 })

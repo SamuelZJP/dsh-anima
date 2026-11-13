@@ -153,7 +153,7 @@ describe('Bilibili adapter', () => {
   it.skipIf(!hasFfmpeg)('views closely: refuses long videos in the gate before any download', async () => {
     const { ctx, self, api } = await setup()
     const refused = await call(ctx, self, 'bili_view_closely', { bvid: LONG })
-    expect(refused.text).toMatch(/^Error: anima\/over-limit: bili_view_closely allows durationSeconds up to 1200, and this call has 1500/)
+    expect(refused.text).toMatch(/^Error: anima\/over-limit: bili_view_closely 的 durationSeconds 最多 1200，这次是 1500/)
     expect(api.seen).not.toContain('/x/player/wbi/playurl')
   })
 
@@ -183,7 +183,7 @@ describe('Bilibili adapter', () => {
 
     // The second close view of the day is over the owner's quota.
     const again = await call(ctx, self, 'bili_view_closely', { bvid: SHORT })
-    expect(again.text).toMatch(/^Error: anima\/over-quota: limit of 1 per day in total reached for bili_view_closely/)
+    expect(again.text).toMatch(/^Error: anima\/over-quota: bili_view_closely 这一天总共最多 1 次/)
   })
 
   it.each([false, true])('logs in by QR, stores the cookies 0600 and shows the login in status (webserver: %s)', async (withWeb) => {

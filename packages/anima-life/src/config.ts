@@ -12,6 +12,8 @@ export interface Config {
   conversation: {
     /** Real seconds a private chat must stay quiet before its messages wake her (a burst is one wake); 0 wakes at once. */
     settleSeconds: number
+    /** Real seconds after a burst's first message after which she is woken anyway (Phase 9). */
+    settleMaxSeconds: number
     /** Reminders steered into a turn that is about to stop without a closing action, before a lost reply is recorded. */
     closeReminders: number
   }
@@ -47,7 +49,8 @@ export interface Config {
 /** Schemastery schema for {@link Config}. */
 export const Config: z<Config> = z.object({
   conversation: z.object({
-    settleSeconds: z.number().min(0).default(4).description('Real seconds a chat must stay quiet before its messages wake her, so a burst arrives as one wake; 0 wakes at once. Intents are never delayed.'),
+    settleSeconds: z.number().min(0).default(15).description('Real seconds a chat must stay quiet (no message, no typing) before its messages wake her, so a burst arrives as one wake; 0 wakes at once. Intents are never delayed.'),
+    settleMaxSeconds: z.number().min(0).default(60).description('Real seconds after the first message of a burst after which she is woken anyway, however long the stream goes on.'),
     closeReminders: z.natural().default(2).description('Reminders steered into a conversation turn that is about to stop without a say or end_turn; after them the turn ends and a lost reply is recorded.'),
   }).description('Conversation turns: settle window and close reminders.'),
   groupTriage: z.object({

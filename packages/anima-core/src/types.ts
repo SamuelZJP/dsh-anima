@@ -85,6 +85,8 @@ export interface BehaviorMeta {
    * facts refuses the call with the error's message.
    */
   readonly facts?: (args: Readonly<Record<string, unknown>>) => Promise<Readonly<Record<string, number>>>
+  /** Only from the earliest bedtime on (`sleep`, Phase 9); refused before it with `anima/not-bedtime`. */
+  readonly bedtime?: boolean
 }
 
 /** Quota weight of one call (DESIGN §10). */

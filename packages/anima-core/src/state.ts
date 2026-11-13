@@ -46,6 +46,8 @@ export interface StateModel {
   readonly energy: EnergyConfig
   readonly mood: MoodConfig
   readonly rhythm: Rhythm
+  /** Whether she slept at a time, from when she actually went to sleep (Phase 9); the plain rhythm when omitted. */
+  readonly asleep?: ((t: number) => boolean) | undefined
 }
 
 /** Her current numbers. */
@@ -96,13 +98,14 @@ export function advance(state: SelfState, to: number, model: StateModel): SelfSt
   const next: SelfState = { needs: { ...state.needs }, energy: state.energy, mood: { ...state.mood }, updatedAt: state.updatedAt }
   for (const need of model.needs) next.needs[need.name] ??= need.baseline
   for (const name of Object.keys(next.needs)) if (!model.needs.some(need => need.name === name)) delete next.needs[name]
+  const sleeping = model.asleep ?? ((at: number) => modeAt(at, model.rhythm) === 'night')
   let t = state.updatedAt
-  let asleep = modeAt(t, model.rhythm) === 'night'
+  let asleep = sleeping(t)
   while (t < to) {
     const step = Math.min(STEP_MS, to - t)
     const hours = step / 3_600_000
     const mid = t + step / 2
-    if (modeAt(mid, model.rhythm) === 'night') {
+    if (sleeping(mid)) {
       next.energy = clamp(next.energy + model.energy.restorePerHour * hours)
       asleep = true
     } else {

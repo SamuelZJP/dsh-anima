@@ -16,7 +16,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AnimaError, formatLocal, SAY_META, SAY_PARAMETERS, sayMessages } from '@anima/core'
 import type {} from '@anima/core'
-import type { PublishedChannel } from '@anima/life'
+import { paceMessages, type PublishedChannel } from '@anima/life'
 import type {} from '@anima/life'
 import { Config as ConfigSchema, resolveQqConfig, type Config as QqConfig, type ResolvedQqConfig } from './config.ts'
 import { displayNameOf, normalizeMessage, outgoing, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type Segment } from './normalize.ts'
@@ -99,7 +99,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     if (sentIds.size > SENT_IDS) sentIds.delete(sentIds.values().next().value!)
   }
   const login = { ready: false, nickname: undefined as string | undefined, problem: undefined as string | undefined }
-  const counts = { delivered: 0, dropped: 0, sent: 0 }
+  const counts = { delivered: 0, dropped: 0, sent: 0, typing: 0, read: 0 }
   const media = new MediaBook(join(core.config.dataDir, 'qq', 'media.json'), config.look.cacheEntries)
   /** Rendering for one chat: images, stickers and forwards get ids that belong to it. */
   const renderIn = (chat: string) => ({
@@ -196,6 +196,16 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     return messageId
   }
 
+  // A chat that woke her is read, like a person opening it; held inbox messages never reach here (Phase 9).
+  ctx.on('anima/read', ({ channel }) => {
+    if (!config.markRead || channel.platform !== PLATFORM || channel.account !== config.account || !login.ready) return
+    const [action, params] = channel.kind === 'group'
+      ? ['mark_group_msg_as_read', { group_id: Number(channel.id) }] as const
+      : ['mark_private_msg_as_read', { user_id: Number(channel.id) }] as const
+    counts.read += 1
+    client.call(action, params).catch((error: unknown) => ctx.logger.debug(`anima qq: ${action}: ${error instanceof Error ? error.message : String(error)}`))
+  })
+
   core.provideOwnerLine({
     name: `QQ private chat with the owner (${config.owner})`,
     send: async (text) => { await send('private', config.owner, [{ type: 'text', data: { text } }]) },
@@ -291,6 +301,14 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
 
   async function notice(event: OneBotEvent): Promise<void> {
     const userId = String(event.user_id ?? '')
+    // NapCat's input status (private chats only; group_id is 0): the other person is typing (Phase 9).
+    if (event.notice_type === 'notify' && event.sub_type === 'input_status') {
+      if (userId === config.account) return
+      const typingIn = channelOf('private', userId)
+      if (typingIn !== undefined && String(event.status_text ?? '') !== '') life.typing(typingIn)
+      counts.typing += 1
+      return
+    }
     const groupId = event.group_id === undefined ? undefined : String(event.group_id)
     const channel = groupId === undefined ? channelOf('private', userId) : channelOf('group', groupId)
     if (event.notice_type === 'notify' && event.sub_type === 'poke') {
@@ -388,7 +406,8 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
         clearTimeout(typing)
       }
       const ids: string[] = []
-      for (const [index, text] of messages.entries()) {
+      // Messages after the first wait a typing time from their length, with typing shown in private chats (Phase 9).
+      await paceMessages(messages, config.pacing, async (index, text) => {
         try {
           const id = await send(channel.kind as 'private' | 'group', channel.id, outgoing(text, index === 0 ? { replyTo: args.replyTo, mention } : { mention: [] }))
           keep(id, 'you', text)
@@ -398,7 +417,13 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
           const reason = error instanceof Error ? error.message : String(error)
           throw new AnimaError('anima/partly-sent', `${ids.length} of ${messages.length} messages went out (msg ${ids.join(', ')}); message ${index + 1} failed: ${reason}`)
         }
-      }
+      }, {
+        beforeWait: () => {
+          if (channel.kind !== 'private' || !config.typing.enabled || !login.ready) return
+          client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
+            .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
+        },
+      })
       return { sent: true, messageId: ids.at(-1)!, ...ids.length > 1 ? { messageIds: ids } : {} }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })

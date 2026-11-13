@@ -8,7 +8,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, channelKey, closesTurn, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, stringArg, writeJson } from '@anima/core'
+import { AnimaError, channelKey, type ChannelRef, closesTurn, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, stringArg, writeJson } from '@anima/core'
 import type {} from '@anima/core'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -24,6 +24,7 @@ import { nextHeartbeat } from './heartbeat.ts'
 import { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, OUTBOX_EXPIRED, type Outcome, type TrackerState } from './intent.ts'
 import { Outbox, platformOf, type HeldMessage } from './outbox.ts'
 import { buildReport, type ChannelLine } from './report.ts'
+import { Inbox, inboxSummary } from './inbox.ts'
 import { SessionRouter, type ModelChoice, type SessionHost } from './router.ts'
 import { senderLabel, wakes, type ExtraBlock, type PublishedChannel, type Stimulus } from './stimulus.ts'
 
@@ -34,6 +35,8 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     /** A stimulus was delivered to one of her sessions. `anima-memory` records channel messages from it. */
     'anima/stimulus'(payload: StimulusEvent): void
+    /** A chat woke her: she reads it, so its adapter may mark it read (Phase 9). */
+    'anima/read'(payload: { readonly channel: ChannelRef }): void
   }
 }
 
@@ -47,6 +50,18 @@ export interface StimulusEvent {
    * turn without waking; `record`: kept only in her transcript (group triage "remember").
    */
   readonly delivery: 'wake' | 'context' | 'record'
+}
+
+/** A chat's messages waiting to settle (DESIGN §6, message timing). */
+interface SettleEntry {
+  messages: MessageStimulus[]
+  timer: ReturnType<typeof setTimeout> | undefined
+  /** Opened by an unaddressed message in the attention window. */
+  attention: boolean
+  /** Real time of the first message: the cap counts from here. */
+  first: number
+  /** Typing notices seen while waiting. */
+  typing: number
 }
 
 /** Options of the life service. */
@@ -129,7 +144,7 @@ export class DshSessionHost implements SessionHost<Agent> {
     const message = this.message(text, summary, stimulus, ref, extra, true)
     // A chat message joins a running turn as its next step, or starts one when
     // idle (DESIGN §6, message timing); everything else gets its own turn.
-    if (stimulus === 'message') agent.steer(message)
+    if (stimulus === 'message' || stimulus === 'burst') agent.steer(message)
     else agent.followup(message)
     await this.flush(agent)
   }
@@ -197,6 +212,8 @@ interface LifeFile {
   outboxSeq: number
   /** Per her day and group channel: wakes and triage outcomes (evidence for runaway wakes). */
   groups: Record<string, Record<string, GroupDay>>
+  /** Send time of the newest inbox message Self was last shown (Phase 9). */
+  inboxSeen?: number
 }
 
 /** Health of one platform, as its adapter reported it. */
@@ -268,7 +285,9 @@ export class AnimaLife extends Service {
   /** Whether each conversation turn closed by an action (DESIGN §6, Turn shape). */
   private readonly closer: TurnCloser
   /** Chat messages waiting for their chat to settle, by channel key (DESIGN §6, message timing). */
-  private readonly settling = new Map<string, { messages: MessageStimulus[]; timer: ReturnType<typeof setTimeout> | undefined; attention: boolean }>()
+  private readonly settling = new Map<string, SettleEntry>()
+  /** Her inbox: chat messages held while she slept or was paused (Phase 9). */
+  readonly inbox: Inbox
   /** Groups in their attention window after she spoke: channel key → real time it ends. */
   private readonly attention = new Map<string, number>()
 
@@ -292,6 +311,7 @@ export class AnimaLife extends Service {
       },
     })
     this.path = join(dataDir, 'life.json')
+    this.inbox = new Inbox(join(dataDir, 'inbox.json'))
     this.file = { ...emptyFile(), ...readJson<LifeFile>(this.path) }
     this.tracker = new IntentTracker(this.file.intents, name => core.behavior(name)?.effect === 'express')
     this.closer = new TurnCloser(this.config.conversation.closeReminders)
@@ -378,8 +398,45 @@ export class AnimaLife extends Service {
       return { day: core.dayKey() }
     })
     core.addStatusPart('life', () => this.statusPart())
+    core.addOwnerView('inbox', () => ({
+      channels: this.inbox.entries().map(({ key, channel, messages }) => ({
+        key, display: channel.display,
+        messages: messages.map(m => ({ ts: m.ts, sender: m.sender.displayName, isOwner: m.sender.isOwner, text: m.text, addressed: m.addressed === true, reason: m.reason })),
+      })),
+    }))
+    core.addSubcommand({
+      name: 'inbox',
+      usage: 'inbox — messages waiting for her while she sleeps or is paused',
+      run: () => {
+        const entries = this.inbox.entries()
+        if (entries.length === 0) return { kind: 'success', text: 'Her inbox is empty.' }
+        return {
+          kind: 'success',
+          text: entries.flatMap(({ key, channel, messages }) => [
+            `${channel.display} (${key}): ${messages.length}`,
+            ...messages.map(m => `  ${formatLocal(m.ts)} ${m.sender.displayName}${m.addressed === true ? ' (@her)' : ''} [${m.reason}]: ${m.text}`),
+          ]).join('\n'),
+        }
+      },
+    })
 
     this.registerBehaviors()
+
+    // Sleep and wakes (Phase 9): what settles while she falls asleep goes to the inbox; a
+    // deliberate wake or a resume shows her the inbox in Self.
+    ctx.on('anima/sleep', () => {
+      for (const key of [...this.settling.keys()]) this.flushSettled(key)
+      const next = this.file.nextHeartbeatAt
+      const now = core.clock.now()
+      if (next !== undefined && core.mode(next) === 'night') this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
+    })
+    ctx.on('anima/woken', () => {
+      void this.wakeSelf('[被叫醒] 主人把你叫醒了。').catch((error: unknown) => ctx.logger.warn(`anima: could not wake Self: ${String(error)}`))
+    })
+    ctx.on('anima/paused', (paused) => {
+      if (paused || this.inbox.size() === 0 || core.asleep()) return
+      void this.wakeSelf('[继续] 主人让你继续了。').catch((error: unknown) => ctx.logger.warn(`anima: could not wake Self: ${String(error)}`))
+    })
 
     ctx.on('session/event', (session, event) => this.onSessionEvent(session.id, event))
     ctx.on('agent/turn-stopping', ({ agent }) => this.onStopping(agent))
@@ -425,36 +482,86 @@ export class AnimaLife extends Service {
   /**
    * Route and deliver one stimulus. A group message that does not address her
    * and is not from the owner goes to group triage first (DESIGN §5), unless the
-   * group is in its attention window after she spoke there; one that does wakes
-   * the group at once, with the group's buffered messages as context. A private
-   * message, and a group message in the attention window, waits for its chat to
-   * settle (`conversation.settleSeconds`), so a burst is one wake (DESIGN §6).
-   * Channel stimuli for a channel off its platform's allowlist are refused.
+   * group is in its attention window after she spoke there. Every other chat
+   * message waits for its chat to settle (`conversation.settleSeconds` of quiet,
+   * at most `settleMaxSeconds`), so a burst is one arrival (DESIGN §6); an
+   * addressed group message takes the group's buffered messages into its burst.
+   * While she is asleep or paused, chat messages that would wake her go to her
+   * inbox instead (Phase 9). Channel stimuli for a channel off its platform's
+   * allowlist are refused.
    * @param options.model - model to select on the target session before delivery.
    * @returns the target session id.
    */
   async deliver(stimulus: Stimulus, options: { model?: ModelChoice } = {}): Promise<string> {
-    if (stimulus.type === 'message' || stimulus.type === 'channel-event' || stimulus.type === 'intent') {
+    if (stimulus.type === 'message' || stimulus.type === 'channel-event' || stimulus.type === 'intent' || stimulus.type === 'burst') {
       const key = channelKey(stimulus.channel)
       if (this.ctx.anima.channelAllowed(key) === false) {
         throw new AnimaError('anima/not-allowlisted', `${key} is not on the owner's allowlist; the stimulus was dropped.`)
       }
-      if (stimulus.type === 'message' && stimulus.channel.kind === 'group') {
-        if (!wakes(stimulus)) {
-          this.router.know(stimulus.channel)
-          if (this.attentive(key)) return this.settleLater(stimulus, true)
+      if (stimulus.type === 'message') {
+        // Known without replacing the adapter's own entry, so unloading the adapter still forgets it.
+        if (this.router.channel(key) === undefined) this.router.know(stimulus.channel)
+        const group = stimulus.channel.kind === 'group'
+        if (group && !wakes(stimulus)) {
+          if (this.attentive(key) && !this.unreachable()) return this.settleLater(stimulus, true)
           this.triage.add(stimulus)
           return this.router.conversationId(stimulus.channel)
         }
-        for (const earlier of [...this.triage.take(key), ...this.takeSettling(key)]) await this.deliverOne(earlier, {}, false)
-        this.groupDay(key).direct += 1
-        this.save()
-      } else if (stimulus.type === 'message' && this.config.conversation.settleSeconds > 0) {
-        this.router.know(stimulus.channel)
-        return this.settleLater(stimulus, false)
+        if (this.unreachable()) return this.hold(stimulus)
+        if (this.config.conversation.settleSeconds > 0) return this.settleLater(stimulus, false)
+        return this.deliverBurst(key, [stimulus], false)
+      }
+      if (stimulus.type === 'intent') {
+        // Held messages of that chat go with the intent, as context before it (DESIGN §5).
+        const heldWhy = this.inbox.why(key)
+        const held = this.inbox.take(key)
+        if (held.length > 0) {
+          this.ctx.anima.recordActivity({ type: 'inbox-release', channel: key, reason: 'intent', count: held.length })
+          await this.deliverOne({ type: 'burst', channel: stimulus.channel, messages: held, held: held.length, heldWhy, ts: stimulus.ts }, {}, false)
+        }
       }
     }
+    if (stimulus.type === 'notice' && this.unreachable()) {
+      // A notice for Self waits for her first report after she wakes (Phase 9).
+      this.note(stimulus.text)
+      return this.router.selfId
+    }
     return this.deliverOne(stimulus, options)
+  }
+
+  /** Whether she cannot be reached now: asleep, outside a deliberate wake, or paused (Phase 9). */
+  private unreachable(): boolean {
+    return this.ctx.anima.paused || this.ctx.anima.asleep()
+  }
+
+  /** Hold a chat message in her inbox (Phase 9); its platform does not mark it read. */
+  private hold(stimulus: MessageStimulus): string {
+    const reason = this.ctx.anima.paused ? 'paused' : 'asleep'
+    this.inbox.hold(stimulus, reason)
+    this.file.lastContact[channelKey(stimulus.channel)] = stimulus.ts
+    this.save()
+    this.ctx.anima.recordActivity({ type: 'inbox-held', channel: channelKey(stimulus.channel), reason })
+    // The transcript still records it, so consolidation sees what came in.
+    this.ctx.emit('anima/stimulus', { stimulus, sessionId: this.router.conversationId(stimulus.channel), delivery: 'record' })
+    return this.router.conversationId(stimulus.channel)
+  }
+
+  /**
+   * The other person is typing in a chat (where the platform reports it, Phase 9):
+   * a burst waiting there keeps waiting, within `settleMaxSeconds`.
+   * @param channel - the chat.
+   */
+  typing(channel: ChannelRef): void {
+    const key = channelKey(channel)
+    const entry = this.settling.get(key)
+    if (entry === undefined) return
+    entry.typing += 1
+    this.armSettle(key, entry)
+  }
+
+  /** Channel keys whose messages wait for their chat to settle (status and scripted checks). */
+  settlingChannels(): string[] {
+    return [...this.settling.keys()]
   }
 
   /** Whether a group is in its attention window (DESIGN §6). */
@@ -462,15 +569,22 @@ export class AnimaLife extends Service {
     return (this.attention.get(key) ?? 0) > Date.now()
   }
 
-  /** Hold a chat message until its chat settles; each new one restarts the wait. */
+  /** Hold a chat message until its chat settles; each new one restarts the quiet wait, within the cap. */
   private settleLater(stimulus: MessageStimulus, attention: boolean): string {
     const key = channelKey(stimulus.channel)
-    const entry = this.settling.get(key) ?? { messages: [], timer: undefined, attention }
+    const entry = this.settling.get(key) ?? { messages: [], timer: undefined, attention, first: Date.now(), typing: 0 }
     entry.messages.push(stimulus)
-    clearTimeout(entry.timer)
-    entry.timer = setTimeout(() => this.flushSettled(key), this.config.conversation.settleSeconds * 1000)
     this.settling.set(key, entry)
+    this.armSettle(key, entry)
     return this.router.conversationId(stimulus.channel)
+  }
+
+  private armSettle(key: string, entry: SettleEntry): void {
+    clearTimeout(entry.timer)
+    const { settleSeconds, settleMaxSeconds } = this.config.conversation
+    const quiet = settleSeconds * 1000
+    const cap = entry.first + Math.max(settleMaxSeconds, settleSeconds) * 1000 - Date.now()
+    entry.timer = setTimeout(() => this.flushSettled(key), Math.max(0, Math.min(quiet, cap)))
   }
 
   /** Messages waiting to settle in a chat, taken out of the wait. */
@@ -483,15 +597,24 @@ export class AnimaLife extends Service {
   }
 
   /**
-   * A chat settled: the earlier messages join as context and the last one wakes.
-   * An attention-window burst first asks the gate (`group_attention` quota);
-   * refused, it goes to group triage like any other chatter.
+   * A chat settled: its messages go to her as one burst. A burst of only
+   * unaddressed attention-window messages first asks the gate (`group_attention`
+   * quota); refused, it goes to group triage like any other chatter. If she fell
+   * asleep (or was paused) meanwhile, waking messages go to her inbox.
    */
   private flushSettled(key: string): void {
     const entry = this.settling.get(key)
     const messages = this.takeSettling(key)
     if (entry === undefined || messages.length === 0) return
-    if (entry.attention) {
+    const waking = messages.some(message => wakes(message))
+    if (this.unreachable()) {
+      for (const message of messages) {
+        if (wakes(message)) this.hold(message)
+        else this.triage.add(message)
+      }
+      return
+    }
+    if (!waking) {
       if (!this.ctx.anima.admit('group_attention', key)) {
         for (const message of messages) this.triage.add(message)
         return
@@ -500,28 +623,68 @@ export class AnimaLife extends Service {
       stats.attention = (stats.attention ?? 0) + 1
       this.save()
     }
-    void (async () => {
-      for (const [index, message] of messages.entries()) {
-        const last = index === messages.length - 1
-        await this.deliverOne(last && entry.attention ? { ...message, via: { kind: 'attention' } } : message, {}, last)
-      }
-    })().catch((error: unknown) => this.ctx.logger.warn(`anima: could not deliver to ${messages[0]!.channel.display}: ${error instanceof Error ? error.message : String(error)}`))
+    void this.deliverBurst(key, messages, !waking)
+      .catch((error: unknown) => this.ctx.logger.warn(`anima: could not deliver to ${messages[0]!.channel.display}: ${error instanceof Error ? error.message : String(error)}`))
+  }
+
+  /**
+   * Deliver settled messages as one arrival (DESIGN §5, bursts): an addressed
+   * group burst takes the group's buffered messages before it, and the chat's
+   * held inbox messages go first, marked with their times. A lone message keeps
+   * the single-message format. Every message is still recorded on its own.
+   */
+  private async deliverBurst(key: string, settled: readonly MessageStimulus[], attention: boolean): Promise<string> {
+    const channel = settled[0]!.channel
+    const heldWhy = this.inbox.why(key)
+    const held = this.inbox.take(key)
+    if (held.length > 0) this.ctx.anima.recordActivity({ type: 'inbox-release', channel: key, reason: 'wake', count: held.length })
+    const buffered = channel.kind === 'group' && !attention ? this.triage.take(key) : []
+    if (channel.kind === 'group' && !attention) {
+      this.groupDay(key).direct += 1
+      this.save()
+    }
+    const messages = [...held, ...[...buffered, ...settled].sort((a, b) => a.ts - b.ts)]
+    if (messages.length === 1) {
+      const only = messages[0]!
+      return this.deliverOne(attention ? { ...only, via: { kind: 'attention' } } : only, {}, true)
+    }
+    return this.deliverOne({
+      type: 'burst', channel, messages,
+      ...held.length > 0 ? { held: held.length, heldWhy } : {},
+      ...attention ? { via: { kind: 'attention' as const } } : {},
+      ts: messages.at(-1)!.ts,
+    }, {}, true)
   }
 
   private async deliverOne(stimulus: Stimulus, options: { model?: ModelChoice }, wake = wakes(stimulus)): Promise<string> {
     const sessionId = await this.deliverNow(stimulus, options, wake)
-    this.ctx.emit('anima/stimulus', { stimulus, sessionId, delivery: wake ? 'wake' : 'context' })
+    if (stimulus.type === 'burst') {
+      // The transcript records each message on its own; held ones were recorded when they arrived.
+      for (const [index, message] of stimulus.messages.entries()) {
+        if (index < (stimulus.held ?? 0)) continue
+        this.ctx.emit('anima/stimulus', { stimulus: message, sessionId, delivery: wake && index === stimulus.messages.length - 1 ? 'wake' : 'context' })
+      }
+    } else {
+      this.ctx.emit('anima/stimulus', { stimulus, sessionId, delivery: wake ? 'wake' : 'context' })
+    }
+    // A chat she is woken by is read, like a person opening it (Phase 9).
+    if (wake && (stimulus.type === 'message' || stimulus.type === 'burst')) this.ctx.emit('anima/read', { channel: stimulus.channel })
     return sessionId
   }
 
   private async deliverNow(stimulus: Stimulus, options: { model?: ModelChoice }, wake: boolean): Promise<string> {
     const model = options.model
     const before = model === undefined ? undefined : (agent: Agent) => this.host.selectModel(agent, model)
-    if (stimulus.type === 'message') {
+    if (stimulus.type === 'message' || stimulus.type === 'burst') {
       const key = channelKey(stimulus.channel)
-      this.file.lastContact[key] = stimulus.ts
-      if (wake) this.file.events.push(`${stimulus.sender.displayName}${stimulus.sender.isOwner ? ' (owner)' : ''} wrote to you in ${stimulus.channel.display} at ${formatLocal(stimulus.ts)}.`)
-      if (stimulus.sender.isOwner) this.report(this.tracker.onOwnerMessage(key))
+      const messages = stimulus.type === 'burst' ? stimulus.messages : [stimulus]
+      const last = messages.at(-1)!
+      this.file.lastContact[key] = Math.max(this.file.lastContact[key] ?? 0, last.ts)
+      if (wake) {
+        const senders = [...new Set(messages.filter(m => wakes(m)).map(m => `${m.sender.displayName}${m.sender.isOwner ? ' (owner)' : ''}`))]
+        if (senders.length > 0) this.file.events.push(`${senders.join(', ')} wrote to you in ${stimulus.channel.display} at ${formatLocal(last.ts)}.`)
+      }
+      if (messages.some(m => m.sender.isOwner)) this.report(this.tracker.onOwnerMessage(key))
       this.save()
     }
     return this.routed(stimulus, before, wake)
@@ -793,6 +956,14 @@ export class AnimaLife extends Service {
       const triageId = this.router.triageId(day)
       if (await this.busy(triageId) || await this.busy(this.router.selfId)) return this.schedule(now + MIN)
       if (mode === 'night') core.useNightWake(now)
+      // Awake with new messages in her inbox: she sees them in Self at once, not after a
+      // cheap triage rest (owner decision 2026-11-12); she still decides whether to answer.
+      if (mode === 'day' && this.inboxNewest() > (this.file.inboxSeen ?? 0)) {
+        this.file.lastHeartbeatAt = now
+        this.file.counts.heartbeats += 1
+        await this.wakeSelf('[醒来] 你醒了，收件箱里有你睡着时收到的消息。')
+        return
+      }
 
       const report = this.reportText(now)
       this.lastReport = report
@@ -821,6 +992,7 @@ export class AnimaLife extends Service {
       now, requested, rhythm: core.config.day,
       minMinutes: day.minIntervalMinutes, maxMinutes: day.maxIntervalMinutes, defaultMinutes: day.defaultIntervalMinutes,
       nightWakesLeft: core.nightWakesLeft(now),
+      mode: (t: number) => core.mode(t),
     }
   }
 
@@ -830,7 +1002,7 @@ export class AnimaLife extends Service {
       const key = `${channel.platform}:${channel.account}:${channel.kind}:${channel.id}`
       return { key, display: channel.display, mayInitiate: core.mayInitiate(key), lastContact: this.file.lastContact[key] }
     })
-    const notes = [core.selfModelReportLine(), ...[...this.reportLines].flatMap(provider => provider())]
+    const notes = [...this.sleepLines(now), core.selfModelReportLine(), ...[...this.reportLines].flatMap(provider => provider())]
     if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`)
     return buildReport({
       time: formatStamp(now), phase: core.phase(now), mode: core.mode(now),
@@ -840,6 +1012,54 @@ export class AnimaLife extends Service {
       budgets: core.budgetText(now),
       channels, now, notes,
     })
+  }
+
+  /** Report lines on sleep and the inbox (Phase 9): facts only. */
+  private sleepLines(now: number): string[] {
+    const core = this.ctx.anima
+    const info = core.bedtimeInfo(now)
+    const hhmm = (t: number) => formatLocal(t).slice(11)
+    const lines: string[] = []
+    const phase = core.phase(now)
+    if (info.wokenAt !== undefined && !info.asleep && info.wokenUntil !== undefined && now < info.wokenUntil) {
+      lines.push(`The owner woke you at ${hhmm(info.wokenAt)}; you stay awake until you sleep again (sleep) or until ${hhmm(info.wokenUntil)}.`)
+    } else if (!info.asleep && (phase === 'winding-down' || now >= info.earliest)) {
+      lines.push(`Bedtime: ${now >= info.earliest ? 'you may go to sleep now with sleep' : `from ${hhmm(info.earliest)} you may go to sleep with sleep`}; at ${hhmm(info.latest)} you fall asleep anyway.`)
+    }
+    const inbox = inboxSummary(this.inbox.entries())
+    if (inbox !== undefined) lines.push(inbox)
+    return lines
+  }
+
+  /**
+   * Wake the Self session with her report and a first line saying why (Phase
+   * 9): a deliberate wake by the owner, a resume after a pause, or the first
+   * heartbeat after waking while her inbox holds messages. She still decides
+   * whether to answer anything; the turn ends with rest.
+   */
+  private async wakeSelf(first: string): Promise<void> {
+    const core = this.ctx.anima
+    const now = core.clock.now()
+    if (await this.busy(this.router.selfId)) {
+      this.note(first)
+      return
+    }
+    this.file.awaitingSelfRest = true
+    this.file.counts.acts += 1
+    this.file.inboxSeen = this.inboxNewest()
+    const report = this.reportText(now, true)
+    this.file.events = []
+    this.save()
+    const text = `${first}\n\n${report}\n\nDo what you want with your tools. When you are done, call rest(until?).`
+    await this.routed({ type: 'heartbeat', to: 'self', day: core.dayKey(now), text, ts: now }, agent => {
+      this.host.selectModel(agent, core.modeConfig(core.mode(now)).actionModel)
+    })
+    this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
+  }
+
+  /** Send time of the newest held message, or 0. */
+  private inboxNewest(): number {
+    return Math.max(0, ...this.inbox.entries().map(entry => entry.messages.at(-1)!.ts))
   }
 
   private async escalate(reason: string): Promise<void> {
@@ -1191,6 +1411,51 @@ export class AnimaLife extends Service {
       },
       execute: async () => ({ ended: true }),
     }), { effect: 'internal', sessions: ['conversation'], closes: true })
+
+    // The inbox (DESIGN §5, Phase 9): what waited while she slept or was paused.
+    core.registerBehavior(defineTool({
+      name: 'inbox_read',
+      description: 'Read the messages that arrived while you were asleep or paused, per chat, with the times they were sent. They stay in the inbox until you answer them with inbox_answer or that chat writes again.',
+      parameters: {
+        channel: { type: 'string', description: 'Optional channel key, to read one chat only.' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { lines: { type: 'array', items: { type: 'string' }, required: true, description: 'One line per chat, then one per message.' } } },
+        render: (_args, value) => [{ type: 'text', text: value.lines.length === 0 ? '收件箱是空的。' : value.lines.join('\n') }],
+      },
+      execute: async (args) => {
+        const entries = this.inbox.entries().filter(entry => args.channel === undefined || args.channel === '' || entry.key === args.channel)
+        const lines = entries.flatMap(({ key, channel, messages }) => [
+          `${channel.display} — channel "${key}"，${messages.length} 条：`,
+          ...messages.map(m => `  ${formatLocal(m.ts)} ${m.sender.displayName}${m.sender.isOwner ? '（主人）' : ''}${m.messageId === undefined ? '' : ` [msg ${m.messageId}]`}${m.addressed === true ? ' 叫你' : ''}: ${m.text}`),
+        ])
+        return { lines }
+      },
+    }), { effect: 'observe', sessions: ['self'] })
+
+    core.registerBehavior(defineTool({
+      name: 'inbox_answer',
+      description: 'Hand one chat\'s held messages to that chat, so you answer them there: they arrive as one burst marked as received while you slept, and that conversation decides what to say. It is a reply, not a new conversation. Messages you do not hand over stay unanswered.',
+      parameters: {
+        channel: { type: 'string', required: true, description: 'Channel key of the chat, as shown in your inbox.' },
+        note: { type: 'string', description: 'Optional note from your inner life to that conversation (what you want to keep in mind).' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { handed: { type: 'integer', required: true, description: 'How many messages went to that chat.' } } },
+        render: (_args, value) => [{ type: 'text', text: `${value.handed} 条消息交给了那个聊天。` }],
+      },
+      execute: async (args) => {
+        const key = args.channel
+        const channel = this.router.channel(key)
+        if (channel === undefined) throw new AnimaError('anima/unknown-channel', `没有「${key}」这个地方。`)
+        const heldWhy = this.inbox.why(key)
+        const held = this.inbox.take(key)
+        if (held.length === 0) throw new AnimaError('anima/inbox-empty', `收件箱里没有 ${channel.display} 的消息（可能那个聊天已经又找过你了）。`)
+        this.ctx.anima.recordActivity({ type: 'inbox-release', channel: key, reason: 'answer', count: held.length, ...args.note === undefined ? {} : { note: args.note } })
+        await this.deliverOne({ type: 'burst', channel, messages: held, held: held.length, heldWhy, note: args.note, ts: held.at(-1)!.ts }, {}, true)
+        return { handed: held.length }
+      },
+    }), { effect: 'express', sessions: ['self'], target: args => typeof args.channel === 'string' ? args.channel : undefined })
   }
 
   private statusPart(): Record<string, unknown> {
@@ -1204,6 +1469,7 @@ export class AnimaLife extends Service {
       counts,
       intents: [...intents.pending, ...intents.active].map(i => ({ id: i.id, display: i.display })),
       outboxHeld: this.outbox.list().length,
+      inbox: this.inbox.entries().map(({ key, channel, messages }) => ({ key, display: channel.display, count: messages.length, first: messages[0]!.ts, last: messages.at(-1)!.ts })),
       groupsToday: this.file.groups[core.dayKey()] ?? {},
       sessions: {
         self: this.router.selfId,
@@ -1220,6 +1486,8 @@ export class AnimaLife extends Service {
       `Next heartbeat: ${nextHeartbeatAt === undefined ? 'not scheduled' : formatLocal(nextHeartbeatAt)}${this.file.awaitingSelfRest ? ' (Self is acting)' : ''}`,
       `Heartbeats ${counts.heartbeats}, acted ${counts.acts}, rests ${counts.rests}, intents ${counts.intents}`,
       `Pending intents: ${[...intents.pending, ...intents.active].map(i => `${i.id} → ${i.display}`).join(', ') || 'none'}`,
+      `Inbox: ${this.inbox.entries().map(({ channel, messages }) => `${channel.display} ${messages.length} (last ${formatLocal(messages.at(-1)!.ts)})`).join(', ') || 'empty'}`,
+      `Settle window: ${this.config.conversation.settleSeconds} s quiet, at most ${this.config.conversation.settleMaxSeconds} s; waiting: ${[...this.settling].map(([key, e]) => `${key} (${e.messages.length}${e.typing > 0 ? `, typing ${e.typing}` : ''})`).join(', ') || 'none'}`,
       `Group triage: window ${this.config.groupTriage.windowSeconds} s, attention ${this.config.groupTriage.attentionSeconds} s (in it: ${[...this.attention].filter(([, until]) => until > Date.now()).map(([key]) => key).join(', ') || 'none'}); open buffers ${this.triage.open().map(b => `${b.channelKey} (${b.messages})`).join(', ') || 'none'}; undecided batches ${this.triage.undecided().map(b => b.id).join(', ') || 'none'}`,
       ...Object.entries(this.file.groups[core.dayKey()] ?? {}).map(([key, g]) => `  ${key} today: wakes ${g.direct} direct + ${g.triage} triage${g.attention === undefined ? '' : ` + ${g.attention} attention`}; batches ${g.batches} (remember ${g.remember}, ignore ${g.ignore}, fallback ${g.fallback})`),
       `Outbox: delay ${this.config.outbox.delaySeconds} s, offline hold ${this.config.outbox.offlineHoldMinutes} min; held ${this.outbox.list().map(m => `${m.id} → ${m.display}${m.offlineSince === undefined ? '' : ' (waiting for its platform)'}`).join(', ') || 'none'}`,

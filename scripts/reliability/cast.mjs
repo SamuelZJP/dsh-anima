@@ -21,5 +21,7 @@ export const GROUPS = [
   { id: '40004', name: '同学群' },
 ]
 
-export const CHECK_DIR = '~/.anima/check-p8d'
-export const CHARACTER = 'anima-check-p8d'
+// Each run gets its own data dir and character: ANIMA_CHECK=check-p9b node scripts/reliability/make-overlay.mjs
+const RUN = process.env.ANIMA_CHECK ?? 'check-p9'
+export const CHECK_DIR = `~/.anima/${RUN}`
+export const CHARACTER = `anima-${RUN}`

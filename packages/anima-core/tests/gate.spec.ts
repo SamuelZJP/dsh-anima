@@ -66,7 +66,7 @@ describe('decide', () => {
   it('gives a hint she can act on', () => {
     const verdict = decide(call('local_say', say, self), open_policy, book)
     expect(verdict.allowed).toBe(false)
-    if (!verdict.allowed) expect(verdict.hint).toContain('conversation')
+    if (!verdict.allowed) expect(verdict.hint).toContain('聊天')
   })
 })
 
@@ -82,7 +82,7 @@ describe('quotas', () => {
     }
     const third = decide(call('local_say', say, localChat, T0 + 2 * 60_000), policy, book)
     expect(third).toMatchObject({ allowed: false, code: GateCode.overQuota })
-    if (!third.allowed) expect(third.hint).toContain('next slot in about 8 min')
+    if (!third.allowed) expect(third.hint).toContain('大约 8 分钟后才行')
     // The first call ages out at minute 10.
     expect(decide(call('local_say', say, localChat, T0 + 10 * 60_000 + 1), policy, book).allowed).toBe(true)
   })

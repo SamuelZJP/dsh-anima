@@ -5,7 +5,7 @@
  * @module @anima/life/stimulus
  */
 
-import { channelKey, placeName, type ChannelRef } from '@anima/core'
+import { channelKey, formatLocal, placeName, type ChannelRef } from '@anima/core'
 import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
@@ -53,6 +53,27 @@ export type Stimulus =
      * she spoke there (DESIGN §5, §6).
      */
     readonly via?: { readonly kind: 'triage'; readonly reason: string } | { readonly kind: 'attention' } | undefined
+  }
+  | {
+    /**
+     * Several chat messages handed to her at once (DESIGN §5, "Bursts and the
+     * inbox", Phase 9): a settled private burst, a group burst, an addressed
+     * group message with the buffered messages before it, or messages held in
+     * her inbox. One logged arrival with one answer line; she answers the whole.
+     */
+    readonly type: 'burst'
+    readonly channel: PublishedChannel
+    /** Messages in time order; the newest is last. */
+    readonly messages: readonly Extract<Stimulus, { type: 'message' }>[]
+    /** How many of the first messages arrived while she slept or was paused (from the inbox). */
+    readonly held?: number | undefined
+    /** Why it was held: asleep or paused. */
+    readonly heldWhy?: 'asleep' | 'paused' | undefined
+    /** Self's note when she answers from the inbox (`inbox_answer`). */
+    readonly note?: string | undefined
+    /** Why an unaddressed group burst wakes her (attention window, triage). */
+    readonly via?: { readonly kind: 'triage'; readonly reason: string } | { readonly kind: 'attention' } | undefined
+    readonly ts: number
   }
   | {
     /**
@@ -156,6 +177,7 @@ export function wakes(stimulus: Stimulus): boolean {
 export function route(characterId: string, stimulus: Stimulus, selfGeneration = 1, conversationGeneration = 1): Route {
   switch (stimulus.type) {
     case 'message':
+    case 'burst':
     case 'channel-event':
     case 'intent': {
       const key = channelKey(stimulus.channel)
@@ -208,6 +230,8 @@ export function stimulusText(stimulus: Stimulus): string {
       if (via?.kind === 'attention') return `${line}\n（这条没有叫你；你刚在这个群里说过话，所以它直接到了你这里。）`
       return line
     }
+    case 'burst':
+      return burstText(stimulus)
     case 'channel-event':
       return `[${placeName(stimulus.channel)}] [事件] ${stimulus.text}（只是上下文，不需要回答。）`
     case 'group-batch':
@@ -233,6 +257,51 @@ export function stimulusText(stimulus: Stimulus): string {
   }
 }
 
+/** `HH:mm` of a time on her clock, with the date when it is not the day of `ref`. */
+function timeOf(t: number, ref: number): string {
+  const text = formatLocal(t)
+  return text.slice(0, 10) === formatLocal(ref).slice(0, 10) ? text.slice(11) : text.slice(5)
+}
+
+/**
+ * The burst format (DESIGN §5): who sent how many, then each message with its
+ * time and id, oldest first. Messages from her inbox are marked as arrived
+ * while she slept or was paused.
+ * @returns e.g. `[QQ 私聊「Sam」] Sam（主人）发来 3 条：\n  08:01 [msg 1] 在吗\n…`.
+ */
+export function burstText(stimulus: Extract<Stimulus, { type: 'burst' }>): string {
+  const { channel, messages } = stimulus
+  const last = messages.at(-1)?.ts ?? stimulus.ts
+  const counts = new Map<string, { name: string; count: number }>()
+  for (const message of messages) {
+    const name = `${message.sender.displayName}${message.sender.isOwner ? '（主人）' : ''}`
+    const entry = counts.get(message.sender.platformUserId) ?? { name, count: 0 }
+    entry.count += 1
+    counts.set(message.sender.platformUserId, entry)
+  }
+  const who = [...counts.values()].map(({ name, count }) => `${name} ${count} 条`).join('，')
+  const group = channel.kind === 'group'
+  const head = `[${placeName(channel)}] ${counts.size === 1 && !group ? `${[...counts.values()][0]!.name}发来 ${messages.length} 条` : `${messages.length} 条消息（${who}）`}：`
+  const held = stimulus.held ?? 0
+  const lines = messages.map((message, index) => {
+    const label = group ? senderLabel(message) : message.messageId === undefined ? '' : `[msg ${message.messageId}]`
+    const call = group && message.addressed === true ? ' 叫你' : ''
+    const mark = index < held ? `（${stimulus.heldWhy === 'paused' ? '暂停时收到' : '你睡着时收到'}）` : ''
+    const who = label === '' ? '' : `${label}${call}${group ? ':' : ''}`
+    return `  ${[`${timeOf(message.ts, last)}${mark}`, who, message.text].filter(part => part !== '').join(' ')}`
+  })
+  const notes: string[] = []
+  // Held messages reach her only once she can act again; say so, so she does not answer as if still asleep.
+  const now = stimulus.heldWhy === 'paused' ? '主人已经让你继续了' : '你现在已经醒了'
+  if (held > 0) notes.push(held === messages.length ? `（这些是${stimulus.heldWhy === 'paused' ? '主人让你暂停时' : '你睡着时'}收到的，发送时间如上；${now}。）` : `（前 ${held} 条是${stimulus.heldWhy === 'paused' ? '暂停时' : '你睡着时'}收到的；${now}。）`)
+  if (group && messages.some(m => m.addressed === true)) notes.push('（群里所有人都会看到你的回答。）')
+  const via = stimulus.via
+  if (via?.kind === 'triage') notes.push(`（没有人叫你；是你在扫视群聊时决定来看看${via.reason === '' ? '' : `，你的理由：${via.reason}`}。）`)
+  if (via?.kind === 'attention') notes.push('（你刚在这个群里说过话，所以这些直接到了你这里。）')
+  if (stimulus.note !== undefined && stimulus.note !== '') notes.push(`（你在内心里想的：${stimulus.note}）`)
+  return [head, ...lines, ...notes].join('\n')
+}
+
 /**
  * The "how to answer here" line of a waking conversation arrival (DESIGN §5),
  * from her actual tools.
@@ -253,6 +322,7 @@ export function stimulusSummary(stimulus: Stimulus): string {
     case 'notice': return `Notice: ${stimulus.text}`
     case 'heartbeat': return stimulus.to === 'triage' ? 'Heartbeat' : 'Heartbeat: acting'
     case 'intent': return `Intent: ${stimulus.intent}`
+    case 'burst': return `${stimulus.messages.length} messages in ${stimulus.channel.display}${stimulus.held === undefined || stimulus.held === 0 ? '' : ` (${stimulus.held} from the inbox)`}`
     case 'consolidate': return 'Consolidating memories'
     case 'channel-event': return `Event in ${stimulus.channel.display}: ${stimulus.text}`
     case 'group-batch': return `Group batch ${stimulus.batch}: ${stimulus.channel.display}`

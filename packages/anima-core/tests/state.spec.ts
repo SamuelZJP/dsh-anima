@@ -7,7 +7,7 @@ import { billableTokens, Ledger } from '../src/ledger.ts'
 import { GoalStore } from '../src/goals.ts'
 
 const at = (text: string) => new Date(text).getTime()
-const rhythm = resolveRhythm({ wake: '07:30', sleep: '23:30', wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
+const rhythm = resolveRhythm({ wake: '07:30', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
 const model: StateModel = {
   needs: DEFAULT_NEEDS,
   energy: { drainPerHour: 0.04, perTurn: 0.03, restorePerHour: 0.15 },
@@ -65,7 +65,7 @@ describe('rhythm', () => {
   })
 
   it('handles a sleep time after midnight', () => {
-    const late = resolveRhythm({ wake: '09:00', sleep: '01:00', wakingMinutes: 30, evening: '19:00', windDownMinutes: 30 })
+    const late = resolveRhythm({ wake: '09:00', bedtime: { earliest: '23:00', latest: '01:00', wokenMinutes: 30 }, wakingMinutes: 30, evening: '19:00', windDownMinutes: 30 })
     expect(phaseAt(at('2026-11-10T00:45'), late)).toBe('winding-down')
     expect(phaseAt(at('2026-11-10T01:30'), late)).toBe('asleep')
     expect(phaseAt(at('2026-11-10T23:00'), late)).toBe('evening')
@@ -84,8 +84,8 @@ describe('rhythm', () => {
   })
 
   it('rejects a rhythm that does not fit', () => {
-    expect(() => resolveRhythm({ wake: '07:30', sleep: '07:30', wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/anima\/config-invalid/)
-    expect(() => resolveRhythm({ wake: '7h', sleep: '23:30', wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/rhythm.wake/)
+    expect(() => resolveRhythm({ wake: '07:30', bedtime: { earliest: '07:30', latest: '07:30', wokenMinutes: 30 }, wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/anima\/config-invalid/)
+    expect(() => resolveRhythm({ wake: '7h', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/rhythm.wake/)
   })
 })
 
@@ -159,7 +159,7 @@ describe('ledger', () => {
 describe('config defaults', () => {
   it('fills Phase 2 defaults', () => {
     const config = resolveConfig({})
-    expect(config.rhythm).toMatchObject({ wake: '07:30', sleep: '23:30', evening: '18:00' })
+    expect(config.rhythm).toMatchObject({ wake: '07:30', bedtime: { earliest: '22:30', latest: '00:30', wokenMinutes: 30 }, evening: '18:00' })
     expect(config.modes.day).toMatchObject({ minIntervalMinutes: 20, maxIntervalMinutes: 240, tokenBudget: 300_000, triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
     expect(config.modes.night).toMatchObject({ maxWakes: 1, allowedEffects: ['observe', 'internal'] })
     expect(config.initiate).toEqual({ perDay: 3, quietHours: [], consent: { owner: true, channels: [] } })

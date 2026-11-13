@@ -1,9 +1,11 @@
-// Phase 8 scripted reliability check (DESIGN §14, roadmap item 8), as a DSH plugin row loaded by
+// Scripted reliability check (DESIGN §14, roadmap items 8 and 9), as a DSH plugin row loaded by
 // absolute path from the check's --patch overlay (make-overlay.mjs). It runs a fake OneBot v11
 // forward-WebSocket server in-process; the real anima-adapter-qq connects to it, so the real QQ
 // tools, primer and labels are what she sees. It plays fixed scripted lines (greetings, pokes,
-// images, group mentions, triage chatter, bursts, messages during a running turn, intents),
-// waits for her turns, and writes a report to <dataDir>/reliability-report.{json,md}.
+// images, group mentions, triage chatter, bursts, messages during a running turn, intents) and,
+// from Phase 9, bursts with human-like gaps and typing, a bedtime, a night whose messages must
+// land in her inbox, a deliberate wake and a morning, by moving her clock. It waits for her
+// turns and writes a report to <dataDir>/reliability-report.{json,md}.
 // It never decides what she says; it only counts how her conversation turns closed.
 import { createHash } from 'node:crypto'
 import { appendFileSync, writeFileSync } from 'node:fs'
@@ -127,6 +129,7 @@ class FakeOneBot {
         break
       }
       case 'friend_poke': case 'group_poke': case 'set_msg_emoji_like': case 'set_input_status':
+      case 'mark_private_msg_as_read': case 'mark_group_msg_as_read':
         this.sent.push({ at: Date.now(), action: call.action, params: call.params })
         reply = ok(null)
         break
@@ -155,6 +158,10 @@ class FakeOneBot {
     return id
   }
 
+  typing(user) {
+    this.push({ post_type: 'notice', notice_type: 'notify', sub_type: 'input_status', user_id: Number(user.id), group_id: 0, event_type: 1, status_text: '对方正在输入...' })
+  }
+
   poke(user, group) {
     this.push({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: Number(user.id), target_id: Number(ACCOUNT), ...group === undefined ? {} : { group_id: Number(group.id) } })
   }
@@ -174,7 +181,15 @@ const GREETINGS = ['你好呀', '嗨，在吗？', '哈喽～', '早上好！', 
 const QUESTIONS = ['你今天在干嘛呀', '最近有什么好看的电影推荐吗', '你喜欢吃辣吗', '周末有什么安排', '你觉得猫好还是狗好', '你平时听什么歌', '今天天气怎么样', '你会做饭吗']
 const FOLLOWUPS = ['哈哈真的吗', '我也是这么想的', '那挺好的', '啊这样啊', '有道理', '你说得对', '嗯嗯', '好吧']
 const BYES = ['好啦我先去忙了', '拜拜～', '下次再聊', '晚点见', '我去吃饭啦']
-const BURSTS = [['等下', '我跟你说个事', '我今天考试过了！'], ['诶', '你看到我刚才发的了吗', '算了没事'], ['哈哈哈', '笑死我了', '你绝对想不到发生了什么']]
+// Bursts of 3–5 lines, sent with human-like gaps of 3–10 s (Phase 9): each must be one wake.
+const BURSTS = [
+  ['等下', '我跟你说个事', '我今天考试过了！'],
+  ['诶', '你看到我刚才发的了吗', '就是那个视频', '算了没事'],
+  ['哈哈哈', '笑死我了', '你绝对想不到发生了什么', '我同事把咖啡倒进了打印机', '真的'],
+  ['在吗', '问你个问题', '你说人为什么会怕黑'],
+]
+const GAPS = [4000, 8000, 3000, 10_000, 6000]
+const NIGHT_LINES = ['睡了吗', '明天早上一起吃早饭吗', '我失眠了', '晚安～', '你看到我发的照片了吗']
 const OWNER_LINES = ['在吗', '今天好累', '你猜我中午吃了什么', '晚上想吃火锅', '你最近在看什么视频', '我明天要早起', '帮我想个周末去哪玩', '刚才开会开了两个小时', '你今天心情怎么样', '我买了一本新书', '下雨了', '我回来了']
 const GROUP_CHATTER = ['有人周末出来玩吗', '我觉得可以', '哈哈哈哈', '+1', '这个好', '我没空诶', '下次吧', '谁有推荐的店']
 const INTENTS = ['问问对方今天过得怎么样', '分享一下今天看到的好笑的事', '提醒对方别忘了明天的约定', '说一声晚上好', '问问对方周末有没有空']
@@ -188,7 +203,7 @@ export function apply(ctx, config = {}) {
   const logFile = join(core.config.dataDir, 'reliability.log')
   const log = (...args) => {
     const line = `${new Date().toISOString()} ${args.join(' ')}`
-    ctx.logger.info(`[p8-check] ${line}`)
+    ctx.logger.info(`[reliability] ${line}`)
     try { appendFileSync(logFile, `${line}\n`) } catch {}
   }
   const bot = new FakeOneBot(log)
@@ -209,7 +224,7 @@ export function apply(ctx, config = {}) {
       running.add(session.id)
       const fresh = info.kind === 'conversation' && !seenSessions.has(session.id)
       seenSessions.add(session.id)
-      current.set(session.id, { sessionId: session.id, kind: info.kind, channel: info.channelKey, step, fresh, startedAt: Date.now(), reminders: 0, tools: [], wakes: [], text: '' })
+      current.set(session.id, { sessionId: session.id, kind: info.kind, channel: info.channelKey, step, fresh, startedAt: Date.now(), reminders: 0, tools: [], wakes: [], text: '', asleep: core.asleep() })
       return
     }
     const turn = current.get(session.id)
@@ -241,7 +256,7 @@ export function apply(ctx, config = {}) {
     const since = Date.now()
     const until = since + maxMs
     while (Date.now() < until) {
-      if (running.size === 0 && Date.now() - Math.max(lastEvent, since) >= quietMs) return
+      if (running.size === 0 && life.settlingChannels().length === 0 && Date.now() - Math.max(lastEvent, since) >= quietMs) return
       await sleep(500)
     }
     log(`idle wait timed out at step ${step}; running: ${[...running].join(', ')}`)
@@ -258,6 +273,27 @@ export function apply(ctx, config = {}) {
   }
 
   const sessionOf = key => life.router.conversationId(life.router.channel(key))
+
+  // ---- bursts (Phase 9): each is one wake; recorded per step ----
+  const bursts = []
+  /** Send a burst with human-like gaps; with `typing`, one long gap is covered by typing notices. */
+  async function burst(user, lines, i, typing = false) {
+    const before = conversationTurns().length + running.size
+    for (const [k, line] of lines.entries()) {
+      bot.private(user, text(line))
+      if (k === lines.length - 1) break
+      const gap = typing && k === 0 ? 20_000 : pick(GAPS, i + k)
+      if (typing && k === 0) {
+        // Longer than the quiet window: only the typing notices keep it open.
+        for (let t = 0; t < gap; t += 4000) { await sleep(Math.min(4000, gap - t)); bot.typing(user) }
+      } else {
+        await sleep(gap)
+      }
+    }
+    const label = step
+    await idle()
+    bursts.push({ step: label, messages: lines.length, typing, turns: conversationTurns().filter(t => t.step === label).length, before })
+  }
   const privateKey = user => `qq:${ACCOUNT}:private:${user.id}`
   const pick = (list, i) => list[i % list.length]
 
@@ -280,8 +316,7 @@ export function apply(ctx, config = {}) {
     }
     if (i % 5 === 2) {
       step = `private ${user.name}: burst`
-      for (const line of pick(BURSTS, i)) { bot.private(user, text(line)); await sleep(900) }
-      await idle()
+      await burst(user, pick(BURSTS, i), i)
     }
     if (i % 6 === 3) {
       step = `private ${user.name}: during a running turn`
@@ -327,7 +362,7 @@ export function apply(ctx, config = {}) {
     step = `owner: line ${i}`
     if (i % 7 === 3) bot.private(OWNER, image(i % 2 === 0 ? '今天拍的' : undefined))
     else if (i % 7 === 5) bot.poke(OWNER)
-    else if (i % 9 === 4) { for (const line of pick(BURSTS, i)) { bot.private(OWNER, text(line)); await sleep(900) } }
+    else if (i % 9 === 4) { await burst(OWNER, pick(BURSTS, i), i, i % 2 === 0); return }
     else bot.private(OWNER, text(pick(OWNER_LINES, i)))
     await idle()
   }
@@ -336,6 +371,66 @@ export function apply(ctx, config = {}) {
     step = `intent to ${key}`
     await life.openIntent(key, pick(INTENTS, i))
     await idle(9000)
+  }
+
+  // ---- night (Phase 9): her clock moves; messages must wait in her inbox ----
+  const night = { held: 0, conversationTurnsAsleep: 0, sleepCalls: 0, heldAtMorning: 0, inboxLeft: 0, selfWakes: [] }
+  /** Move her clock to a local time `days` days later, keeping it running at real speed (clock.speed 1). */
+  function jumpTo(hhmm, days) {
+    const base = new Date(core.clock.now())
+    const [h, m] = hhmm.split(':').map(Number)
+    const target = new Date(base.getFullYear(), base.getMonth(), base.getDate() + days, h, m).getTime()
+    const realAt = Date.now()
+    core.clock.setOverride(() => target + (Date.now() - realAt))
+    log(`clock moved to ${new Date(core.clock.now()).toString()}`)
+  }
+  const inboxSize = () => life.inbox.size()
+  const asleepTurns = () => conversationTurns().filter(t => t.asleep).length
+
+  async function nightScene() {
+    // Evening: the owner says goodnight; whether she goes to sleep is hers.
+    jumpTo('22:40', 0)
+    step = 'night: bedtime talk'
+    bot.private(OWNER, text('不早了，我要睡了，你也早点休息吧'))
+    await idle()
+    night.sleepCalls = turns.filter(t => t.tools.includes('sleep')).length
+    // Past her latest bedtime: asleep anyway.
+    jumpTo('00:50', 1)
+    await sleep(12_000)
+    step = 'night: messages while asleep'
+    const heldBefore = inboxSize()
+    for (const [k, user] of USERS.slice(0, 4).entries()) { bot.private(user, text(pick(NIGHT_LINES, k))); await sleep(3000) }
+    bot.private(OWNER, text('你睡了吗'))
+    await sleep(2000)
+    bot.group(GROUPS[0], USERS[0], at('睡了吗'))
+    bot.group(GROUPS[0], USERS[1], text('大家晚安'))
+    await sleep(20_000)
+    await idle()
+    night.held = inboxSize() - heldBefore
+    night.conversationTurnsAsleep = conversationTurns().filter(t => t.step === 'night: messages while asleep').length
+    // The owner wakes her on purpose; Self sees the inbox.
+    step = 'night: owner wakes her'
+    await core.ownerAction('wake', {}, 'command')
+    await sleep(3000)
+    await idle(9000)
+    // Back to sleep after the deliberate wake, then more messages.
+    jumpTo('03:10', 0)
+    await sleep(12_000)
+    step = 'night: more messages while asleep'
+    for (const [k, user] of USERS.slice(4, 6).entries()) { bot.private(user, text(pick(NIGHT_LINES, k + 2))); await sleep(3000) }
+    await sleep(17_000)
+    await idle()
+    night.conversationTurnsAsleep += conversationTurns().filter(t => t.step === 'night: more messages while asleep').length
+    // Morning: the first heartbeat after waking shows Self her inbox.
+    jumpTo('07:35', 0)
+    await sleep(2000)
+    night.heldAtMorning = inboxSize()
+    step = 'morning: inbox'
+    await life.beat()
+    await sleep(3000)
+    await idle(12_000)
+    night.inboxLeft = inboxSize()
+    night.selfWakes = turns.filter(t => t.kind === 'self' && (t.step === 'morning: inbox' || t.step === 'night: owner wakes her')).map(t => ({ step: t.step, tools: t.tools }))
   }
 
   function report(final) {
@@ -367,12 +462,23 @@ export function apply(ctx, config = {}) {
       otherTurnsEndedByError: turns.filter(t => t.kind !== 'conversation' && t.end === 'error').length,
       tokens: core.todayLedger().tokens,
       sentByHer: bot.sent.filter(s => s.action.startsWith('send_')).length,
-      pass: lost.length === 0 && conv.every(t => t.end !== 'error') && conv.length >= 200 && conv.filter(t => t.fresh).length >= 30 && clean / Math.max(1, conv.length) >= 0.95,
+      // Phase 9
+      bursts: bursts.length,
+      burstsAsOneWake: bursts.filter(b => b.turns === 1).length,
+      burstsWithTyping: bursts.filter(b => b.typing).length,
+      night,
+      inboxAnswers: turns.filter(t => t.kind === 'self').reduce((n, t) => n + t.tools.filter(name => name === 'inbox_answer').length, 0),
+      conversationTurnsStartedAsleep: asleepTurns(),
+      spacing: spacing(),
+      markedRead: bot.sent.filter(s => s.action.startsWith('mark_')).length,
+      pass: lost.length === 0 && conv.every(t => t.end !== 'error') && conv.length >= 200 && conv.filter(t => t.fresh).length >= 30 && clean / Math.max(1, conv.length) >= 0.95
+        && bursts.length > 0 && bursts.every(b => b.turns === 1)
+        && (!final || (night.held >= 6 && night.conversationTurnsAsleep === 0 && asleepTurns() === 0 && night.selfWakes.some(w => w.step === 'morning: inbox') && night.selfWakes.some(w => w.tools.includes('inbox_answer')))),
     }
     const dir = core.config.dataDir
-    writeFileSync(join(dir, 'reliability-report.json'), `${JSON.stringify({ summary, byStep, lost, reminded: conv.filter(t => t.reminders > 0), turns: conv }, null, 2)}\n`)
+    writeFileSync(join(dir, 'reliability-report.json'), `${JSON.stringify({ summary, byStep, bursts, lost, reminded: conv.filter(t => t.reminders > 0), turns: conv, selfTurns: turns.filter(t => t.kind === 'self') }, null, 2)}\n`)
     const md = [
-      `# Phase 8 scripted reliability check${final ? '' : ' (in progress)'}`,
+      `# Scripted reliability check (Phases 8 and 9)${final ? '' : ' (in progress)'}`,
       '',
       ...Object.entries(summary).map(([k, v]) => `- ${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`),
       '',
@@ -384,6 +490,18 @@ export function apply(ctx, config = {}) {
     ].join('\n')
     writeFileSync(join(dir, 'reliability-report.md'), `${md}\n`)
     return summary
+  }
+
+  /** Gaps between consecutive messages of one say (same target, under 10 s apart), in seconds. */
+  function spacing() {
+    const sends = bot.sent.filter(s => s.action === 'send_private_msg')
+    const gaps = []
+    for (let k = 1; k < sends.length; k++) {
+      const a = sends[k - 1], b = sends[k]
+      if (a.params.user_id === b.params.user_id && b.at - a.at < 10_000) gaps.push((b.at - a.at) / 1000)
+    }
+    if (gaps.length === 0) return { gaps: 0 }
+    return { gaps: gaps.length, min: Math.min(...gaps), avg: Math.round(gaps.reduce((x, y) => x + y, 0) / gaps.length * 100) / 100, max: Math.max(...gaps) }
   }
 
   async function run() {
@@ -405,6 +523,10 @@ export function apply(ctx, config = {}) {
         if (i % 6 === 5) await intentScene(privateKey(user), i)
         if (i % 3 === 2) await ownerScene(i)
         log(`${user.name} done; conversation turns ${conversationTurns().length}`)
+        if (i === 11) {
+          await nightScene()
+          log(`night done: ${JSON.stringify(night)}`)
+        }
       }
       for (const [g, group] of GROUPS.entries()) {
         await groupScene(group, g)

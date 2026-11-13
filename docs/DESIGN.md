@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-11 (Phase 7 built; Phase 8 designed) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-13 (Phase 9 done; formal test `formal-2` next) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -35,6 +35,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 7. **In-process and plugin-shaped.** Everything runs inside DSH as Cordis plugins. Registrations are effects, so unloading a platform removes its behaviors and stimuli cleanly.
 8. **Model-visible means logged.** Following DSH's rule, anything injected into her context is a session event and can be replayed.
 9. **Simplest first.** Anything non-core is done the simplest way first and improved only when it hurts.
+10. **Limits are part of her world, not walls she meets (Phase 9).** A state she cannot act in (asleep, paused) does not wake her; what arrives then waits for her. States that are hers, such as sleep, are hers to enter and are explained to her before she meets them. The gate stays the backstop, and its refusals speak in her world's terms. Before Phase 9 a message at night woke her, she decided to answer, and the gate told her she was asleep; she reasoned "the owner is awake now at 5am … but I'm asleep per system config".
 
 ## 3. Core concepts
 
@@ -110,8 +111,8 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 
 | Stimulus | Source | Routed to | Wakes a turn? |
 | --- | --- | --- | --- |
-| `message` (private) | Adapter | Conversation session of that channel | Yes |
-| `message` (group) | Adapter | Group's conversation session | Only after group triage (below) |
+| `message` (private) | Adapter | Conversation session of that channel | Yes, once the chat settles (section 6); asleep or paused, it goes to her inbox (below) |
+| `message` (group) | Adapter | Group's conversation session | Only after group triage (below); an addressed one goes to her inbox while she is asleep or paused |
 | `channel-event` (recalled message) | Adapter | Conversation session, only if it exists | No; context for the next turn |
 | `mention` / `reply-to-her` / `poke` | Adapter (a group message marked `addressed`; a poke is a message `[pokes you]`) | Conversation session | Yes |
 | `platform-event` (new follower, comment reply, friend request) | Adapter (`animaLife.note`) | Self session's report | Batched, at next heartbeat |
@@ -156,6 +157,20 @@ Code states the facts of each arrival; she decides what to do with them. No arri
 | Channel event | Context only; it needs no answer and wakes nothing. |
 | Local | The owner reads this chat in the web UI; only `local_say` counts as speech there too. |
 | Bilibili (Self only) | She can watch; nobody there sees her; she cannot speak there. |
+| Burst (Phase 9) | One block for everything that settled together: who sent how many ("Sam 发来 3 条："), then each message with its time and id. One closing line for the whole block. |
+| From the inbox (Phase 9) | The same block, marked as having arrived while she slept or was paused ("你睡着时收到"), with the times they were sent. |
+
+### Bursts and the inbox (Phase 9)
+
+Every group of messages she is handed at once uses one format, the **burst**: a settled private burst, a group burst in the attention window, an addressed group message with the buffered context before it, and the messages held in her inbox. She answers the whole burst however she likes: one message, several, a quote of one, a reaction, or nothing. Through Phase 8 each message carried its own "reply here" line and only the last one woke her, which read as one message, one reply.
+
+**Inbox.** While she is asleep or paused, chat messages that would wake a conversation (private messages, addressed group messages, the owner's messages) do not wake her. They go to her inbox, `<dataDir>/inbox.json`, per channel, so it survives a restart:
+- Unaddressed group chatter does not go to the inbox. It is remembered by the group buffer as before (section 5, "Group triage"), without a model call.
+- Notices for Self that would wake it (owner notices from the page, platform notices) wait for her first report after she wakes.
+- The adapter does not mark held messages as read, so the sender sees what they would see with a sleeping person.
+- When she wakes (or the owner resumes her after a pause), her first report sums up the inbox per channel ("收件箱：Sam 3 条（最后 01:12），测试群 @你 1 条"). In Self she reads it with `inbox_read(channel?)` and answers a chat with `inbox_answer(channel, note?)`: the held messages go to that conversation as one burst marked "你睡着时收到", and that conversation answers. It is a reply, not a new conversation, so it uses no initiate budget and needs no consent. Messages she does not answer stay unanswered; that is her choice.
+- A channel's held messages leave the inbox when she answers from it, or when that chat wakes her again: they then join that burst, marked with their times. An intent toward that channel carries them the same way. Nothing expires on a timer.
+- The owner can **wake her on purpose** (`/anima wake`, or a button on the Anima page). She is told "主人把你叫醒了", her mode becomes day until she sleeps again, and the inbox is in her report. Nobody else can wake her, and messaging her never does.
 
 ### Group triage
 
@@ -168,7 +183,7 @@ Group messages are buffered per group for a short window, then one cheap classif
   - `group_pass(batch, remember, reason?)`: `remember: true` keeps the lines only in her transcript with the group scope, so consolidation turns them into `group:` memories; `false` drops them
 - **Attention window (Phase 8).** For a short time after she speaks in a group, its messages wake her directly and skip the buffer (section 6, "Turn shape").
 - **Limits stay in the gate.** A default quota `group_wake` 6 per hour per channel caps triage wakes; the `channel` counter uses the behavior's `target` (the batch's group).
-- **Fallbacks never wake.** No decision within `groupTriage.timeoutSeconds` (default 300), or a turn that ends without one, means remember. At night, while paused, or over the token budget the batch is remembered without a model call.
+- **Fallbacks never wake.** No decision within `groupTriage.timeoutSeconds` (default 300), or a turn that ends without one, means remember. At night, while paused, or over the token budget the batch is remembered without a model call. Addressed group messages at night or while paused go to her inbox instead of waking her (Phase 9).
 - `life.json` keeps per-day, per-group counters (direct and triage wakes, batches, outcomes, fallbacks); `/anima status` shows today's.
 
 **Test channels (`anima-adapter-local`, dev only):** `/anima chat [--as <name>] [--in group:<id>] <text>` speaks as another person (a private chat `local:owner:private:<name>`) or in a simulated group (`local:owner:group:<id>`). In a simulated group, a message that contains her name counts as addressed. The test channels are kept in `<dataDir>/local/channels.json`.
@@ -216,6 +231,8 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `self_note(text)` (self-model), `self_feel(adjustments)` (state), `goals_*`.
 - `schedule_create` / `schedule_edit` (DSH built-ins) — her own alarms.
 - `rest(until?)` — end the current turn and suggest the next heartbeat time (triage and Self).
+- `sleep(note?)` — go to sleep now, inside the owner's bedtime window (section 7); Self and conversations. It closes the turn, so in a chat she says goodnight first with `more: true`. Effect `internal` (Phase 9).
+- `inbox_read(channel?)` and `inbox_answer(channel, note?)` — Self only: look at what waited while she slept or was paused, and hand one chat's held messages to that conversation to answer (section 5). `inbox_read` is `observe`; `inbox_answer` is `express`, a reply, so it uses no initiate budget (Phase 9).
 - `heartbeat_act(reason)` — triage only, by day: wake the Self session to act.
 - `group_wake(batch, reason)`, `group_pass(batch, remember, reason?)` — group-triage session only (section 5).
 - `viewing_note(note)` — viewing session only: her note on a close view; it ends the viewing (section 11).
@@ -235,7 +252,9 @@ A conversation turn is a run of actions that closes with an action. Plain text n
 - **A lost reply is recorded, never repaired.** If she still does not close, the turn ends, the activity log records a lost reply for that channel, and the Anima page shows it. Nothing is auto-forwarded.
 - **What code enforces:** that a turn closes by an action, the reminders, and the count. **What she chooses:** whether to speak, what to say, how many messages, a gesture instead, or nothing.
 - **Message timing is code's job.** surfcore let her wait for messages with a tool inside the turn; that costs extra model steps after a tool result (where her text habit showed), many rules, and long-open turns. Anima gets the same effects by moving messages, and she still decides whether to answer:
-  - **Settle window.** A private message wakes her only after `conversation.settleSeconds` of real time with no further message in that chat (default 4; 0 turns it off), so a burst arrives as one wake. An intent is not delayed.
+  - **Settle window.** A private message wakes her only after `conversation.settleSeconds` of real time with no further message in that chat (default 15 from Phase 9, 4 before; 0 turns it off), so a burst arrives as one wake. `conversation.settleMaxSeconds` (default 60) after the first message she is woken anyway, so a long stream does not hold her forever. An intent is not delayed. In the Phase 8 supervised hour the 4 s window merged messages once: people take longer than 4 s to type the next line, so each message was its own turn, and one sent a second after her reply got its own answer ("嗯？我在呢").
+  - **Typing keeps the window open (Phase 9, if the runtime reports it).** Where the platform reports that the other person is typing (NapCat's `notify/input_status` notice, private chats only; confirmed in NapCat's source at 4.18.42, DSH-INTEGRATION §8h), each notice restarts the quiet timer, still within `settleMaxSeconds`. Without it, the quiet timer alone applies. In the Phase 9 supervised session NapCat delivered no such notice although the owner typed (typing count 0), so on her runtime the quiet timer alone applies; the handling stays for runtimes that send it.
+  - **The same window for addressed group messages (Phase 9).** An @, a reply to her or the owner in a group also waits for the group to settle, with the buffered messages before it in the same burst.
   - **Arrivals during a turn** join the running turn as its next step instead of starting a new one. A closing say does not drop them: DSH runs one more step for them.
   - **Group attention window.** After she speaks in a group, messages in that group wake her directly for `groupTriage.attentionSeconds` (default 90, real time), skipping triage; before Phase 8 a reply to her without an @ waited in the triage buffer and could be passed over. These wakes count against a gate quota like triage wakes.
 - **No wait-for-messages tool yet.** Only a tool gives her the choice of how long to stay attentive ("he is mid-story"). It is later work, optional for her and never a required part of a turn, once the reliability check passes. The turn shape already allows it: a say with `more: true`, then wait, then a say or `end_turn`.
@@ -245,6 +264,8 @@ A conversation turn is a run of actions that closes with an action. Plain text n
   - `TurnCloser` in `anima-life` marks a turn open when a waking arrival joins it and closed when a closing call succeeds. At DSH's `agent/turn-stopping` it steers the reminder, or records the lost reply. A turn that ends in a model error (or out of tokens) while still open is a lost reply too; an abort (owner cancel, pause) is not.
   - Quotas never count or refuse a behavior that only closes the turn and does nothing else (`end_turn`, `rest`, `group_pass`, `viewing_note`): in the first scripted run the daily ceiling refused `end_turn`, and a spent quota became a lost reply. For the same reason a pause refuses every behavior except these closers, so a turn paused mid-way can still end with `end_turn` instead of becoming a false lost reply. Reminders and lost replies are activity records; the Status and Activity tabs show them, and `/anima status` counts them.
   - Chat messages are delivered with DSH's `steer`, so they join a running turn or start one; intents keep their own turn. The settle window also holds unaddressed group messages in the attention window, so a group burst is one wake. Each such wake asks the gate first (`anima.admit('group_attention', channel)`, its own quota, default 10 per hour per group); over the quota the burst goes to group triage.
+  - **Bursts are one arrival (Phase 9).** A settled burst is delivered as one logged message in the burst format (section 5), not as context messages followed by a waking one.
+- **Spacing between her messages (Phase 9).** Through Phase 8 the messages of one say (`text`, then each of `also`) went out back to back. Now, before each message after the first, the adapter waits a typing time from that message's length: `pacing.baseSeconds` (default 1) plus `pacing.perCharSeconds` (default 0.15) per character, capped at `pacing.maxSeconds` (default 6). In private chats QQ shows "typing" during the wait. A message that arrives meanwhile does not stop the rest; it opens the next window. The pacing is a shared helper in `anima-life` that each adapter calls with its own settings; the local channel uses no pacing. It only times messages she already chose.
 
 The same rule already holds elsewhere by other tools: triage ends with `rest` or `heartbeat_act`, group triage with `group_wake` or `group_pass`, a viewing with `viewing_note`, Self with `rest`.
 
@@ -269,7 +290,7 @@ Autonomy comes from one loop: a heartbeat wakes her with a situation report, she
 - **Needs** are defined in settings, not in code. Each need has a name, a one-line description shown to her, a baseline, an upward drift per hour, and which behaviors satisfy it. Each value is 0–1.
 - **Default set (5):** `connect` (being with people she cares about), `curiosity` (new things), `expression` (making or sharing something), `rest`, `order` (keeping her workspace and memory tidy). This is a compressed version of surfcore's nine needs: `connect` + `care` → `connect`; `learn` + `play` + `consume` + `install` → `curiosity`; `share` + `create` + `identity` → `expression`; `rest` and `order` are new, so she has reasons to stop and to tidy up. The owner can add, remove or retune needs without code changes.
 - **Energy** 0–1: spent by turns, restored by rest and night.
-- **Circadian phase**: `asleep`, `waking`, `day`, `evening`, `winding down`, from her configured day rhythm (e.g. wake 07:30, sleep 23:30).
+- **Circadian phase**: `asleep`, `waking`, `day`, `evening`, `winding down`, from her configured day rhythm (e.g. wake 07:30) and, from Phase 9, the time she actually went to sleep (below, "Bedtime").
 - **Mood**: a few numbers (valence, arousal) that drift back to a baseline. She adjusts them herself with `self_feel` after something happens.
 - **Clock**: all time-based logic (phase, drift, heartbeat timers, quiet hours, daily budgets) reads one injectable clock. `clock.speed` (default 1) speeds it up, and `clock.start` sets a simulated start, so a test day runs in about 1.5 hours.
 - **Her day** runs from one wake to the next; the night belongs to the day before it. Daily budgets reset at wake.
@@ -290,7 +311,7 @@ She creates, updates and closes goals with tools: "finish reading that series", 
 4. `heartbeat_act` escalates: the Self session gets the same report and her reason, on the action model, with complete tools and context. It ends with `rest(until?)`; if it ends without one, the default interval applies.
 5. Outcomes feed back into needs, goals and memory.
 
-Heartbeats are skipped and rescheduled while paused, while the triage or Self session is busy, when the mode's token budget is spent (until the next wake), and at night once the night's wake-up is used.
+A heartbeat is never scheduled past her next wake, so the first heartbeat of the morning, where she sees her inbox, always comes (Phase 9: a night shorter than the day-mode maximum interval was skipped whole in the supervised session). Heartbeats are skipped and rescheduled while paused, while the triage or Self session is busy, when the mode's token budget is spent (until the next wake), and at night once the night's wake-up is used.
 
 ### Day and night
 
@@ -305,6 +326,16 @@ Each mode has its own settings block, so the model and budget can be tuned witho
 | Interval bounds | default 20 min–4 h, she chooses within | default 1 wake per night |
 | Token budget | per day (default 300,000) | per night (default 20,000) |
 | Allowed effect classes | per policy (section 10) | `observe`, `internal` |
+
+**Asleep means unreachable (Phase 9).** While she sleeps, chats do not wake her; their messages wait in her inbox (section 5, "Bursts and the inbox"). What still runs at night: her one night wake-up (rest or consolidate), alarms she set herself, and a deliberate wake by the owner. The night budget therefore pays mostly for consolidation.
+
+**Bedtime (Phase 9).** She chooses when to go to sleep, inside a window the owner sets:
+- Config `day.bedtime: { earliest, latest }` (e.g. 22:30–00:30) replaces the fixed `day.sleep`; `day.wake` stays fixed.
+- From `earliest` on she can call `sleep(note?)` from Self or a chat. Before `earliest` it is refused (`anima/not-bedtime`, in her world's words). Her report shows her energy and, from `winding down` on, when her latest bedtime is.
+- At `latest` she falls asleep anyway, if she is not asleep yet: a running turn finishes first and nothing new wakes her. This keeps the night the owner's rule.
+- Night mode and the night budget start when she sleeps. Sleeping later means fewer sleeping hours, so less energy restored by morning; code only does that arithmetic.
+- `winding down` starts a configured time before `latest`. Heartbeats keep their rule: one moved into the night goes to her wake time.
+- A deliberate wake by the owner makes her awake until she calls `sleep` again or, if past `latest`, until a configured short time (`bedtime.wokenMinutes`, default 30) passes.
 
 ### Example: good morning, without a script
 
@@ -402,7 +433,7 @@ Her personality has three layers with different owners and rates of change, asse
 - **Digest in prompts:** the persona row adds the self-model as a DSH prompt context (`anima-self-model`), a logged snapshot re-sent only when its text changes. Self gets every note with its id; conversation sessions get a short digest (newest first, `selfModel.digestChars`, 600); other session kinds get none. It is framed under the constitution: "Your constitution above always wins over this."
 - **Environment primer (Phase 8).** Through Phase 7 the session rules were one generic English list for every channel; in a QQ chat they named `local_say` as the example. The system prompt now has four parts, in this order:
   1. **Constitution**: who she is.
-  2. **Her world**, the same in every session: she is one person with several places of attention (Self, one conversation per chat, short background ones) that share memory and self-model but not live history; tools are her body, the only thing that touches the world; what the owner's web page is, and that he can review her logs there.
+  2. **Her world**, the same in every session: she is one person with several places of attention (Self, one conversation per chat, short background ones) that share memory and self-model but not live history; tools are her body, the only thing that touches the world; what the owner's web page is, and that he can review her logs there. From Phase 9 also: she sleeps at night and chooses her bedtime inside the owner's window; while she sleeps nothing reaches her and messages wait in her inbox, which she sees when she wakes; messages come to her in bursts, and she answers a burst as a whole, however she likes.
   3. **This place**, generated per session from its channel and her actual tools: where she is and who is here (owner or not; trust levels are not built yet, section 10); how to speak here, what else she can do and what she can look at, grouped by effect class; who sees what; the limits she may meet. Self gets the same for the platforms it can reach.
   4. **Session rules**, cut down to what the first three parts do not cover.
 - **Primer language:** Chinese for parts 2 to 4 and for arrival labels (section 5). She speaks Chinese, and the surfcore wording that held up was Chinese. Tool descriptions stay English until the reliability check says otherwise. One language only is maintained.
@@ -417,7 +448,7 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 ### What the gate checks
 
 1. **Session kind**: the behavior is allowed in this session (e.g. `open_conversation` only from Self).
-2. **Mode**: at night only `observe` and `internal` behaviors run (settable per mode); day-only behaviors such as `heartbeat_act` are refused (`anima/night`).
+2. **Mode**: at night only `observe` and `internal` behaviors run (settable per mode); day-only behaviors such as `heartbeat_act` are refused (`anima/night`). Night is when she actually sleeps (section 7, Bedtime); `sleep` itself is refused before the earliest bedtime (`anima/not-bedtime`).
 3. **Effect class**: `public` and `irreversible` go to approval unless an owner rule whitelists them.
 4. **Quotas and budgets**: per channel, per platform (a rule can match all of one platform's behaviors, e.g. `bili_*` 60 per hour), per day; quota counters persist in `state.json`, so a daily limit survives a restart; the daily token budget (`anima/over-budget`); self-initiated conversations per day (default 3).
 5. **Time**: quiet hours; her own sleep phase (`anima/quiet-hours`).
@@ -427,6 +458,8 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 9. **Group health**: skip unprompted speech in groups dominated by other bots (surfcore's fish-guard idea, as a rule).
 
 A refused call returns a structured reason to her (`code`, `hint`), so she can adapt instead of retrying blindly. DSH shows the model only the deny reason text, so the gate writes it as `<code>: <hint>` and also records `code` in the structured error info for the log and UI.
+
+**Refusals in her world's terms (Phase 9).** Every hint she can meet is Chinese and says what is true in her world, not which effect class failed: for example `anima/over-quota` on a say becomes "这个聊天里你这一小时已经说了很多了，过一会儿再说吧", not "express quota". The code stays in front of it and in the log. Since sleep and pause no longer wake her (principle 10), the mode and pause checks are a backstop she should rarely meet; how often she does is counted. The token budget keeps its Phase 8 behavior: an owner exemption for trusted senders was discussed and set aside (section 14).
 
 ### Approvals
 
@@ -535,15 +568,15 @@ Bilibili is a place she watches, not one where she talks. `anima-adapter-bili` r
 Everything she does is already a DSH session event, so the owner's view is DSH's own session UI, a few owner commands, and (from Phase 6) an Anima page in DSH's web UI.
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
-- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
-- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome), and (Phase 7) every platform going offline or coming back, with the reason, and (Phase 8) every reminder for an unclosed conversation turn and every lost reply, by channel. Recording never decides anything.
+- **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert), and from Phase 9 `/anima wake` (wake her on purpose) and `/anima inbox` (what waits for her).
+- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome), and (Phase 7) every platform going offline or coming back, with the reason, and (Phase 8) every reminder for an unclosed conversation turn and every lost reply, by channel, and (Phase 9) every message held in the inbox, every inbox answer, each time she goes to sleep (by `sleep` or at the latest bedtime) and each deliberate wake. Recording never decides anything.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
 ### Anima page (Phase 6)
 
 An **Anima** entry in the DSH web UI sidebar opens a page with tabs, the same shape as other DSH plugin pages. It is built on the same service methods as the owner commands, so the page and the commands never disagree, and every change it makes goes through the same code paths and is logged.
 
-- **Status**: clock, phase, energy, needs, mood, budgets, next heartbeat; adapter health (QQ connection, Bilibili login and risk control).
+- **Status**: clock, phase, energy, needs, mood, budgets, next heartbeat; adapter health (QQ connection, Bilibili login and risk control). From Phase 9: awake or asleep (and since when), the inbox per channel, and a "wake her" button.
 - **Persona**: edit the constitution; review her self-model diffs and revert them.
 - **Memory**: search and browse by scope, including the archive (section 8); forget an entry.
 - **Goals, approvals and outbox**: list, approve or deny, cancel held messages.
@@ -650,10 +683,17 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Unclosed turns | Up to `conversation.closeReminders` (2) reminders steered into the same turn; then the turn ends and a lost reply is recorded and shown. This replaces hotfix-1's notice after the turn | 6, 12 |
 | Environment primer | System prompt = constitution, her world, this place (generated per session from channel and tools), session rules; arrivals state facts and name how to answer here | 5, 9 |
 | Primer language | Chinese for the primer and arrival labels; tool descriptions stay English; one language maintained | 9 |
-| Message timing (Phase 8) | In code, not a tool: a settle window before a private wake (`conversation.settleSeconds`, 4), arrivals during a turn join that turn, and a group attention window after she speaks (`groupTriage.attentionSeconds`, 90) | 6 |
+| Message timing (Phase 8) | In code, not a tool: a settle window before a private wake (`conversation.settleSeconds`, 4; 15 from Phase 9), arrivals during a turn join that turn, and a group attention window after she speaks (`groupTriage.attentionSeconds`, 90) | 6 |
 | Wait-for-messages tool | Not in Phase 8; later, as an optional tool, once the reliability check passes | 6, 14 |
 | Dropped | `end_conversation` (never built) and `stay_silent` (renamed `end_turn`) | 6 |
 | Speech reliability | Checked before any formal run: 0 lost replies and at least 95 % of turns closed without a reminder, over at least 200 scripted turns on the real model | 14 |
+| Sleep and the inbox (Phase 9) | Asleep or paused, chats do not wake her; their messages wait in a persistent inbox, unread on the platform; her first report after waking sums it up; `inbox_read` and `inbox_answer` in Self; an inbox answer is a reply, not an initiation; only the owner can wake her, on purpose (`/anima wake`, page button). Owner decision 2026-11-12, after a night notice woke her and the gate then refused her | 2, 5, 7 |
+| Bedtime (Phase 9) | She goes to sleep with `sleep` inside the owner's `day.bedtime` window; at the latest bedtime she sleeps anyway; wake time stays fixed (owner decision 2026-11-12) | 6, 7 |
+| Bursts (Phase 9) | Settle window 15 s of quiet, at most 60 s after the first message, kept open while the platform reports typing; addressed group messages use it too; a burst is one arrival in one format, shared by the inbox, and she answers it as a whole (owner decision 2026-11-12) | 5, 6 |
+| Message spacing (Phase 9) | Messages of one say are spaced by a typing time from their length (1 s + 0.15 s per character, at most 6 s), with typing shown in QQ private chats (owner decision 2026-11-12) | 6, 11 |
+| Refusal wording (Phase 9) | Chinese hints in her world's terms; codes stay for the log | 10 |
+| Budget exemption | Exempting turns started by the owner or trusted people from the token budget was discussed and set aside for now; the budget stays as in Phase 8 (owner decision 2026-11-12) | 10, 14 |
+| Phase 9 details | Fixed at the plan step (owner, 2026-11-12): NapCat 4.18.42 reports typing (`notify/input_status`, private chats only) and never marks messages read on its own, so the QQ adapter marks a chat read when it wakes her and held messages stay unread; the first heartbeat after waking with new inbox messages goes straight to Self, not triage; a group's inbox holds only addressed and owner messages; a lone message keeps the single-message format; gate, pause, outbox, approval and inbox refusals are Chinese, tool argument errors stay English; `rhythm.sleep` fails the load with a hint | 5, 6, 7, 10, 11 |
 | Phase 8 details | Fixed at the plan step (owner, 2026-11-12): `group_attention` is its own quota (10 per hour per group, not shared with `group_wake`); the settle window also covers attention-window group bursts; the Self report, memory block and digest stay English this phase; the scripted check opens intents through `animaLife.openIntent`, bypassing Self and the gate, so every line is fixed; the working-directory line stays because the pinned DSH restores it | 6, 9, 14 |
 
 ### Still open
@@ -667,6 +707,7 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 - [ ] **Close-view uptake**: on her own she chose the text tier all day; the close view came after an owner notice. Decide whether the tool description or her report should present the tier more plainly, or whether rare use is right; the formal test measures it.
 - [ ] **Week on QQ**: folded into the formal test (Phase 4 exit).
 - [ ] **Embedding search**: whether full-text search is enough; study it with the formal test's recall data before building anything.
+- [ ] **Budget exemption for trusted senders**: turns started by the owner (or trusted people) not counted against the token budget, with a high safety ceiling, and other senders held in the inbox when the budget is spent. Set aside on 2026-11-12; revisit with the formal test's budget data.
 - [ ] **Production packaging**: today she installs only as a linked checkout (`workspace:*`, unbuilt `lib/` not committed). Not needed for the formal test, which runs in development.
 
 ### Phased roadmap
@@ -685,5 +726,12 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
    - **Formal test plan updated:** a pass criterion "lost replies 0", counted in every observer snapshot.
 
    Status: done. Built 2026-11-12 (code, unit tests, `docs/FORMAL-TEST.md` P10). **Scripted check passed 2026-11-12** (run `check-p8d`, DeepSeek-Flash, 56 min): 211 conversation turns, 35 fresh first turns, 211 closed without a reminder (100 %), 0 lost replies, 0 errored turns; 193 closed by `qq_say`, 18 by `end_turn`; 166k billable tokens. Two earlier runs failed and led to fixes: `end_turn` refused by the daily ceiling (now quota-exempt), and unquoted strings under a string-or-list `text` that ended 47–88 turns in `MALFORMED_RESPONSE` and were not counted (now `text` + `also`, and errored open turns are lost replies). **Supervised QQ hour passed 2026-11-12** (run `p8-qq`, her real account, owner chatting privately and in the test group; her clock set to day): 25 conversation turns, all completed, 26 `qq_say`, 0 reminders, 0 lost replies. It changed one thing: a say now costs one quota unit, not one per message (her multi-message answers spent the owner chat's 30-per-hour quota in eight replies). **Phase 8 done 2026-11-12.**
-9. **Formal test — 7 days in development.** Run `formal-2`, after Phase 8. In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above. Plan: `docs/FORMAL-TEST.md` (draft until the owner approves it).
-10. **Later.** More Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; an optional wait-for-messages tool (section 6); dreaming; production packaging and deployment.
+9. **Phase 9 — Sleep, inbox and message rhythm.** Designed 2026-11-12 from the owner's experience in the Phase 8 supervised hour: at night she was woken and then refused, and she answered message by message, with her messages sent back to back. Principle 10; the inbox and bursts (section 5); `sleep` and the bedtime window (section 7); the longer settle window, typing, addressed group messages and message spacing (section 6); refusals in her world's terms (section 10); the owner's wake, inbox view and status (section 12). Before building: confirm whether the pinned NapCat reports input status in private chats, and whether it marks incoming messages read on its own. Exit, all of:
+   - **Unit tests** for the inbox (hold, persist, summary, answer, release on wake), bedtime (window, latest, deliberate wake), settle timing (quiet, cap, typing) and message spacing.
+   - **Scripted check** (Phase 8's harness, rerun): Phase 8's speech criteria still hold (0 lost replies, at least 95 % closed without a reminder, at least 200 turns), plus night scenarios (messages at night wake no conversation and land in the inbox; she reads and answers it in the morning) and burst scenarios (a burst of 3–5 messages with human-like gaps is one wake).
+   - **Supervised QQ session** with the owner: a burst answered as a whole, messages sent while she sleeps answered after she wakes, one bedtime she chooses herself, a deliberate wake, and visibly spaced messages.
+   - **Formal test plan updated** with inbox and bedtime measures, and the run moved after Phase 9.
+
+   Status: built 2026-11-12 (code, 328 unit tests, `docs/FORMAL-TEST.md` P11 and the formal-2 changes). NapCat 4.18.42 checked from source (DSH-INTEGRATION §8h); a 15-minute passive probe saw no `input_status` because nobody typed, so live typing is left to the supervised session. **Scripted check passed 2026-11-13** (run `check-p9`, DeepSeek-Flash, 93 min): 210 conversation turns, 35 fresh first turns, 100 % closed without a reminder, 0 lost replies, 0 errored turns, 135k billable tokens; 8 of 8 bursts one wake; at night 6 messages held and 0 conversation turns started, she chose her own bedtime, and the owner wake and the morning heartbeat each answered the inbox from Self (8 `inbox_answer`, inbox left empty); message gaps 1.45–6.0 s. **Supervised QQ session 2026-11-13** (run `p9-qq`, her real account, owner in the private chat and the test group; her clock 22:20, bedtime window 22:30–23:00, wake 23:40, 20-minute owner wake): a 3-message burst was one wake and answered as a whole; her 2-message says went out about 3 s apart; 11 messages delivered, 10 sent, 0 lost replies, 1 reminder (the answer to the burst was first written as text). At 23:00 she fell asleep at the latest bedtime: she said "我再撑一小会儿" and did not call `sleep`, so a bedtime she chose herself was not shown live (the scripted check shows it). A private message and a group @ at night were held, woke nothing and stayed unread; the owner's wake from the page went to Self, which handed both to their chats, and both answered. Two more messages after she fell asleep again were answered from Self at the first heartbeat after her wake. NapCat delivered no `input_status` notice all session (typing count 0) although the owner typed, so typing does not keep the window open on this runtime; the quiet timer alone did. In the morning she answered the held messages as if it were still night ("睡了睡了") and tried `sleep`, which the gate refused with "主人定的最早上床时间是 22:30" — true, but read at 23:46 it looks wrong to her; the compressed clock (wake 6 minutes before the messages' 23:36 timestamps) made this likelier than a real night would. Two fixes followed: messages handed over from the inbox now end with "你现在已经醒了" ("主人已经让你继续了" after a pause), and the `anima/not-bedtime` hint names her day: "还不到睡觉的时候：你今天 07:30 才起床，主人定的最早上床时间是今晚 22:30。". **Retry 2026-11-13** (run `p9-qq-2`, her clock 22:25, bedtime 22:30–23:00, wake 23:20): the owner kept her company after 22:30 and at 22:46, after "不行！马上睡觉去！", she said goodnight with `qq_say` (`more: true`) and called `sleep` herself (note "主人催着去睡了，乖乖听话。"). Four messages at 22:47 were held and woke nothing. Her morning heartbeat did not come: she had rested at 22:26 for 4 h, to 02:26 of her next day, which the scheduler kept because that time is day in the compressed rhythm, so the whole night was skipped. Fixed: no heartbeat is scheduled past her next wake (section 7, unit test). The owner action `heartbeat` then ran the morning heartbeat by hand: Self read the inbox and handed the 4 messages over, and she answered awake ("谁是大肥鱼啊，我才刚睡着就被你叫醒了" / "说好的让我睡呢，还在那儿一条一条地试"), with no attempt to sleep. 0 lost replies, 0 reminders in the retry. 329 unit tests after the fixes. **Phase 9 done 2026-11-13.**
+10. **Formal test — 7 days in development.** Run `formal-2`, after Phase 9. In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above. Plan: `docs/FORMAL-TEST.md` (draft until the owner approves it).
+11. **Later.** The budget exemption for trusted senders (set aside 2026-11-12); more Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; an optional wait-for-messages tool (section 6); dreaming; production packaging and deployment.

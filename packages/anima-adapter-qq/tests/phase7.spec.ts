@@ -397,3 +397,44 @@ describe('duplicate replies', () => {
     expect(report.match(/You responded in Sam \(QQ\) at .* \(qq_say\); that conversation already handled what came in there\./g)).toHaveLength(1)
   })
 })
+
+describe('Phase 9: typing keeps the window open, spaced messages, read marks', () => {
+  const typing = (userId: string, text = '对方正在输入...') => ({ post_type: 'notice', notice_type: 'notify', sub_type: 'input_status', user_id: Number(userId), group_id: 0, event_type: 1, status_text: text })
+
+  it('keeps a private burst waiting while NapCat reports that the owner types', async () => {
+    const { ctx, host, server } = await setup({}, { conversation: { settleSeconds: 0.12, settleMaxSeconds: 3 } })
+    server.push(privateMessage(OWNER, [{ type: 'text', data: { text: '我跟你说' } }]))
+    for (let i = 0; i < 5; i++) {
+      await new Promise(resolve => setTimeout(resolve, 70))
+      server.push(typing(OWNER))
+    }
+    expect(host.inbox(ownerSession)).toEqual([])
+    server.push(privateMessage(OWNER, [{ type: 'text', data: { text: '今天好好笑' } }]))
+    await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
+    expect(host.inbox(ownerSession)[0]).toMatch(/Sam（主人）发来 2 条：\n.*我跟你说\n.*今天好好笑/)
+    expect(ctx.anima.statusText()).toContain('Settle window: 0.12 s quiet, at most 3 s')
+  })
+
+  it('spaces the messages of one say by a typing time, showing typing in private chats', async () => {
+    const { ctx, host, server } = await setup({ pacing: { baseSeconds: 0.05, perCharSeconds: 0.01, maxSeconds: 1 } })
+    server.respond('set_input_status', () => null)
+    server.push(privateMessage(OWNER, [{ type: 'text', data: { text: 'hi' } }]))
+    await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
+    const started = Date.now()
+    const said = await callAs(ctx, ownerSession, 'qq_say', { text: '在的', also: ['刚醒', '你呢'] })
+    expect(said.isError).toBe(false)
+    // Two waits of 0.05 + 0.02 s.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(130)
+    expect(server.callsOf('send_private_msg').map(c => (c.params as { message: { data: { text: string } }[] }).message.at(-1)!.data.text)).toEqual(['在的', '刚醒', '你呢'])
+    expect(server.callsOf('set_input_status')).toHaveLength(2)
+  })
+
+  it('marks a chat read when it wakes her, and leaves messages held at night unread', async () => {
+    const { host, server } = await setup({}, {}, { clock: { speed: 1, start: '2026-11-11T02:00' } })
+    server.respond('mark_private_msg_as_read', () => null)
+    server.push(privateMessage(OWNER, [{ type: 'text', data: { text: '睡了吗' } }]))
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(host.inbox(ownerSession)).toEqual([])
+    expect(server.callsOf('mark_private_msg_as_read')).toEqual([])
+  })
+})
