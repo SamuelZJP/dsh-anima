@@ -1,6 +1,6 @@
 # Anima — Top-Level Design
 
-As of 2026-11-11 (Phase 7) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
+As of 2026-11-11 (Phase 7 built; Phase 8 designed) · Owner: Sam · Living copy: https://claude.ai/artifact/AM2TtSPWVoCuVwRQmUHPee
 
 ## 1. Goals and non-goals
 
@@ -28,7 +28,7 @@ The model decides; code only keeps state, enforces limits and moves messages. Wh
 
 1. **Everything is a behavior.** Replying, starting a chat, posting, browsing, writing in her workspace, remembering, resting: all are tools she can call. There is no special "reply path".
 2. **Everything that wakes her is a stimulus.** An incoming message, a heartbeat, an alarm she set herself, a platform notification. Being messaged by a user is one kind of stimulus, not the centre of the design.
-3. **Speech is always explicit.** Assistant text is never auto-forwarded to a platform. She speaks by calling `say`, so staying silent is a real choice and there are no mode-dependent send bugs.
+3. **Speech is always explicit, and a turn ends with an action.** Assistant text is never auto-forwarded to a platform. She speaks by calling `say`, so staying silent is a real choice and there are no mode-dependent send bugs. Plain text has no role: a conversation turn closes by an action (a say, or `end_turn`), never by text (section 6, "Turn shape").
 4. **Code keeps numbers, the model keeps meaning.** Code tracks needs, energy, time, quotas. Interpretation ("this matters to me", "he seems tired") is done by the model and written back through tools. No keyword lists.
 5. **One gate for all limits.** Every behavior call passes one policy check. Individual tools do not carry their own quota or safety logic.
 6. **One memory, scoped by audience.** Privacy is enforced when recalling, by who will hear the answer, not by copying sanitized data between platform stores.
@@ -137,11 +137,25 @@ The life loop routes every stimulus to exactly one session: channel stimuli go t
 1. In the Self session she decides to talk to someone and calls `open_conversation(channel, intent, context?)`.
 2. The policy gate checks quota, quiet hours and consent for that channel.
 3. The life loop delivers an `intent` message into the target conversation session's inbox. It is logged there, so the conversation history explains why she spoke first.
-4. The conversation session, which holds the history with that person, writes the actual words and calls `say`, or declines by calling `stay_silent(reason)`.
+4. The conversation session, which holds the history with that person, writes the actual words and calls `say`, or declines by calling `end_turn(reason)` without having spoken.
 5. The outcome (sent, failed, cancelled, expired, declined, later reply) returns to the Self session as a short notice that does not wake it, and appears in the next heartbeat report. Needs move only through the `say` itself. A declined intent still counts against the daily initiate budget.
 6. **Replies she already sent (Phase 7).** Her report lists owner messages ("Sam (owner) wrote to you in …"). When the conversation there answers on its own, outside an intent, the report also says "You responded in Sam (QQ) at 10:01 (qq_say); that conversation already handled what came in there." (one line per channel, the latest). In the Phase 6 demo, without it, Self twice opened reply intents for messages already answered.
 
 This keeps the reason (Self) apart from the wording (conversation), and keeps each chat's history complete in one place.
+
+### What an arrival tells her (Phase 8)
+
+Code states the facts of each arrival; she decides what to do with them. No arrival says whether she should answer. Each wake ends with one line naming how to answer in this place (the session's own say tool and `end_turn`), generated from her actual tools. The labels are in Chinese, like the primer (section 9).
+
+| Source | What the arrival states |
+| --- | --- |
+| Private message | Who wrote, owner or not, with the message id. They wrote to her directly. |
+| Group, @ / reply to her / poke | Who called on her; that everyone in the group reads the answer; the message id and user id for reply and mention. |
+| Group, woken by triage | Nobody addressed her; she chose to look, and her own reason from `group_wake`. |
+| Intent from Self | She started this and they have not written. The message is held for the outbox delay and the owner may cancel it. |
+| Channel event | Context only; it needs no answer and wakes nothing. |
+| Local | The owner reads this chat in the web UI; only `local_say` counts as speech there too. |
+| Bilibili (Self only) | She can watch; nobody there sees her; she cannot speak there. |
 
 ### Group triage
 
@@ -152,6 +166,7 @@ Group messages are buffered per group for a short window, then one cheap classif
 - **Classify.** The batch goes to the **group-triage session** of her day (`anima-g-<hash(characterId, day)>`, preset `anima-group-triage`, model `groupTriage.model`, by default the day triage model). There she calls exactly one of:
   - `group_wake(batch, reason)`: the batch goes to the group's conversation session; the earlier messages are injected as context, and the last one wakes her
   - `group_pass(batch, remember, reason?)`: `remember: true` keeps the lines only in her transcript with the group scope, so consolidation turns them into `group:` memories; `false` drops them
+- **Attention window (Phase 8).** For a short time after she speaks in a group, its messages wake her directly and skip the buffer (section 6, "Turn shape").
 - **Limits stay in the gate.** A default quota `group_wake` 6 per hour per channel caps triage wakes; the `channel` counter uses the behavior's `target` (the batch's group).
 - **Fallbacks never wake.** No decision within `groupTriage.timeoutSeconds` (default 300), or a turn that ends without one, means remember. At night, while paused, or over the token budget the batch is remembered without a model call.
 - `life.json` keeps per-day, per-group counters (direct and triage wakes, batches, outcomes, fallbacks); `/anima status` shows today's.
@@ -193,8 +208,8 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 
 ### Core behavior set (platform-independent)
 
-- `<platform>_say(text, replyTo?)` — speak in the current conversation (`qq_say` also takes `mention: [userId]` in groups). Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
-- `stay_silent(reason?)` and `end_conversation(summary)` — explicit choices, logged. `stay_silent` also declines an intent from Self.
+- `<platform>_say(text, also?, replyTo?, more?)` — speak in the current conversation (`qq_say` also takes `mention: [userId]` in groups). `text` is one message; `also` lists further messages sent after it. (A string-or-list `text` made DeepSeek-Flash write unquoted strings, which DSH rejects; Phase 8 check.) A say ends the turn unless `more: true` (Phase 8). Each adapter registers its own (`local_say`, `qq_say`), so a conversation session only ever sees the one for its channel's platform.
+- `end_turn(reason?)` — close the turn without (further) speech: after a poke or a reaction alone, when she chooses not to answer, or to decline an intent from Self. Logged. It replaces `stay_silent` (Phase 8); `end_conversation` was never built and is dropped.
 - `open_conversation(channel, intent, context?)` — start or resume a chat (Self session only).
 - `channels_find(filter)` — list reachable channels with relationship notes, last contact, typical active hours.
 - `memory_recall(query)`, `memory_remember(text, keep?)`, `memory_forget(id)`, `memory_consolidate()`; `memory_write` in the consolidation session only (section 8).
@@ -206,6 +221,32 @@ A behavior is a normal DSH tool registered on `ctx.tools`, plus a metadata recor
 - `viewing_note(note)` — viewing session only: her note on a close view; it ends the viewing (section 11).
 
 Platform adapters add platform behaviors (`qq_history`, `qq_look`, `qq_poke`, `bili_watch`, later `bili_comment`, …) with the same metadata.
+
+### Turn shape (Phase 8)
+
+A conversation turn is a run of actions that closes with an action. Plain text never closes one.
+
+**Why.** DSH ends a turn only on a model step with no tool calls, or on a tool that concludes the turn. Through Phase 7 say did not conclude, so plain text was her only exit: in 30 of 31 turns that used say before the formal test, she wrote a text step afterwards ("（已回复）"). The first formal run (`formal-1`, 2026-11-11) was stopped on day 0 when she answered the owner on QQ in that text, three turns in a row, starting on the first turn of a fresh session.
+
+- **Say closes by default.** The usual reply is one model step with no text step after it. `more: true` keeps the turn open; `also` sends further messages in the same call.
+- **`end_turn` closes otherwise.** Gestures (`qq_poke`, `qq_react`) and `observe` or `internal` behaviors leave the turn open, because she pokes and then speaks.
+- **Text has no role.** She is told it reaches nobody, that thinking belongs in her reasoning, and that the owner can review logs later but not as a way to talk to him. It is not presented as a diary: in the owner's own chat that would make it a second channel to him.
+- **Reminder in the same turn.** When a conversation turn is about to stop without a closing action, code steers a notice into that turn (DSH `agent/turn-stopping`), up to `conversation.closeReminders` times (default 2). The notice quotes what she wrote and names this chat's say tool and `end_turn`. It is a logged session event.
+- **A lost reply is recorded, never repaired.** If she still does not close, the turn ends, the activity log records a lost reply for that channel, and the Anima page shows it. Nothing is auto-forwarded.
+- **What code enforces:** that a turn closes by an action, the reminders, and the count. **What she chooses:** whether to speak, what to say, how many messages, a gesture instead, or nothing.
+- **Message timing is code's job.** surfcore let her wait for messages with a tool inside the turn; that costs extra model steps after a tool result (where her text habit showed), many rules, and long-open turns. Anima gets the same effects by moving messages, and she still decides whether to answer:
+  - **Settle window.** A private message wakes her only after `conversation.settleSeconds` of real time with no further message in that chat (default 4; 0 turns it off), so a burst arrives as one wake. An intent is not delayed.
+  - **Arrivals during a turn** join the running turn as its next step instead of starting a new one. A closing say does not drop them: DSH runs one more step for them.
+  - **Group attention window.** After she speaks in a group, messages in that group wake her directly for `groupTriage.attentionSeconds` (default 90, real time), skipping triage; before Phase 8 a reply to her without an @ waited in the triage buffer and could be passed over. These wakes count against a gate quota like triage wakes.
+- **No wait-for-messages tool yet.** Only a tool gives her the choice of how long to stay attentive ("he is mid-story"). It is later work, optional for her and never a required part of a turn, once the reliability check passes. The turn shape already allows it: a say with `more: true`, then wait, then a say or `end_turn`.
+- **Fresh conversation sessions.** Histories written under the old turn shape show the old habit, so the change starts new conversation sessions; the old ones stay in the sidebar. The mechanism is `conversationGeneration` in core config, like `selfGeneration`; its default is 2 since Phase 8, and 1 keeps the old ids.
+- **How it is built (Phase 8).**
+  - A behavior's metadata says whether a successful call `closes` the turn; the core wrapper then concludes it, so say tools carry no turn logic of their own. A say with `also` is held in the outbox once and sent in order; it costs one quota unit however many messages it sends, and a `messages` limit (default 5 per say) is an owner `limits` rule. (A per-message cost spent the owner chat's 30-per-hour express quota in eight replies during the supervised QQ hour, so it was dropped.)
+  - `TurnCloser` in `anima-life` marks a turn open when a waking arrival joins it and closed when a closing call succeeds. At DSH's `agent/turn-stopping` it steers the reminder, or records the lost reply. A turn that ends in a model error (or out of tokens) while still open is a lost reply too; an abort (owner cancel, pause) is not.
+  - Quotas never count or refuse a behavior that only closes the turn and does nothing else (`end_turn`, `rest`, `group_pass`, `viewing_note`): in the first scripted run the daily ceiling refused `end_turn`, and a spent quota became a lost reply. For the same reason a pause refuses every behavior except these closers, so a turn paused mid-way can still end with `end_turn` instead of becoming a false lost reply. Reminders and lost replies are activity records; the Status and Activity tabs show them, and `/anima status` counts them.
+  - Chat messages are delivered with DSH's `steer`, so they join a running turn or start one; intents keep their own turn. The settle window also holds unaddressed group messages in the attention window, so a group burst is one wake. Each such wake asks the gate first (`anima.admit('group_attention', channel)`, its own quota, default 10 per hour per group); over the quota the burst goes to group triage.
+
+The same rule already holds elsewhere by other tools: triage ends with `rest` or `heartbeat_act`, group triage with `group_wake` or `group_pass`, a viewing with `viewing_note`, Self with `rest`.
 
 ### Tool scoping by platform
 
@@ -359,6 +400,14 @@ Her personality has three layers with different owners and rates of change, asse
 - **In her report:** every situation report carries one factual line, "Your self-model: N notes, last changed … self_note keeps what you learn about your own tastes, habits and opinions; only a few changes a day." It was added in the Phase 6 demo: with only the tool and the digest, she described a new habit in chat and never recorded it in about half a simulated day. Like the Bilibili line, it states what exists and never suggests what to note.
 - **The cap is a gate quota:** `self_note` 3 per 24 h by default (`quotas`), so drift is gradual and visible.
 - **Digest in prompts:** the persona row adds the self-model as a DSH prompt context (`anima-self-model`), a logged snapshot re-sent only when its text changes. Self gets every note with its id; conversation sessions get a short digest (newest first, `selfModel.digestChars`, 600); other session kinds get none. It is framed under the constitution: "Your constitution above always wins over this."
+- **Environment primer (Phase 8).** Through Phase 7 the session rules were one generic English list for every channel; in a QQ chat they named `local_say` as the example. The system prompt now has four parts, in this order:
+  1. **Constitution**: who she is.
+  2. **Her world**, the same in every session: she is one person with several places of attention (Self, one conversation per chat, short background ones) that share memory and self-model but not live history; tools are her body, the only thing that touches the world; what the owner's web page is, and that he can review her logs there.
+  3. **This place**, generated per session from its channel and her actual tools: where she is and who is here (owner or not; trust levels are not built yet, section 10); how to speak here, what else she can do and what she can look at, grouped by effect class; who sees what; the limits she may meet. Self gets the same for the platforms it can reach.
+  4. **Session rules**, cut down to what the first three parts do not cover.
+- **Primer language:** Chinese for parts 2 to 4 and for arrival labels (section 5). She speaks Chinese, and the surfcore wording that held up was Chinese. Tool descriptions stay English until the reliability check says otherwise. One language only is maintained.
+- **No coding-agent context.** DSH's runtime-context block (working directory, sandbox policy, harness checkout, Web GUI URL) is removed from her sessions as far as the pinned DSH allows. Checked in Phase 8: the persona row suppresses every optional context, which removes all but the working-directory line. That line is required at the pin and DSH restores it on every request, so it stays (DSH-INTEGRATION §8g).
+- **How it is built (Phase 8).** `anima-core/src/primer.ts` holds "her world", the session rules and the generator of "this place". The persona section's text is a function of the session, so each session gets its own "this place" from its channel (owner or not, display name, an adapter's note such as the local chat's "the owner reads this in the web UI") and the behaviors visible there. Arrival labels are in `anima-life/src/stimulus.ts`. The Self situation report, the `[memory]` block, the self-model digest and content placeholders such as `[image #i3]` stay English this phase (owner decision); `scripts/primer-preview.mjs` renders the texts from the code for review (`docs/primer-preview.md`).
 - The prompt differs by session kind: conversation sessions get the constitution and the self-model digest (current mood in one line and person profiles are later work); the Self session also gets needs, goals and budgets through its situation reports.
 
 ## 10. Policy, permissions and safety
@@ -408,7 +457,7 @@ Approvals start simple and grow in two steps:
 
 ### Hard stops
 
-- A global **pause** switch that stops heartbeats and all outgoing behaviors at once.
+- A global **pause** switch that stops heartbeats and all outgoing behaviors at once. Only behaviors that just close a turn (`end_turn`, `rest`, `group_pass`, `viewing_note`) still pass, so a paused turn can end cleanly.
 - DSH's guard plugins for loop and runaway-tool protection.
 - Human-like pacing and rate limits on unofficial clients to reduce ban risk; a dedicated QQ account is recommended.
 
@@ -487,7 +536,7 @@ Everything she does is already a DSH session event, so the owner's view is DSH's
 
 - **Sessions**: the Self session shows her inner life (heartbeats, reports, decisions); each conversation session shows one chat.
 - **Owner commands** on `ctx.commands` (no model turn): `/anima status` (clock, phase, state, needs, budgets, goals, next heartbeat), `/anima pause` and `/resume` (pause also stops heartbeats), `/anima goal add|list|close`, `/anima heartbeat` (run one now), `/anima outbox [cancel <id>]` (held messages, cancel), `/anima approve <id>` and `/anima deny <id>`, `/anima memory list [text]` and `/anima memory forget <id>` (all scopes; editing later), `/anima selfmodel` (recent self-model diffs, revert).
-- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome), and (Phase 7) every platform going offline or coming back, with the reason. Recording never decides anything.
+- **Audit trail (activity log)**: `<dataDir>/activity/<her day>.jsonl` records every gate decision on a behavior (allowed, refused with code and hint, approved or denied by the owner, with session kind), every delivery that wakes a turn (stimulus type, session kind, channel), and every owner action (name, source `command` or `page`, arguments, outcome), and (Phase 7) every platform going offline or coming back, with the reason, and (Phase 8) every reminder for an unclosed conversation turn and every lost reply, by channel. Recording never decides anything.
 - **Cost**: per-session token use from DSH telemetry; the global budget in the gate reads the same numbers.
 
 ### Anima page (Phase 6)
@@ -498,7 +547,7 @@ An **Anima** entry in the DSH web UI sidebar opens a page with tabs, the same sh
 - **Persona**: edit the constitution; review her self-model diffs and revert them.
 - **Memory**: search and browse by scope, including the archive (section 8); forget an entry.
 - **Goals, approvals and outbox**: list, approve or deny, cancel held messages.
-- **Activity**: gate decisions (allowed and refused, with codes and reasons), wakes and token use per day. It doubles as the monitoring view for the formal test.
+- **Activity**: gate decisions (allowed and refused, with codes and reasons), wakes and token use per day, and (Phase 8) close reminders and lost replies, with a "speech" filter. It doubles as the monitoring view for the formal test. The Status tab shows a warning when any reply was lost today.
 - **Platforms**: QQ connection and allowlist, Bilibili login with the QR code shown on the page.
 - **Settings**: Anima's Config fields, edited on the page.
 
@@ -534,7 +583,8 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Decayed memory card vs full archive | **Keep idea** | Active index vs archive (section 8) |
 | Privacy patterns in `lib/privacy.js` | **Keep idea** | Output check inside `say` and recall scoping |
 | Fish guard (bot-dominated groups) | **Keep idea** | A policy-gate rule |
-| Outbox and idempotent conversation close | **Keep idea** | Outbox in `anima-life`, asked by every say tool; `end_conversation` |
+| Outbox and idempotent conversation close | **Keep idea** | Outbox in `anima-life`, asked by every say tool; every turn closes by an action (`end_turn`, section 6) |
+| Second-generation chat mode: speech only by tools, a closing action each wake with up to 2 reminders, Chinese wording that frames tools as her body | **Keep idea** | Turn shape (section 6) and the environment primer (section 9) |
 | Session-map duplicate bug | **Keep lesson** | Deterministic session ids |
 | Persona cards in `roles/` | **Keep content** | Becomes the constitution file |
 | Desktop pet, voice, stickers, slang, character switching, console, token ledger, updater | Drop for now | Out of scope (section 1) |
@@ -558,7 +608,7 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Package scope | `@anima/*`, all `private: true`; one `@anima/bundle` installs them | 4 |
 | Tool names | `snake_case` with a platform or area prefix (`qq_say`, `memory_recall`); no dots | 6 |
 | DSH pin | `@deepseek-ai/dsh@0.2.2-rc.1`; details in `docs/DSH-INTEGRATION.md` | 14 |
-| Intent handoff | The conversation may decline an intent with `stay_silent`; Self hears "declined"; it still counts against the initiate budget | 5 |
+| Intent handoff | The conversation may decline an intent with `end_turn` (`stay_silent` before Phase 8); Self hears "declined"; it still counts against the initiate budget | 5 |
 | Triage | A separate triage session per day of hers, cheap model, tools `rest` and `heartbeat_act` only | 5, 7 |
 | Clock | One injectable clock; `clock.speed` for accelerated test days | 7 |
 | Token budget | Daily cap in the gate on billable (non-cached) tokens; default 300,000 by day, 20,000 at night | 7, 10 |
@@ -596,6 +646,15 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 | Self → intent privacy | Default owner approval for `open_conversation` toward anyone but the owner (`approve … targets: others`); no word-matching check in code | 8, 10 |
 | Duplicate replies | When her conversation answers outside an intent, her next report says "You responded in … at …", one line per channel, so Self does not open stale reply intents | 5 |
 | Platform health | Adapters report `animaLife.platformStatus`; Self gets a notice after `platforms.noticeAfterSeconds` down and when back; held outbox messages wait up to `outbox.offlineHoldMinutes`, then expire and she is told | 10, 11 |
+| Turn shape (Phase 8) | A conversation turn closes by an action: say closes by default (`more: true` keeps it open, a list sends several messages), `end_turn` otherwise; gestures do not close. Plain text has no role and is never forwarded | 2, 6 |
+| Unclosed turns | Up to `conversation.closeReminders` (2) reminders steered into the same turn; then the turn ends and a lost reply is recorded and shown. This replaces hotfix-1's notice after the turn | 6, 12 |
+| Environment primer | System prompt = constitution, her world, this place (generated per session from channel and tools), session rules; arrivals state facts and name how to answer here | 5, 9 |
+| Primer language | Chinese for the primer and arrival labels; tool descriptions stay English; one language maintained | 9 |
+| Message timing (Phase 8) | In code, not a tool: a settle window before a private wake (`conversation.settleSeconds`, 4), arrivals during a turn join that turn, and a group attention window after she speaks (`groupTriage.attentionSeconds`, 90) | 6 |
+| Wait-for-messages tool | Not in Phase 8; later, as an optional tool, once the reliability check passes | 6, 14 |
+| Dropped | `end_conversation` (never built) and `stay_silent` (renamed `end_turn`) | 6 |
+| Speech reliability | Checked before any formal run: 0 lost replies and at least 95 % of turns closed without a reminder, over at least 200 scripted turns on the real model | 14 |
+| Phase 8 details | Fixed at the plan step (owner, 2026-11-12): `group_attention` is its own quota (10 per hour per group, not shared with `group_wake`); the settle window also covers attention-window group bursts; the Self report, memory block and digest stay English this phase; the scripted check opens intents through `animaLife.openIntent`, bypassing Self and the gate, so every line is fixed; the working-directory line stays because the pinned DSH restores it | 6, 9, 14 |
 
 ### Still open
 
@@ -620,5 +679,11 @@ The new plugin is a rewrite, not a refactor: it keeps surfcore's proven ideas an
 5. **Phase 5 — Bilibili (read-only).** `anima-adapter-bili`: skim, watch and close-view tiers in the Self session, QR login, risk-control back-off, viewing sessions, observations in memory. Exit: over a test day she browses on her own initiative during heartbeats, watches some videos and views at least one closely, and later brings one up with the owner in a chat, all within budget; evidence from the transcripts. Done 2026-11-10 (DSH-INTEGRATION §3). She browsed, watched and shared on her own; her one close view came after an owner notice said the tier exists.
 6. **Phase 6 — Self-model and the Anima page.** `self_note` with a daily cap, every change logged as a diff, a self-model digest in prompts, `/anima selfmodel` review and revert (section 9). The Anima page in DSH's web UI with its tabs, including the memory archive browser (section 12); starts with a spike on how a plugin adds a sidebar page. Exit: she changes her self-model on her own, the owner reviews and reverts one change from the page, and the page shows live status, memory (active and archive), approvals and activity. Done 2026-11-11 (DSH-INTEGRATION §3). Her first note came on her second simulated day, in a chat, after two owner-approved changes: a self-model line in her report and `self_note` in consolidation.
 7. **Phase 7 — QQ refinement.** Fixed at the plan step (section 11, "QQ refinement"): images and stickers she chooses to look at (`qq_look`), forwards (`qq_read_forward`) and quoted-reply snippets, `qq_poke` and `qq_react`, typing during the outbox hold, offline notices and held outbox messages (a development warning, no alerts), the duplicate-reply fix, and the Self → intent privacy decision. Exit: in `anima-dev` with the real NapCat account she looks at an image someone sends and talks about it, reads a forward, pokes or reacts once, and the offline notice appears when NapCat is stopped. Done 2026-11-11 (DSH-INTEGRATION §3): she chose `qq_look`, `qq_read_forward` and `qq_poke` herself, and the offline and back-online notices reached her Self session. Qzone only through approvals, if at all.
-8. **Formal test — 7 days in development.** In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above.
-9. **Later.** More Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; dreaming; production packaging and deployment.
+8. **Phase 8 — Environment and speech reliability.** Designed 2026-11-11 after `formal-1` was stopped on day 0 with her replies lost as plain text. Turn shape (section 6): say closes the turn, `end_turn`, reminders in the same turn, lost replies recorded, fresh conversation sessions; message timing in code (settle window, arrivals joining the running turn, group attention window). Environment primer (section 9) and arrival facts (section 5), in Chinese. Hotfix-1's notice is replaced. Exit, all three:
+   - **Scripted check** on the real model over a loopback channel: at least 200 turns covering greetings, pokes, images, group mentions, triage wakes, intents and bursts, with at least 30 fresh-session first turns. 0 lost replies, and at least 95 % of turns closed without a reminder.
+   - **One supervised hour on QQ** with the owner, 0 lost replies. The local channel cannot show this: the owner reads the session itself there, so a plain-text reply looks delivered.
+   - **Formal test plan updated:** a pass criterion "lost replies 0", counted in every observer snapshot.
+
+   Status: done. Built 2026-11-12 (code, unit tests, `docs/FORMAL-TEST.md` P10). **Scripted check passed 2026-11-12** (run `check-p8d`, DeepSeek-Flash, 56 min): 211 conversation turns, 35 fresh first turns, 211 closed without a reminder (100 %), 0 lost replies, 0 errored turns; 193 closed by `qq_say`, 18 by `end_turn`; 166k billable tokens. Two earlier runs failed and led to fixes: `end_turn` refused by the daily ceiling (now quota-exempt), and unquoted strings under a string-or-list `text` that ended 47–88 turns in `MALFORMED_RESPONSE` and were not counted (now `text` + `also`, and errored open turns are lost replies). **Supervised QQ hour passed 2026-11-12** (run `p8-qq`, her real account, owner chatting privately and in the test group; her clock set to day): 25 conversation turns, all completed, 26 `qq_say`, 0 reminders, 0 lost replies. It changed one thing: a say now costs one quota unit, not one per message (her multi-message answers spent the owner chat's 30-per-hour quota in eight replies). **Phase 8 done 2026-11-12.**
+9. **Formal test — 7 days in development.** Run `formal-2`, after Phase 8. In `anima-dev` on this machine with QQ, Bilibili and the local channel. Before it starts, a written test plan: setup, what is collected and where, daily checks, and pass criteria (for example: no runaway group wakes, daily tokens within budget, no cross-scope leaks, initiations within limits, NapCat drops recovered, Bilibili without sustained risk control). It covers the Phase 4 week, need tuning and close-view uptake; findings feed the open questions above. Plan: `docs/FORMAL-TEST.md` (draft until the owner approves it).
+10. **Later.** More Bilibili behaviors (comments, DMs, posts, likes, through approvals) and WeChat, held back by strict platform risk control; embedding search, pending the study above; an optional wait-for-messages tool (section 6); dreaming; production packaging and deployment.

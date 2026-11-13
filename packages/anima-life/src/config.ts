@@ -1,5 +1,5 @@
 /**
- * Anima life configuration: group triage and the outbox.
+ * Anima life configuration: conversation turns, group triage, the outbox and platform notices.
  * @module @anima/life/config
  */
 
@@ -8,8 +8,17 @@ import z from '@deepseek-ai/schemastery'
 
 /** Plugin config of `@anima/life`. */
 export interface Config {
+  /** Conversation turns (DESIGN §6, Turn shape). */
+  conversation: {
+    /** Real seconds a private chat must stay quiet before its messages wake her (a burst is one wake); 0 wakes at once. */
+    settleSeconds: number
+    /** Reminders steered into a turn that is about to stop without a closing action, before a lost reply is recorded. */
+    closeReminders: number
+  }
   /** Group triage (DESIGN §5). */
   groupTriage: {
+    /** Real seconds after she spoke in a group during which its messages wake her directly, skipping triage; 0 turns it off. */
+    attentionSeconds: number
     /** Real seconds a group's buffer of unaddressed messages stays open. */
     windowSeconds: number
     /** A buffer with this many messages closes at once. */
@@ -37,7 +46,12 @@ export interface Config {
 
 /** Schemastery schema for {@link Config}. */
 export const Config: z<Config> = z.object({
+  conversation: z.object({
+    settleSeconds: z.number().min(0).default(4).description('Real seconds a chat must stay quiet before its messages wake her, so a burst arrives as one wake; 0 wakes at once. Intents are never delayed.'),
+    closeReminders: z.natural().default(2).description('Reminders steered into a conversation turn that is about to stop without a say or end_turn; after them the turn ends and a lost reply is recorded.'),
+  }).description('Conversation turns: settle window and close reminders.'),
   groupTriage: z.object({
+    attentionSeconds: z.number().min(0).default(90).description('Real seconds after she spoke in a group during which its messages wake her directly (counted by the group_attention quota); 0 turns it off.'),
     windowSeconds: z.number().min(0.01).default(60).description('Real seconds a group\'s buffer of unaddressed messages stays open.'),
     maxBatch: z.natural().min(1).default(30).description('A buffer with this many messages closes at once.'),
     timeoutSeconds: z.number().min(0.01).default(300).description('Real seconds a batch may stay undecided before it is remembered.'),

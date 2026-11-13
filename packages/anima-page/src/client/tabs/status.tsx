@@ -25,6 +25,7 @@ export function StatusTab() {
         <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run(s.paused ? 'resume' : 'pause', {}, () => s.paused ? 'Resumed.' : 'Paused: every behavior is refused and heartbeats stop.')}>
           {s.paused ? 'Resume' : 'Pause'}
         </button>
+        {(s.speech?.lostReplies ?? 0) > 0 ? <Pill tone="bad">{s.speech!.lostReplies} lost {s.speech!.lostReplies === 1 ? 'reply' : 'replies'} today</Pill> : null}
         <span className="anima-muted">Updates every 5 s.</span>
       </div>
       {act.outcome}

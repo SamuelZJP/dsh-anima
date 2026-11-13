@@ -69,6 +69,18 @@ describe('session identity', () => {
     expect(selfSessionId('anima', 2)).not.toBe(selfSessionId('anima'))
     expect(route('anima', { type: 'notice', text: 'x', ts: 0 }, 2)).toEqual({ kind: 'self', sessionId: selfSessionId('anima', 2) })
   })
+
+  it('starts fresh conversation sessions with a new generation (Phase 8)', () => {
+    const key = 'local:owner:private:owner'
+    expect(conversationSessionId('anima', key, 1)).toBe(conversationSessionId('anima', key))
+    expect(conversationSessionId('anima', key, 2)).toMatch(/^anima-c-[0-9a-f]{24}$/)
+    expect(conversationSessionId('anima', key, 2)).not.toBe(conversationSessionId('anima', key))
+    expect(route('anima', message(owner), 1, 2)).toMatchObject({ kind: 'conversation', sessionId: conversationSessionId('anima', key, 2) })
+    const router = new SessionRouter(new FakeHost(), { characterId: 'anima', conversationGeneration: 2, dataDir: '/tmp' })
+    router.know(owner)
+    expect(router.describe(conversationSessionId('anima', key, 2))).toMatchObject({ kind: 'conversation', channelKey: key })
+    expect(router.describe(conversationSessionId('anima', key))).toBeUndefined()
+  })
 })
 
 describe('route', () => {
@@ -83,7 +95,8 @@ describe('route', () => {
   })
 
   it('formats messages with channel and sender', () => {
-    expect(stimulusText(message(owner))).toBe('[local private "Owner (local)"] Sam (owner): hello')
+    expect(stimulusText(message(owner))).toBe('[本地 私聊「Owner」] Sam（主人） 对你说: hello')
+    expect(stimulusText({ ...message(group), addressed: true } as Stimulus)).toBe('[QQ 群「Book club」] Sam（主人） [qq u1] 叫你（群里所有人都会看到你的回答）: hello')
   })
 })
 
@@ -99,7 +112,7 @@ describe('SessionRouter', () => {
     const id = await router.deliver(message(owner))
     const session = host.sessions.get(id)!
     expect(session).toMatchObject({ preset: 'anima-conversation', cwd: join(dataDir, 'conversations'), title: 'Anima · Owner (local)' })
-    expect(session.inbox).toEqual(['[local private "Owner (local)"] Sam (owner): hello'])
+    expect(session.inbox).toEqual(['[本地 私聊「Owner」] Sam（主人） 对你说: hello'])
     expect(existsSync(join(dataDir, 'conversations'))).toBe(true)
   })
 
@@ -161,10 +174,10 @@ describe('AnimaLife service', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir: tempDir() })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDir() })
     ctx.anima.setClock(() => new Date('2026-11-10T10:00').getTime())
     const host = new FakeHost()
-    const fiber = await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
+    const fiber = await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     return { ctx, host, fiber }
   }
 
@@ -183,7 +196,7 @@ describe('AnimaLife service', () => {
     const { ctx, host } = await setup()
     const invocation = { rawInput: 'self how are you?', agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation
     expect(await ctx.anima.dispatchCommand(invocation)).toMatchObject({ kind: 'success' })
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [notice] The owner says: how are you?\nChannels you can reach: none.'])
+    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [通知] The owner says: how are you?\nChannels you can reach: none.'])
     await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
     ctx.anima.restrictChannels('qq', () => false)
     await ctx.anima.dispatchCommand(invocation)
@@ -206,7 +219,7 @@ describe('AnimaLife service', () => {
     const id = await ctx.animaLife.deliver({ type: 'consolidate', day: '2026-11-10', text: 'segments…', run: 'r1', ts: 0 }, { model: { provider: 'p', model: 'cheap' } })
     expect(id).toBe(consolidationSessionId('anima', '2026-11-10'))
     expect(host.sessions.get(id)).toMatchObject({ preset: 'anima-consolidation', title: 'Anima · memory 2026-11-10' })
-    expect(host.sessions.get(id)!.inbox[0]).toContain('[consolidate]\nsegments…')
+    expect(host.sessions.get(id)!.inbox[0]).toContain('[整理记忆]\nsegments…')
     expect(models).toEqual(['cheap'])
     expect(seen).toEqual([`consolidate ${id}`])
     expect(ctx.anima.describeSession(id)).toEqual({ kind: 'consolidation' })

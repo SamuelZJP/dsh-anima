@@ -28,6 +28,8 @@ export interface GateRecord {
   readonly decision: 'allowed' | 'refused' | 'approved' | 'denied'
   readonly code?: string
   readonly hint?: string
+  /** Channel key, for admissions that are not tool calls (`group_attention`). */
+  readonly channel?: string
 }
 
 /** One delivery that woke a turn. */
@@ -65,11 +67,30 @@ export interface PlatformRecord {
   readonly reason?: string
 }
 
+/**
+ * A conversation turn that was about to stop without a closing action (DESIGN
+ * §6, Turn shape): `reminder` when a reminder was steered into it, `lost-reply`
+ * when it ended unclosed after the reminders. Nothing is ever forwarded.
+ */
+export interface SpeechRecord {
+  readonly type: 'reminder' | 'lost-reply'
+  readonly at: number
+  readonly real: number
+  readonly channel: string
+  readonly sessionId: string
+  /** Her last plain text in that turn, which nobody saw (may be empty). */
+  readonly text: string
+  /** Reminder number in the turn (reminders only). */
+  readonly count?: number
+  /** Lost replies only: how the turn ended when it was not by running out of reminders, e.g. `error: MALFORMED_RESPONSE`. */
+  readonly reason?: string
+}
+
 /** Any activity record. */
-export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord
+export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SpeechRecord
 
 /** Activity record without its timestamps, as producers hand it in. */
-export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'>
+export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SpeechRecord, 'at' | 'real'>
 
 /** Day summary for the Activity tab. */
 export interface DaySummary {
@@ -85,6 +106,8 @@ export interface DaySummary {
   readonly tokens: Readonly<Record<'day' | 'night', number>>
   readonly initiates: number
   readonly nightWakes: number
+  /** Reminders steered into unclosed conversation turns, and turns that still ended unclosed (DESIGN §6). */
+  readonly speech: { readonly reminders: number; readonly lostReplies: number }
 }
 
 const DAY_FILE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -161,5 +184,6 @@ export function summarize(day: string, records: readonly ActivityRecord[], ledge
     tokens: { ...ledger.tokens },
     initiates: ledger.initiates,
     nightWakes: ledger.nightWakes,
+    speech: { reminders: records.filter(r => r.type === 'reminder').length, lostReplies: records.filter(r => r.type === 'lost-reply').length },
   }
 }

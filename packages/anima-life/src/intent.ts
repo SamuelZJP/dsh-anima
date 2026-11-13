@@ -2,7 +2,7 @@
  * Intent outcomes (DESIGN §5): after Self hands an intent to a conversation,
  * the conversation's own events tell what happened: it spoke (`sent`), the say
  * failed (`failed`), the owner cancelled it in the outbox (`cancelled`), its platform
- * stayed offline until the held message expired (`expired`), it chose `stay_silent` (`declined`), or the turn ended with
+ * stayed offline until the held message expired (`expired`), it chose `end_turn` (`declined`), or the turn ended with
  * neither (`no-action`). After `sent`, the next owner message there is `replied`.
  * A pure state machine fed with session events.
  * @module @anima/life/intent
@@ -39,7 +39,7 @@ export type OutcomeKind = 'sent' | 'failed' | 'cancelled' | 'expired' | 'decline
 export interface Outcome {
   readonly intent: Intent
   readonly kind: OutcomeKind
-  /** Reason given with `stay_silent`, or the error text of a failed say. */
+  /** Reason given with `end_turn`, or the error text of a failed say. */
   readonly detail?: string
 }
 
@@ -64,7 +64,7 @@ export function describeOutcome(outcome: Outcome): string {
     failed: 'failed — the message did not go out',
     cancelled: 'cancelled — the owner stopped the message in the outbox',
     expired: 'expired — the platform stayed offline, so the message was never sent',
-    declined: 'declined — you chose to stay silent there',
+    declined: 'declined — you chose not to speak there',
     'no-action': 'declined — the conversation ended without speaking',
     replied: 'they replied',
   }[kind]
@@ -122,7 +122,7 @@ export class IntentTracker {
       if (outcome !== undefined) this.state.awaitingReply = [...this.state.awaitingReply.filter(i => i.channelKey !== outcome.intent.channelKey), outcome.intent]
       return outcome
     }
-    if (name === 'stay_silent' && !isError) return this.settle(sessionId, 'declined', reason)
+    if (name === 'end_turn' && !isError) return this.settle(sessionId, 'declined', reason)
     return undefined
   }
 

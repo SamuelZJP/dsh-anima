@@ -21,6 +21,8 @@ export interface StatusView {
   approvals: number
   ownerLine: string | null
   selfModel: { notes: number }
+  /** Close reminders and lost replies today (Phase 8). */
+  speech?: { reminders: number; lostReplies: number }
   quotas: string[]
   parts: { life?: LifePart } & Record<string, unknown>
 }
@@ -65,6 +67,8 @@ export type ActivityRecord =
   | { type: 'gate'; at: number; real: number; behavior: string; session?: string; sessionId?: string; decision: 'allowed' | 'refused' | 'approved' | 'denied'; code?: string; hint?: string }
   | { type: 'wake'; at: number; real: number; stimulus: string; session: string; sessionId?: string; channel?: string }
   | { type: 'owner'; at: number; real: number; action: string; source: string; args: Record<string, unknown>; ok: boolean; error?: string }
+  | { type: 'platform'; at: number; real: number; platform: string; online: boolean; reason?: string }
+  | { type: 'reminder' | 'lost-reply'; at: number; real: number; channel: string; sessionId: string; text: string; count?: number }
 
 export interface DaySummary {
   day: string
@@ -76,6 +80,7 @@ export interface DaySummary {
   tokens: { day: number; night: number }
   initiates: number
   nightWakes: number
+  speech?: { reminders: number; lostReplies: number }
 }
 export interface ActivityView { day: string; days: string[]; summary: DaySummary; records: ActivityRecord[] }
 

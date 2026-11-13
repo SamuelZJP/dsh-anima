@@ -37,9 +37,9 @@ async function setup() {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent> })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   return { ctx, host }
 }
 
@@ -67,7 +67,7 @@ describe('viewing sessions (DESIGN §11)', () => {
     expect(note).toBe('A cat on a piano.')
     const agent = host.sessions.get(id)!
     expect(agent.preset).toBe('anima-viewing')
-    expect(agent.inbox[0]!.text).toMatch(/\[viewing\]\nLook\./)
+    expect(agent.inbox[0]!.text).toMatch(/\[细看\]\nLook\./)
     expect(agent.inbox[0]!.extra).toEqual([{ type: 'text', text: 'Frame 1' }, image])
     expect(host.models).toEqual(['vision'])
     expect(ctx.anima.describeSession(id)).toEqual({ kind: 'viewing' })

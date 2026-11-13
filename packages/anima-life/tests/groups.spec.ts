@@ -44,11 +44,11 @@ async function setup(life: Record<string, unknown> = {}, core: Record<string, un
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, ...core })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, ...core })
   const clock = { now: new Date(start).getTime() }
   ctx.anima.setClock(() => clock.now)
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object }, outbox: { delaySeconds: 0.2, ...life.outbox as object } } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0, ...life.conversation as object }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object }, outbox: { delaySeconds: 0.2, ...life.outbox as object } } })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
   ctx.anima.registerBehavior(defineTool({
     name: 'local_say', description: 'say', parameters: { text: { type: 'string', required: true } },
@@ -101,7 +101,7 @@ describe('group triage', () => {
     const triage = host.sessions.get(triageSession)!
     expect(triage.preset).toBe('anima-group-triage')
     expect(triage.models[0]).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
-    expect(triage.inbox[0]).toContain('[group batch b1]')
+    expect(triage.inbox[0]).toContain('[群聊批次 b1]')
     expect(triage.inbox[0]).toContain('Bob [qq 2001, msg')
     expect(triage.inbox[0]).toContain('anyone up for hotpot?')
     expect(ctx.anima.describeSession(triageSession)).toEqual({ kind: 'group-triage' })
@@ -127,6 +127,7 @@ describe('group triage', () => {
     expect(inbox[0]).toMatch(/^\(inject\) .*Bob \[qq 2001, msg \d+\]: a$/)
     expect(inbox[1]).toMatch(/^\(inject\) /)
     expect(inbox[2]).not.toMatch(/^\(inject\)/)
+    expect(inbox[2]).toContain('（没有人叫你；是你在扫视群聊时决定来看看，你的理由：hotpot!。）')
     expect(stimuli.map(s => s.delivery)).toEqual(['context', 'context', 'wake'])
   })
 
@@ -195,7 +196,7 @@ describe('group triage', () => {
     expect(host.sessions.has(groupSession)).toBe(false)
     await chatter(ctx, 'hey Anima', { addressed: true })
     await ctx.animaLife.deliver({ type: 'channel-event', channel: group, text: 'Bob recalled a message (msg 7).', ts: 0 })
-    expect(host.sessions.get(groupSession)!.inbox[1]).toMatch(/^\(inject\) .*\[event\] Bob recalled a message/)
+    expect(host.sessions.get(groupSession)!.inbox[1]).toMatch(/^\(inject\) .*\[事件\] Bob recalled a message/)
   })
 })
 
@@ -288,5 +289,90 @@ describe('outbox through a disconnect (Phase 7)', () => {
     const outcome = tracker.onToolResult('c', 'x', true, 'Error: anima/outbox-expired: …')
     expect(outcome).toMatchObject({ kind: 'expired' })
     expect(describeOutcome(outcome!)).toContain('expired — the platform stayed offline')
+  })
+})
+
+describe('message timing (DESIGN §6, Phase 8)', () => {
+  const sam = { platformUserId: 'owner', displayName: 'Sam', isOwner: true }
+  const ownerSession = conversationSessionId('anima', 'local:owner:private:owner')
+  const dm = (ctx: Context, text: string) => ctx.animaLife.deliver({ type: 'message', channel: owner, sender: sam, text, ts: ctx.anima.clock.now() })
+
+  async function withQqSay(life: Record<string, unknown> = {}, core: Record<string, unknown> = {}) {
+    const env = await setup(life, core)
+    env.ctx.anima.registerBehavior(defineTool({
+      name: 'qq_say', description: 'say', parameters: { text: { type: 'string', required: true } },
+      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
+      async execute() { return { ok: true } },
+    }), { platform: 'qq', effect: 'express', sessions: ['conversation'] })
+    // She speaks in the group: its attention window opens.
+    const spoke = (callId: string) => {
+      event(env.ctx, groupSession, 'tool/call', { callId, name: 'qq_say', arguments: '{"text":"hi"}' })
+      event(env.ctx, groupSession, 'tool/result', { message: { toolCallId: callId, isError: false, content: [] } })
+    }
+    const gate = () => env.ctx.anima.activity.read(day).filter(r => r.type === 'gate' && r.behavior === 'group_attention')
+    return { ...env, spoke, gate }
+  }
+
+  it('waits for a private chat to settle, then wakes once with the burst as context', async () => {
+    const { ctx, host, stimuli } = await setup({ conversation: { settleSeconds: 0.08 } })
+    expect(await dm(ctx, '在吗')).toBe(ownerSession)
+    await new Promise(resolve => setTimeout(resolve, 40))
+    await dm(ctx, '问你个事')
+    await dm(ctx, '明天有空吗')
+    expect(host.sessions.has(ownerSession)).toBe(false)
+    await vi.waitFor(() => expect(host.sessions.get(ownerSession)?.inbox.length).toBe(3))
+    const inbox = host.sessions.get(ownerSession)!.inbox
+    expect(inbox[0]).toMatch(/^\(inject\) .*在吗$/)
+    expect(inbox[1]).toMatch(/^\(inject\) .*问你个事$/)
+    expect(inbox[2]).toMatch(/^\[.*对你说: 明天有空吗\n在这里回应：用 local_say 说话/)
+    expect(stimuli.map(s => s.delivery)).toEqual(['context', 'context', 'wake'])
+  })
+
+  it('never delays an intent', async () => {
+    const { ctx, host } = await setup({ conversation: { settleSeconds: 30 } })
+    const { intentId, sessionId } = await ctx.animaLife.openIntent('local:owner:private:owner', 'say good morning')
+    expect(intentId).toBe('i1')
+    expect(host.sessions.get(sessionId)!.inbox[0]).toContain('i1')
+  })
+
+  it('wakes a group directly in the attention window after she spoke, counted by the gate', async () => {
+    const { ctx, host, spoke, gate } = await withQqSay({ conversation: { settleSeconds: 0.03 } })
+    spoke('s1')
+    await chatter(ctx, '哈哈对')
+    await chatter(ctx, '你也去吗')
+    await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(2))
+    expect(host.sessions.get(groupSession)!.inbox[1]).toMatch(/你也去吗\n（这条没有叫你；你刚在这个群里说过话/)
+    expect(host.sessions.has(triageSession)).toBe(false)
+    expect(gate()).toEqual([expect.objectContaining({ decision: 'allowed', channel: groupKey, session: 'conversation' })])
+    expect(ctx.anima.statusText()).toContain(`${groupKey} today: wakes 0 direct + 0 triage + 1 attention;`)
+  })
+
+  it('sends chatter to triage when the attention quota is spent or the window is off', async () => {
+    const quotas = [{ behavior: 'group_attention', per: 'channel', limit: 1, windowMinutes: 60 }]
+    const { ctx, host, spoke, gate } = await withQqSay({ conversation: { settleSeconds: 0.02 } }, { quotas })
+    spoke('s1')
+    await chatter(ctx, 'one')
+    await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(1))
+    await chatter(ctx, 'two')
+    await vi.waitFor(() => expect(host.sessions.get(triageSession)?.inbox.length).toBe(1))
+    expect(host.sessions.get(triageSession)!.inbox[0]).toContain('two')
+    expect(gate().map(r => (r as { decision: string }).decision)).toEqual(['allowed', 'refused'])
+
+    const off = await withQqSay({ groupTriage: { attentionSeconds: 0 } })
+    off.spoke('s2')
+    await chatter(off.ctx, 'three')
+    expect(off.host.sessions.has(groupSession)).toBe(false)
+    expect(off.gate()).toEqual([])
+  })
+
+  it('an @ in a settling group takes the waiting burst as context', async () => {
+    const { ctx, host, spoke } = await withQqSay({ conversation: { settleSeconds: 5 } })
+    spoke('s1')
+    await chatter(ctx, 'first')
+    await chatter(ctx, '@her second', { addressed: true })
+    const inbox = host.sessions.get(groupSession)!.inbox
+    expect(inbox).toHaveLength(2)
+    expect(inbox[0]).toMatch(/^\(inject\) .*first$/)
+    expect(inbox[1]).toMatch(/叫你（群里所有人都会看到你的回答）: @her second\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
   })
 })

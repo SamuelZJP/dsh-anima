@@ -35,9 +35,9 @@ async function setup(config: Partial<local.Config> = {}) {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new RecordingHost()
-  await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   const fiber = await ctx.plugin(local, { ownerName: 'Sam', ...config })
   return { ctx, host, dataDir, fiber }
 }
@@ -70,7 +70,7 @@ describe('local_say', () => {
 
   it('is registered with local express metadata and removed on unload', async () => {
     const { ctx, fiber } = await setup()
-    expect(ctx.anima.behavior(local.SAY_TOOL)).toEqual({ platform: 'local', effect: 'express', sessions: ['conversation'] })
+    expect(ctx.anima.behavior(local.SAY_TOOL)).toMatchObject({ platform: 'local', effect: 'express', sessions: ['conversation'] })
     await fiber.dispose()
     expect(ctx.tools.get(local.SAY_TOOL)).toBeUndefined()
     expect(ctx.anima.hasSubcommand('chat')).toBe(false)
@@ -87,7 +87,7 @@ describe('/anima chat', () => {
     const { ctx, host } = await setup()
     const result = await chat(ctx, 'chat good morning')
     expect(result.kind).toBe('success')
-    expect(host.delivered).toEqual([{ id: ownerSession, text: expect.stringMatching(/^\[\w{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] \[local private "Owner \(local\)"\] Sam \(owner\): good morning$/) }])
+    expect(host.delivered).toEqual([{ id: ownerSession, text: expect.stringMatching(/^\[\w{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] \[本地 私聊「Owner」\] Sam（主人） 对你说: good morning\n在这里回应：用 local_say 说话（只有对方看得到），或用 end_turn 结束不说。只写文字不算回应。$/) }])
   })
 
   it('needs text', async () => {
@@ -114,9 +114,9 @@ describe('/anima chat --as / --in (dev test channels)', () => {
   it('speaks as another person in their own private chat', async () => {
     const { ctx, host } = await setup()
     expect(await chat(ctx, 'chat --as alice hi there')).toMatchObject({ kind: 'success' })
-    expect(host.delivered).toEqual([{ id: aliceSession, text: expect.stringMatching(/\[local private "Alice \(local\)"\] Alice: hi there$/) }])
+    expect(host.delivered).toEqual([{ id: aliceSession, text: expect.stringMatching(/\[本地 私聊「Alice」\] Alice 对你说: hi there\n在这里回应：/) }])
     expect(ctx.anima.describeSession(aliceSession)).toMatchObject({ kind: 'conversation', channelKey: 'local:owner:private:alice' })
-    expect(ctx.anima.channelInfo('local:owner:private:alice')).toEqual({ isOwner: false })
+    expect(ctx.anima.channelInfo('local:owner:private:alice')).toMatchObject({ isOwner: false, display: 'Alice (local)' })
     expect((await say(ctx, aliceSession, 'hi Alice')).isError).toBe(false)
   })
 
@@ -126,7 +126,7 @@ describe('/anima chat --as / --in (dev test channels)', () => {
     expect(quiet).toMatchObject({ kind: 'success', text: expect.stringContaining('into group triage') })
     expect(host.delivered).toEqual([])
     await chat(ctx, 'chat --as bob --in group:test @Anima are you coming?')
-    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[local group "group test (local)"] Bob [local bob]: @Anima are you coming?') }])
+    expect(host.delivered).toEqual([{ id: groupSession, text: expect.stringContaining('[本地 群「group test」] Bob [local bob] 叫你（群里所有人都会看到你的回答）: @Anima are you coming?') }])
   })
 
   it('remembers test channels across a reload', async () => {

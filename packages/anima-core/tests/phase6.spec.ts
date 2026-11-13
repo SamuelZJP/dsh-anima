@@ -118,7 +118,7 @@ describe('self_note behavior and its daily cap', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    const fiber = await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+    const fiber = await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
     expect(ctx.tools.get('self_note')).toBeDefined()
     await fiber.dispose()
     expect(ctx.tools.get('self_note')).toBeUndefined()
@@ -158,7 +158,7 @@ describe('persona: self-model digest and live constitution', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
     return ctx
   }
   // Prompt assembly needs a tool executor this test composition does not load,
@@ -171,7 +171,8 @@ describe('persona: self-model digest and live constitution', () => {
       return () => {}
     })
     const secSpy = vi.spyOn(SystemPrompt.prototype, 'section').mockImplementation(function (this: unknown, sec) {
-      sections.push(sec as { name: string; text: string })
+      const { text } = sec as { name: string; text: string | ((context: object) => string) }
+      sections.push({ ...sec as { name: string }, text: typeof text === 'function' ? text({}) : text })
       return () => {}
     })
     onTestFinished(() => { ctxSpy.mockRestore(); secSpy.mockRestore() })

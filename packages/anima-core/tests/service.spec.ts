@@ -6,7 +6,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import * as animaCore from '../src/index.ts'
-import { personaText, SESSION_RULES } from '../src/persona.ts'
+import { personaText } from '../src/persona.ts'
+import { HER_WORLD, SESSION_RULES } from '../src/primer.ts'
 import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
 const localChat = {
@@ -137,8 +138,9 @@ describe('config and constitution', () => {
 
   it('builds the persona from constitution and session rules', () => {
     const text = personaText('You are Rin.\n', 'conversation')
-    expect(text.startsWith('You are Rin.\n\n## How this conversation works')).toBe(true)
-    expect(text).toContain('private thought')
+    expect(text.startsWith(`You are Rin.\n\n${HER_WORLD}\n\n## 此处\n`)).toBe(true)
+    expect(text).toContain('你写下的普通文字不会到达任何人')
+    expect(text.trimEnd().endsWith(SESSION_RULES.conversation)).toBe(true)
     expect(personaText('X', 'self')).toContain(SESSION_RULES.self)
   })
 })

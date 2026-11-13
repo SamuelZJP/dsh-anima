@@ -330,6 +330,10 @@ The run found three gate problems, fixed in this phase. Each has tests.
 - The model provider key is entered in the web UI (Get started → Add API Key) or via `DEEPSEEK_API_KEY`. Credentials resolve from the environment, `~/.dsh/.credentials.yaml`, the invoking directory's `.env`, then `~/.dsh/.env`.
 - Web sessions created from the UI's "Default workspace" ran in `~/Documents/deepseek-harness-default-workspace`, not the invoking directory. DSH stores session logs under `~/.dsh/sessions/<escaped workspace path>/`, as zstd-compressed JSONL (`zstd -dc` or Node's `zlib.zstdDecompressSync` to read).
 
+*Phase 8 scripted reliability check (2026-11-12).* Overlay `~/.anima/check-p8d/check.patch.yml`, written by `node scripts/reliability/make-overlay.mjs --constitution ~/.anima/formal-1/constitution.md`: own `characterId` and data dir, a daytime clock, a 3M day budget, default quotas except a global ceiling of 2000 (the run is several days of her calls in an hour), a 10 s triage window, a 5 s outbox delay, the QQ adapter pointed at `ws://127.0.0.1:3913`, and the check row `scripts/reliability/check.mjs` by absolute path. Boot: `pnpm dsh --profile anima-dev --patch ~/.anima/check-p8d/check.patch.yml --no-open`. The row runs a fake OneBot v11 server; the real QQ adapter logs in to it, and 30 fake friends, the owner and 4 groups send fixed lines (greetings, questions, images, pokes, bursts, messages during a running turn, @s, attention-window replies, triage chatter) plus 16 scripted intents. Nothing reached a real account; nothing under `~/.dsh` changed except the new sessions. Result (`reliability-report.md` in the data dir): 211 conversation turns, 35 fresh first turns, all closed without a reminder, 0 lost replies, 0 errored turns, 166k billable tokens on DeepSeek-Flash (cache reads ~90 % of prompt tokens). Runs `check-p8b` and `check-p8c` before it failed (section 8g and DESIGN §14 item 8).
+
+*Phase 8 supervised QQ hour (2026-11-12).* Overlay `~/.anima/p8-qq/p8-qq.patch.yml` (outside the repo): `formal-1`'s QQ settings with the NapCat token written in, a new `characterId` and data dir, Bilibili off, and `clock.start` at 10:00 because the hour ran before her real wake time (at real 05:05 the gate refused her `open_conversation` and would have refused `qq_say` as night). Boot: `pnpm dsh --profile anima-dev --patch ~/.anima/p8-qq/p8-qq.patch.yml --no-open`. The owner chatted with her on QQ privately and in the test group; she also opened one intent to the owner after an `/anima self` notice. Result: 25 conversation turns, all `completed`; 26 `qq_say`, 1 `end_turn`, 2 `qq_look`, 1 `qq_react`; 0 reminders, 0 lost replies. One refused `qq_say` (express quota) led to counting a say once instead of per message. Pitfall: an overlay copied from `formal-1` that reads the token from the environment connects with no token when the variable is unset; NapCat accepts the upgrade and closes with 1005, which the adapter retries forever (the Anima page showed 241 connects).
+
 ## 4. Registering a tool (Verified)
 
 ```ts
@@ -534,7 +538,7 @@ ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
 
 ### Ending a turn from a tool
 
-`exec.concludeTurn()` inside `execute` makes a successful result terminal for the turn (`packages/core/tools/src/contracts.ts:260`). `rest`, `heartbeat_act` and `stay_silent` use it.
+`exec.concludeTurn()` inside `execute` makes a successful result terminal for the turn (`packages/core/tools/src/contracts.ts:260`). `rest`, `heartbeat_act` and `group_*` call it themselves; since Phase 8 the core behavior wrapper also calls it after any successful behavior whose metadata `closes` (say without `more: true`, `end_turn`), section 8g.
 
 ### Context without waking, and agent status
 
@@ -763,6 +767,38 @@ All are NapCat extensions except `get_image` and `get_forward_msg` (go-cqhttp he
 
 `animaLife.platformStatus(platform, online, reason?)` is Anima's own API (no DSH API). Self notices go through `agent.inject`, the same as intent outcomes, so they are logged `user/message` events (`source.stimulus: 'platform-offline' | 'platform-online'`).
 
+## 8g. Phase 8 extension points (turn shape, message timing, primer)
+
+Read at `dsh-v0.2.2-rc.1` with `git show`; verified in unit tests, live in the scripted check (section 3) once run.
+
+### Closing a turn by an action
+
+- **A batch concludes if any result concludes** (`packages/core/tools/src/batch.ts:147`, `:282`). So `qq_poke` + `qq_say` in one step ends the turn after both run; a failed or refused say carries no `concludesTurn`, so the turn goes on.
+- `exec.concludeTurn()` is idempotent (a set of concluding executions, `pipeline.ts:559`); the core wrapper may call it after a tool that already did.
+- **`agent/turn-stopping`** (serial, `packages/core/agent-loop/src/agent.ts:396`, typed in `agent/src/runtime-types.ts:417`) runs when a step ended the turn (no tool calls, or a concluded batch) **and** the next-step inbox is empty. A listener that calls `agent.steer(message)` there fills that inbox, and the loop runs another step of the **same** turn. It also runs after a concluding say, so Anima's listener first checks whether the turn already closed (`TurnCloser`, `anima-life/src/closer.ts`). DSH's own precedent: `hooks-codex`'s Stop hook. A root `ctx.on('agent/turn-stopping', ({ agent }) => …)` receives every agent's event.
+- The steered reminder is a `createUserMessage` with `source.kind: 'anima-stimulus'`, `stimulus: 'close-reminder'`, so it is a logged `user/message` when the step claims it.
+
+### Delivery: steer, followup, inject
+
+- `agent.steer(m)` = `send(m, 'next-step', wakeup: true)`: joins a running turn at the next step boundary, or starts a turn when idle (`agent.ts:183`). Anima uses it for chat messages (`stimulus: 'message'`), so an arrival during a turn joins it, and a message that arrives while a closing say runs gets one more step.
+- `agent.followup(m)` = `'next-turn'`, waking: intents, heartbeats, notices, batches and views keep their own turn.
+- `agent.inject(m)` = `'next-step'`, not waking: earlier burst messages and context.
+- Anima marks waking deliveries with `source.wake: true` (its own `MessageSourceMap` field), so the closer knows which `user/message` opened a turn.
+
+### System prompt per session, and the runtime-context block
+
+- `PromptSection.text` may be `(context: AssembleContext) => string` (`packages/core/system-prompt/src/index.ts:66`), evaluated at every assembly. The agent loop puts the agent on the context (`context.agent`, as `working-directory` reads it), so the persona section generates "this place" per session.
+- `ctx.systemPrompt.suppressRuntimeContext()` in an agent scope drops every context not marked `required` from that scope's assemblies and from `refreshContext` (`index.ts:537`, `:589`). In her sessions that removes the sandbox, approval-policy, harness-checkout and Web GUI URL contexts.
+- **The working-directory line cannot be removed at the pin.** `working-directory:current` is `required: true` (`session/working-directory/src/index.ts:90`), and `refreshContext` (called on every request, `agent.ts:446`) restores missing required contexts from the registry, so an `system-prompt/assemble` listener that deletes it would be undone. It stays; its text is her session's data directory. Anima's own `anima-self-model` context is required too and survives suppression.
+
+### Loader rows by file path
+
+A row `name` that is an absolute path or starts with `./` resolves to a file URL (`boot/app-boot/src/index.ts:550`). The scripted reliability check (`scripts/reliability/check.mjs`) is such a row in its `--patch` overlay; `--dump-config` shows `name: file:///…/check.mjs`. Nothing is installed into the profile for it.
+
+### Tool parameters: avoid a string-or-list union
+
+`defineTool` parameters accept `oneOf` (`packages/core/tools/src/schema.ts`, `OneOfValueSchemaSpec`), but with `text: oneOf [string, string[]]` DeepSeek-Flash sometimes wrote the string unquoted (`{"text": 最近我…}`). `llm-deepseek` rejects that stream (`tool input is invalid JSON`, code `MALFORMED_RESPONSE`), the turn ends with `reason.kind: 'error'` and no tool runs; once it happened in a session, later turns there failed the same way (47 of 211 turns in one scripted run). Say tools now take `text: string` plus `also: string[]`; the next 211-turn run had none. Errored turns never reach `agent/turn-stopping`, so Anima checks `turn/end.reason` for lost replies.
+
 ## 9. Other extension points Anima will use (Read)
 
 - **Prompt injection (model-visible ⇒ logged):**
@@ -804,13 +840,14 @@ Re-check these on every DSH upgrade.
 | `@deepseek-ai/dsh-agent-preset` rows, persona section names from `dsh-system-prompt` | `dsh-agent-preset`, `dsh-system-prompt` | conversation / self presets | Verified |
 | `sessionController.create` / `resolveAgent`, `sessionTitle.rename`, `workspaceRegistry.archivedSessionIds` | `dsh-api-session-controller`, `dsh-session-title`, `dsh-workspace` | session routing | Verified (archived check not exercised live) |
 | `Agent.followup`, `createUserMessage`, `boundContextSummary`, `MessageSourceMap` | `dsh-agent`, `dsh-llm` | stimulus delivery | Verified (`steer` / `inject` still Read) |
+| `Agent.steer` (joins a running turn, starts one when idle) | `dsh-agent` | chat messages; close reminders (Phase 8) | Read (Phase 8; unit tests use fakes) |
 | `ctx.sessions.flush` | `dsh-session` | durability | Verified (`session/event` still Read) |
 | `ctx.systemPrompt.section` (agent scope, `complete`) | `dsh-system-prompt` | persona | Verified (`context`, `agent/pre-step` still Read) |
 | `ctx.commands.register` | `dsh-commands` | owner commands | Verified |
 | `executeToolFixture` | `dsh-tool-testkit` (`@internal`) | tests | Verified |
 | `agent.model.select`, `agent.status`, `agent.inject` | `dsh-agent` | triage/action models, busy check, outcome notices | Verified (Phase 2) |
 | `session/event` with `assistant/message.usage`, `tool/call`, `tool/result`, `turn/end`, `user/message` | `dsh-session`, `dsh-llm` | token budget, intent outcomes, alarms | Verified (Phase 2) |
-| `exec.concludeTurn()` | `dsh-tools` | `rest`, `heartbeat_act`, `stay_silent` | Verified (Phase 2) |
+| `exec.concludeTurn()` | `dsh-tools` | `rest`, `heartbeat_act`, closing behaviors (say, `end_turn`) | Verified (Phase 2); idempotent, read in Phase 8 |
 | `@deepseek-ai/dsh-tool-schedule` preset row, `source.kind: 'schedule'` | `dsh-tool-schedule`, `dsh-schedule` | her alarms | Verified (Phase 2) |
 | `dsh-compaction-basic` defaults | `dsh-compaction-basic` | triage preset | Verified (do not lower `thresholdRatio`) |
 | `agent.ctx.tools.restrict({ deny })`, `createScope` (tests) | `dsh-tools`, `dsh-scope` | persona `hideTools` | Verified (Phase 2; see the deferred-tools trap) |
@@ -831,6 +868,12 @@ Re-check these on every DSH upgrade.
 | `ctx.systemPrompt.context({ name, order, text: () => string, interpolate, required })` | `dsh-system-prompt` | self-model digest | Verified (Phase 6: logged runtime-context snapshot updates after a note and after a revert) |
 | `ctx.configEditor.entries()`, `configuration()`, `edit(entry, change)`, `documentPath` (optional) | `dsh-config-editor` | Settings tab | Verified in the Phase 6 demo (typed locally) |
 | `ImageBlock` in a tool's `output.render`, `ctx.llm.resolveModelInfo(...).inputModalities`, `agent.session.requestHeader()` | `dsh-tools`, `dsh-llm`, `dsh-agent` | `qq_look` shows the image in the chat's own model; vision check first | Read (Phase 7; unit tests use fakes) |
+| `agent/turn-stopping` (serial; `agent.steer` inside runs another step of the same turn) | `dsh-agent`, `dsh-agent-loop` | close reminders for unclosed conversation turns | Read (Phase 8; unit tests emit it) |
+| batch conclusion: any `concludesTurn` result ends the step's turn | `dsh-tools` | say closes, gestures in the same step do not undo it | Read (Phase 8) |
+| `PromptSection.text` as `(context) => string`, `context.agent` | `dsh-system-prompt`, `dsh-agent` | per-session environment primer | Verified in unit tests (Phase 8) |
+| `ctx.systemPrompt.suppressRuntimeContext()`, `refreshContext` restoring required contexts | `dsh-system-prompt` | no coding-agent context in her sessions; the cwd line stays (required) | Verified in unit tests (Phase 8) |
+| `turn/end.data.reason` (`completed`, `aborted`, `error` with `code`) | `dsh-session`, `dsh-agent-loop` | an open turn that errored is a lost reply | Verified in the Phase 8 scripted check |
+| loader row `name` as an absolute file path in a `--patch` overlay | Cordis loader (`app-boot`) | scripted reliability check row | Verified with `--dump-config` and a dry boot (Phase 8) |
 
 ## 12. Known gaps and risks
 

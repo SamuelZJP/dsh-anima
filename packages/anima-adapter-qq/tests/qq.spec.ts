@@ -47,9 +47,9 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 } })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 } })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, ...life } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, ...life } })
   const fiber = await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
     allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },
@@ -88,7 +88,7 @@ describe('QQ adapter', () => {
     expect(server.connections[0]).toBe('?access_token=tok')
     expect(server.callsOf('get_login_info')).toHaveLength(1)
     expect(ctx.anima.describeSession(ownerSession)).toMatchObject({ kind: 'conversation', channelKey: ownerKey })
-    expect(ctx.anima.channelInfo(ownerKey)).toEqual({ isOwner: true })
+    expect(ctx.anima.channelInfo(ownerKey)).toMatchObject({ isOwner: true, display: 'Sam (QQ)' })
     expect(ctx.anima.channelAllowed(groupKey)).toBe(true)
     expect(ctx.anima.channelAllowed(`qq:${ACCOUNT}:group:999`)).toBe(false)
     expect(ctx.anima.statusText()).toContain(`QQ allowlist: owner ${OWNER}; users ${FRIEND}; groups ${GROUP}`)
@@ -99,7 +99,7 @@ describe('QQ adapter', () => {
     const { ctx, host, server } = await setup()
     server.push(privateMessage(OWNER, 'morning!'))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    expect(host.inbox(ownerSession)[0]).toMatch(/\[qq private "Sam \(QQ\)"\] Sam \(owner\) \[msg \d+\]: morning!$/)
+    expect(host.inbox(ownerSession)[0]).toMatch(/\[QQ 私聊「Sam」\] Sam（主人） \[msg \d+\] 对你说: morning!\n在这里回应：用 qq_say 说话（只有对方看得到），或用 end_turn 结束不说。只写文字不算回应。$/)
     server.push(privateMessage(FRIEND, 'hi there'))
     await vi.waitFor(() => expect(host.inbox(conversationSessionId('anima', `qq:${ACCOUNT}:private:${FRIEND}`))).toHaveLength(1))
     server.push(privateMessage('55555', 'spam'))
@@ -115,7 +115,7 @@ describe('QQ adapter', () => {
     server.push(groupMessage(GROUP, '2002', [{ type: 'at', data: { qq: ACCOUNT } }, { type: 'text', data: { text: ' you in?' } }]))
     await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(2))
     expect(host.inbox(groupSession)[0]).toMatch(/^\(inject\) .*Bob \[qq 2002, msg \d+\]: lunch\?$/)
-    expect(host.inbox(groupSession)[1]).toMatch(/Bob \[qq 2002, msg \d+\]: @Anima you in\?$/)
+    expect(host.inbox(groupSession)[1]).toMatch(/Bob \[qq 2002, msg \d+\] 叫你（群里所有人都会看到你的回答）: @Anima you in\?\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
 
     // She speaks; a reply to her message wakes the group.
     const said = await callAs(ctx, groupSession, 'qq_say', { text: 'sure!', replyTo: '7', mention: ['2002'] })
@@ -145,11 +145,11 @@ describe('QQ adapter', () => {
     const { host, server } = await setup()
     server.push({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', user_id: Number(OWNER), target_id: Number(ACCOUNT) })
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    expect(host.inbox(ownerSession)[0]).toContain('Sam (owner): [pokes you]')
+    expect(host.inbox(ownerSession)[0]).toContain('Sam（主人） 对你说: [戳了戳你]')
     server.push({ post_type: 'notice', notice_type: 'notify', sub_type: 'poke', group_id: Number(GROUP), user_id: 2002, target_id: 2003 })
     server.push({ post_type: 'notice', notice_type: 'friend_recall', user_id: Number(OWNER), message_id: 5 })
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(2))
-    expect(host.inbox(ownerSession)[1]).toMatch(/^\(inject\) .*\[event\] Sam recalled a message \(msg 5\)\.$/)
+    expect(host.inbox(ownerSession)[1]).toMatch(/^\(inject\) .*\[事件\] Sam recalled a message \(msg 5\)\.（只是上下文，不需要回答。）$/)
     expect(host.sessions.has(groupSession)).toBe(false)
   })
 
@@ -162,6 +162,26 @@ describe('QQ adapter', () => {
     const result = await callAs(ctx, ownerSession, 'qq_history', { count: 5 })
     expect(result.text).toMatch(/Sam \(owner\) \[msg 1\]: old one\n.* you \[msg 2\]: my answer$/)
     expect(server.callsOf('get_friend_msg_history')[0]!.params).toEqual({ user_id: Number(OWNER), count: 5 })
+  })
+
+  it('sends a list as messages in order, replyTo and mention on the first only, and reports a partial send', async () => {
+    const { ctx, server } = await setup()
+    const said = await callAs(ctx, ownerSession, 'qq_say', { text: '在的', also: ['怎么啦'], replyTo: '5' })
+    expect(said.isError).toBe(false)
+    expect(said.text).toMatch(/^sent 2 messages \(msg \d+, \d+\)$/)
+    expect(server.callsOf('send_private_msg').map(call => call.params.message)).toEqual([
+      [{ type: 'reply', data: { id: '5' } }, { type: 'text', data: { text: '在的' } }],
+      [{ type: 'text', data: { text: '怎么啦' } }],
+    ])
+    expect((await callAs(ctx, ownerSession, 'qq_say', { text: ' ' })).text).toContain('call end_turn instead')
+    let n = 0
+    server.respond('send_private_msg', () => {
+      if (++n === 2) throw new Error('rate limited')
+      return { message_id: 9500 + n }
+    })
+    const partial = await callAs(ctx, ownerSession, 'qq_say', { text: 'a', also: ['b', 'c'] })
+    expect(partial.isError).toBe(true)
+    expect(partial.text).toContain('anima/partly-sent: 1 of 3 messages went out (msg 9501); message 2 failed')
   })
 
   it('refuses qq_say outside allowlisted QQ sessions and mentions in private chats', async () => {
@@ -224,9 +244,9 @@ describe('QQ adapter', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir })
     const host = new FakeHost()
-    await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
+    await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     await ctx.plugin(qq, { url, account: ACCOUNT, owner: OWNER })
     await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('QQ problem: the runtime is logged in as 99999'))
     server.push({ ...privateMessage(OWNER, 'hi'), self_id: 99999 })

@@ -26,6 +26,8 @@ export interface Batch {
   decision?: Decision
   /** Who settled it: her, or a fallback. */
   by?: 'her' | 'timeout' | 'turn-end' | 'skipped'
+  /** Her reason, when she gave one (`group_wake`); the wake states it (DESIGN §5). */
+  reason?: string
 }
 
 /** Hooks the triage calls. */
@@ -114,12 +116,13 @@ export class GroupTriage {
    * Settle a batch.
    * @returns the batch, or undefined when it is unknown or already settled.
    */
-  decide(id: string, decision: Decision, by: NonNullable<Batch['by']> = 'her'): Batch | undefined {
+  decide(id: string, decision: Decision, by: NonNullable<Batch['by']> = 'her', reason?: string): Batch | undefined {
     const batch = this.batches.get(id.toLowerCase())
     if (batch === undefined || batch.decision !== undefined) return undefined
     clearTimeout(batch.timer)
     batch.decision = decision
     batch.by = by
+    if (reason !== undefined) batch.reason = reason
     this.counts[decision] += 1
     if (by !== 'her') this.counts.fallback += 1
     try {

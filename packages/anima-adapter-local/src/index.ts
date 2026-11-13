@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AnimaError } from '@anima/core'
+import { AnimaError, SAY_META, SAY_PARAMETERS, sayMessages } from '@anima/core'
 import type {} from '@anima/core'
 import type { PublishedChannel } from '@anima/life'
 import type {} from '@anima/life'
@@ -48,6 +48,8 @@ export const Config: z<Config> = z.object({
 /** The single local channel: a private chat with the owner. */
 export const OWNER_CHANNEL: PublishedChannel = {
   platform: PLATFORM, account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)', isOwner: true,
+  // DESIGN §5: the owner reads this chat in the web UI, so plain text there looks delivered but is not speech.
+  note: '主人在 DSH 网页里读这个聊天，也能看到你的记录；但在这里也只有 local_say 算说话。',
 }
 
 /** Parsed `/anima chat` arguments. */
@@ -167,20 +169,18 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
 
   ctx.anima.registerBehavior(defineTool({
     name: SAY_TOOL,
-    description: 'Say something to the person in this local chat. One call sends one chat message; they see only what you send this way.',
-    parameters: {
-      text: { type: 'string', required: true, description: 'The message, exactly as it should appear in the chat.' },
-    },
+    description: 'Say something in this local chat: one message, or a list of messages sent in order. They see only what you send this way. A say ends your turn unless more: true.',
+    parameters: { ...SAY_PARAMETERS },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          sent: { type: 'boolean', required: true, description: 'Whether the message was delivered.' },
+          sent: { type: 'integer', required: true, description: 'How many messages were delivered.' },
           at: { type: 'string', required: true, description: 'Send time on her clock, ISO 8601.' },
         },
       },
-      render: () => [{ type: 'text', text: 'sent' }],
+      render: (_args, value) => [{ type: 'text', text: value.sent === 1 ? 'sent' : `sent ${value.sent} messages` }],
     },
     async execute(args, exec) {
       const sessionId = exec.agent?.id
@@ -188,15 +188,16 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
       if (session?.kind !== 'conversation' || session.channel.platform !== PLATFORM) {
         throw new AnimaError('anima/no-channel', 'this session is not bound to a local channel.')
       }
-      if (args.text.trim() === '') throw new AnimaError('anima/empty-message', 'text is empty; to stay silent, call stay_silent instead.')
+      const messages = sayMessages(args)
+      if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
       // Her own initiations wait in the outbox first (DESIGN §10).
-      await ctx.animaLife.holdOutgoing(sessionId!, args.text)
+      await ctx.animaLife.holdOutgoing(sessionId!, messages.join('\n'))
       const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
-      appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text: args.text })}\n`)
-      return { sent: true, at }
+      for (const text of messages) appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text })}\n`)
+      return { sent: messages.length, at }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
 
   ctx.anima.addSubcommand({
     name: 'chat',

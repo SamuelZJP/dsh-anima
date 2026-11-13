@@ -85,9 +85,9 @@ describe('IntentTracker', () => {
     expect(tracker.onOwnerMessage('local:owner:private:owner')).toBeUndefined()
   })
 
-  it('reports a decline with the stay_silent reason', () => {
+  it('reports a decline with the end_turn reason', () => {
     const tracker = claimed()
-    tracker.onToolCall('c1', 'a', 'stay_silent', 'he is asleep')
+    tracker.onToolCall('c1', 'a', 'end_turn', 'he is asleep')
     expect(tracker.onToolResult('c1', 'a', false)).toEqual({ intent, kind: 'declined', detail: 'he is asleep' })
   })
 
@@ -148,6 +148,7 @@ class FakeHost implements SessionHost<FakeAgent> {
   rename() {}
   async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
   async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
+  steer(agent: FakeAgent, text: string) { agent.inbox.push(`(steer) ${text}`) }
   selectModel(agent: FakeAgent, choice: ModelChoice) { agent.models.push(choice) }
   isBusy(agent: FakeAgent) { return this.busy.has(agent.id) }
 }
@@ -162,18 +163,18 @@ async function setup(start: string, config: Record<string, unknown> = {}) {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, ...config })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, ...config })
   const clock = { now: at(start) }
   ctx.anima.setClock(() => clock.now)
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner]) } })
   // A stand-in say behavior for the local platform.
   ctx.anima.registerBehavior((await import('@deepseek-ai/dsh-tools')).defineTool({
     name: 'local_say', description: 'say', parameters: { text: { type: 'string' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
     async execute() { return { ok: true } },
-  }), { platform: 'local', effect: 'express', sessions: ['conversation'] })
+  }), { platform: 'local', effect: 'express', sessions: ['conversation'], closes: args => args.more !== true })
   return { ctx, host, clock }
 }
 
@@ -202,7 +203,7 @@ describe('heartbeat loop', () => {
     const triage = host.sessions.get(triageSessionId('anima', '2026-11-10'))!
     expect(triage.preset).toBe('anima-triage')
     expect(triage.models).toEqual([{ provider: 'deepseek-official', model: 'deepseek-flash' }])
-    expect(triage.inbox[0]).toMatch(/^\[Tue 2026-11-10 10:00\] \[heartbeat\]\nTime Tue 2026-11-10 10:00; phase day\./)
+    expect(triage.inbox[0]).toMatch(/^\[Tue 2026-11-10 10:00\] \[心跳\]\nTime Tue 2026-11-10 10:00; phase day\./)
     expect(triage.inbox[0]).toContain('channel "local:owner:private:owner"; you may start a conversation')
     expect(triage.inbox[0]).toContain('heartbeat_act(reason)')
     expect(ctx.anima.describeSession(triage.id)).toEqual({ kind: 'triage' })
@@ -234,22 +235,22 @@ describe('heartbeat loop', () => {
     const opened = await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'wish him a good morning' })
     expect(opened).toEqual({ isError: false, text: 'Intent i1 handed to the conversation. Its outcome will arrive here as a notice.' })
     const chatId = conversationSessionId('anima', ownerKey)
-    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[intent from your Self\] \(i1\)/)
+    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[来自 Self 的意图\]（i1）你在自己的内心决定来 本地 私聊「Owner」 开口。对方没有发消息给你。\n你想要的：wish him a good morning\n你发出的消息会先在发件箱里等 45 秒，主人在这期间可以取消。Self 会知道结果。\n在这里回应：用 local_say 说话/)
     expect(ctx.anima.todayLedger().initiates).toBe(1)
 
     // The conversation declines; Self hears about it without waking.
     event(ctx, chatId, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'intent', ref: 'i1' }, content: [] })
-    event(ctx, chatId, 'tool/call', { callId: 'x1', name: 'stay_silent', arguments: '{"reason":"too early"}' })
-    expect((await callAs(ctx, chatId, 'stay_silent', { reason: 'too early' })).isError).toBe(false)
+    event(ctx, chatId, 'tool/call', { callId: 'x1', name: 'end_turn', arguments: '{"reason":"too early"}' })
+    expect((await callAs(ctx, chatId, 'end_turn', { reason: 'too early' })).isError).toBe(false)
     event(ctx, chatId, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
     await vi.waitFor(() => expect(self.inbox).toHaveLength(2))
-    expect(self.inbox[1]).toBe('(inject) [Tue 2026-11-10 08:00] [notice] Your intent i1 for Owner (local) ("wish him a good morning"): declined — you chose to stay silent there: too early.')
+    expect(self.inbox[1]).toBe('(inject) [Tue 2026-11-10 08:00] [notice] Your intent i1 for Owner (local) ("wish him a good morning"): declined — you chose not to speak there: too early.')
 
     // The decline still counts; the next heartbeat report shows it.
     expect(ctx.anima.todayLedger().initiates).toBe(1)
     expect((await callAs(ctx, selfId, 'rest', { until: '09:30' })).text).toBe('Resting. Next heartbeat 2026-11-10 09:30.')
     await ctx.animaLife.beat()
-    expect(host.sessions.get(triageId)!.inbox[1]).toContain('declined — you chose to stay silent there: too early.')
+    expect(host.sessions.get(triageId)!.inbox[1]).toContain('declined — you chose not to speak there: too early.')
     expect(host.sessions.get(triageId)!.inbox[1]).toContain('conversations you may still start today: 2 of 3')
   })
 
@@ -322,5 +323,103 @@ describe('alarmPrompts', () => {
     expect(alarmPrompts('[SCHEDULE REMINDER]\nreminder_prompt_json: "ask"')).toEqual(['ask'])
     expect(alarmPrompts('[SCHEDULE REMINDER BATCH]\nreminders_json: [{"schedule_id":"s","reminder_prompt":"think about the evening"},{"reminder_prompt":"b"}]')).toEqual(['think about the evening', 'b'])
     expect(alarmPrompts('nothing')).toEqual([])
+  })
+})
+
+describe('turn closing (DESIGN §6, Turn shape)', () => {
+  const said = (text: string) => ({ message: { content: [{ type: 'text', text }] } })
+  const woke = { source: { kind: 'anima-stimulus', stimulus: 'message', wake: true }, content: [] }
+
+  async function chat() {
+    const env = await setup('2026-11-10T12:00')
+    const id = await env.ctx.animaLife.deliver({ type: 'message', channel: owner, sender: { platformUserId: 'owner', displayName: 'Sam', isOwner: true }, text: '在吗', ts: env.clock.now })
+    const agent = env.host.sessions.get(id)!
+    const stopping = () => env.ctx.emit('agent/turn-stopping' as never, { agent, turn: 1, signal: new AbortController().signal } as never)
+    const records = () => env.ctx.anima.activity.read(env.ctx.anima.dayKey()).filter(r => r.type === 'reminder' || r.type === 'lost-reply')
+    return { ...env, id, agent, stopping, records }
+  }
+
+  it('says nothing when a say closed the turn', async () => {
+    const { ctx, id, agent, stopping, records } = await chat()
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"在的"}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
+    const before = agent.inbox.length
+    stopping()
+    expect(agent.inbox.length).toBe(before)
+    expect(records()).toEqual([])
+  })
+
+  it('steers reminders into the same turn, then records a lost reply and forwards nothing', async () => {
+    const { ctx, id, agent, stopping, records } = await chat()
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'assistant/message', said('在的在的，怎么了？'))
+    const before = agent.inbox.length
+    stopping()
+    expect(agent.inbox.at(-1)).toMatch(/^\(steer\) \[Tue 2026-11-10 12:00\] \[提醒 1\/2\] 这一轮还没有用行动结束。你刚才写的「在的在的，怎么了？」/)
+    expect(agent.inbox.at(-1)).toContain('调用 local_say')
+    expect(agent.inbox.at(-1)).toContain('end_turn')
+    stopping()
+    expect(agent.inbox.length).toBe(before + 2)
+    stopping()
+    expect(agent.inbox.length).toBe(before + 2)
+    event(ctx, id, 'turn/end', {})
+    expect(records()).toEqual([
+      expect.objectContaining({ type: 'reminder', count: 1, channel: ownerKey, sessionId: id, text: '在的在的，怎么了？' }),
+      expect.objectContaining({ type: 'reminder', count: 2 }),
+      expect.objectContaining({ type: 'lost-reply', channel: ownerKey, sessionId: id, text: '在的在的，怎么了？' }),
+    ])
+    expect(ctx.anima.daySummary().speech).toEqual({ reminders: 2, lostReplies: 1 })
+  })
+
+  it('accepts end_turn and a say after a reminder; a failed say does not close', async () => {
+    const { ctx, id, agent, stopping, records } = await chat()
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"hi"}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: true, content: [] } })
+    stopping()
+    expect(records()).toHaveLength(1)
+    event(ctx, id, 'tool/call', { callId: 'x2', name: 'end_turn', arguments: '{}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'x2', isError: false, content: [] } })
+    const before = agent.inbox.length
+    stopping()
+    expect(agent.inbox.length).toBe(before)
+    expect(records()).toHaveLength(1)
+  })
+
+  it('records a lost reply when an open turn ends in an error, not when it was aborted or closed', async () => {
+    const { ctx, id, records } = await chat()
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'turn/end', { reason: { kind: 'error', error: { code: 'MALFORMED_RESPONSE', message: 'tool input is invalid JSON' } } })
+    expect(records()).toEqual([expect.objectContaining({ type: 'lost-reply', channel: ownerKey, reason: 'error: MALFORMED_RESPONSE' })])
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'turn/end', { reason: { kind: 'aborted' } })
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'tool/call', { callId: 'z1', name: 'end_turn', arguments: '{}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'z1', isError: false, content: [] } })
+    event(ctx, id, 'turn/end', { reason: { kind: 'error', error: { code: 'X' } } })
+    expect(records()).toHaveLength(1)
+  })
+
+  it('keeps the turn open after a say with more: true or a gesture, and reopens on a new arrival', async () => {
+    const { ctx, id, stopping, records } = await chat()
+    event(ctx, id, 'user/message', woke)
+    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"wait","more":true}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
+    stopping()
+    expect(records()).toHaveLength(1)
+    event(ctx, id, 'tool/call', { callId: 'x2', name: 'local_say', arguments: '{"text":"ok"}' })
+    event(ctx, id, 'tool/result', { message: { toolCallId: 'x2', isError: false, content: [] } })
+    stopping()
+    expect(records()).toHaveLength(1)
+    // A message that joins the turn after she closed it needs closing again.
+    event(ctx, id, 'user/message', woke)
+    stopping()
+    expect(records()).toHaveLength(2)
+    // Context that does not wake never opens a turn.
+    event(ctx, id, 'turn/end', {})
+    event(ctx, id, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'channel-event' }, content: [] })
+    stopping()
+    expect(records()).toHaveLength(2)
   })
 })

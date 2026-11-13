@@ -172,9 +172,9 @@ async function setup(config: Partial<memory.Config> = {}) {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new RecordingHost()
-  await ctx.plugin(AnimaLife, host as unknown as SessionHost<Agent>)
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   ctx.animaLife.publish([OWNER, ALICE, GROUP])
   ctx.anima.registerBehavior(defineTool({
     name: 'test_say',
@@ -317,7 +317,7 @@ describe('AnimaMemory', () => {
     ctx.animaMemory.tick()
     await new Promise(resolve => setTimeout(resolve, 0))
     expect(ctx.animaMemory.consolidating).toBe(true)
-    expect(host.delivered.some(d => d.text.includes('[consolidate]'))).toBe(true)
+    expect(host.delivered.some(d => d.text.includes('[整理记忆]'))).toBe(true)
   })
 
   it('wakes group conversations only when addressed', async () => {

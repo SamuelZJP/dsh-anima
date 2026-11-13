@@ -14,10 +14,11 @@ function digest(...parts: string[]): string {
  * Conversation session id of a channel.
  * @param characterId - character identity.
  * @param key - channel key `platform:account:kind:id`.
+ * @param generation - conversation generation (core `conversationGeneration`); 1 keeps the original ids.
  * @returns `anima-c-<24 hex>`.
  */
-export function conversationSessionId(characterId: string, key: string): string {
-  return `anima-c-${digest('conversation', characterId, key)}`
+export function conversationSessionId(characterId: string, key: string, generation = 1): string {
+  return generation === 1 ? `anima-c-${digest('conversation', characterId, key)}` : `anima-c-${digest('conversation', characterId, key, String(generation))}`
 }
 
 /**

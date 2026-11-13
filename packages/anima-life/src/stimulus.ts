@@ -5,7 +5,7 @@
  * @module @anima/life/stimulus
  */
 
-import { channelKey, type ChannelRef } from '@anima/core'
+import { channelKey, placeName, type ChannelRef } from '@anima/core'
 import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
@@ -18,6 +18,8 @@ export interface PublishedChannel extends ChannelRef {
   readonly display: string
   /** Whether this is the owner's own channel (from bound account ids, never message text). */
   readonly isOwner?: boolean
+  /** A fact line about this channel for the environment primer (Chinese), e.g. who reads it. */
+  readonly note?: string
 }
 
 /** Who sent a message. */
@@ -45,6 +47,12 @@ export type Stimulus =
     readonly addressed?: boolean
     /** Platform message id, so she can reply to it. */
     readonly messageId?: string | undefined
+    /**
+     * Why an unaddressed group message wakes her (set by life): she chose it in
+     * group triage, with her reason, or it came in the attention window after
+     * she spoke there (DESIGN §5, §6).
+     */
+    readonly via?: { readonly kind: 'triage'; readonly reason: string } | { readonly kind: 'attention' } | undefined
   }
   | {
     /**
@@ -90,6 +98,8 @@ export type Stimulus =
     readonly intentId: string
     readonly intent: string
     readonly context?: string | undefined
+    /** Real seconds her message waits in the outbox, where the owner can cancel it; 0 or absent when it goes at once. */
+    readonly heldSeconds?: number | undefined
     readonly ts: number
   }
   | {
@@ -139,15 +149,17 @@ export function wakes(stimulus: Stimulus): boolean {
  * Route one stimulus to exactly one session.
  * @param characterId - character identity.
  * @param stimulus - the stimulus.
+ * @param selfGeneration - Self session generation.
+ * @param conversationGeneration - conversation session generation.
  * @returns the target session.
  */
-export function route(characterId: string, stimulus: Stimulus, selfGeneration = 1): Route {
+export function route(characterId: string, stimulus: Stimulus, selfGeneration = 1, conversationGeneration = 1): Route {
   switch (stimulus.type) {
     case 'message':
     case 'channel-event':
     case 'intent': {
       const key = channelKey(stimulus.channel)
-      return { kind: 'conversation', sessionId: conversationSessionId(characterId, key), channel: stimulus.channel, channelKey: key }
+      return { kind: 'conversation', sessionId: conversationSessionId(characterId, key, conversationGeneration), channel: stimulus.channel, channelKey: key }
     }
     case 'heartbeat':
       return stimulus.to === 'triage'
@@ -170,46 +182,68 @@ export function route(characterId: string, stimulus: Stimulus, selfGeneration = 
  */
 export function senderLabel(stimulus: Extract<Stimulus, { type: 'message' }>): string {
   const { channel, sender } = stimulus
-  const name = `${sender.displayName}${sender.isOwner ? ' (owner)' : ''}`
+  const name = `${sender.displayName}${sender.isOwner ? '（主人）' : ''}`
   if (channel.kind === 'private') return stimulus.messageId === undefined ? name : `${name} [msg ${stimulus.messageId}]`
   const ids = [`${channel.platform} ${sender.platformUserId}`, ...stimulus.messageId === undefined ? [] : [`msg ${stimulus.messageId}`]]
   return `${name} [${ids.join(', ')}]`
 }
 
 /**
- * Model-facing text of a stimulus, without the clock stamp.
- * @returns e.g. `[local private "Owner (local)"] Sam (owner): hello`.
+ * Model-facing text of a stimulus, without the clock stamp. In Chinese, like
+ * the primer; each states the facts of the arrival (DESIGN §5 table) and never
+ * whether she should answer. The router adds the "how to answer here" line to
+ * waking conversation arrivals.
+ * @returns e.g. `[本地 私聊「Owner (local)」] Sam（主人）对你说: hello`.
  */
 export function stimulusText(stimulus: Stimulus): string {
   switch (stimulus.type) {
     case 'message': {
       const { channel } = stimulus
-      return `[${channel.platform} ${channel.kind} ${JSON.stringify(channel.display)}] ${senderLabel(stimulus)}: ${stimulus.text}`
+      const where = `[${placeName(channel)}]`
+      if (channel.kind !== 'group') return `${where} ${senderLabel(stimulus)} 对你说: ${stimulus.text}`
+      if (stimulus.addressed === true) return `${where} ${senderLabel(stimulus)} 叫你（群里所有人都会看到你的回答）: ${stimulus.text}`
+      const via = stimulus.via
+      const line = `${where} ${senderLabel(stimulus)}: ${stimulus.text}`
+      if (via?.kind === 'triage') return `${line}\n（没有人叫你；是你在扫视群聊时决定来看看${via.reason === '' ? '' : `，你的理由：${via.reason}`}。）`
+      if (via?.kind === 'attention') return `${line}\n（这条没有叫你；你刚在这个群里说过话，所以它直接到了你这里。）`
+      return line
     }
-    case 'channel-event': {
-      const { channel } = stimulus
-      return `[${channel.platform} ${channel.kind} ${JSON.stringify(channel.display)}] [event] ${stimulus.text}`
-    }
+    case 'channel-event':
+      return `[${placeName(stimulus.channel)}] [事件] ${stimulus.text}（只是上下文，不需要回答。）`
     case 'group-batch':
-      return `[group batch ${stimulus.batch}]\n${stimulus.text}`
+      return `[群聊批次 ${stimulus.batch}]\n${stimulus.text}`
     case 'notice':
-      return `[notice] ${stimulus.text}`
+      return `[通知] ${stimulus.text}`
     case 'heartbeat':
-      return `[heartbeat]\n${stimulus.text}`
+      return `[心跳]\n${stimulus.text}`
     case 'intent': {
       const { channel } = stimulus
+      const held = stimulus.heldSeconds ?? 0
       return [
-        `[intent from your Self] (${stimulus.intentId}) You decided to start a conversation here, in ${channel.platform} ${channel.kind} ${JSON.stringify(channel.display)}.`,
-        `What you want: ${stimulus.intent}`,
-        ...stimulus.context === undefined || stimulus.context === '' ? [] : [`Context: ${stimulus.context}`],
-        `Write your own words and send them with ${channel.platform}_say, or call stay_silent(reason) if on reflection it is not the right moment.`,
+        `[来自 Self 的意图]（${stimulus.intentId}）你在自己的内心决定来 ${placeName(channel)} 开口。对方没有发消息给你。`,
+        `你想要的：${stimulus.intent}`,
+        ...stimulus.context === undefined || stimulus.context === '' ? [] : [`背景：${stimulus.context}`],
+        held > 0 ? `你发出的消息会先在发件箱里等 ${held} 秒，主人在这期间可以取消。Self 会知道结果。` : 'Self 会知道结果。',
       ].join('\n')
     }
     case 'consolidate':
-      return `[consolidate]\n${stimulus.text}`
+      return `[整理记忆]\n${stimulus.text}`
     case 'view':
-      return `[viewing]\n${stimulus.text}`
+      return `[细看]\n${stimulus.text}`
   }
+}
+
+/**
+ * The "how to answer here" line of a waking conversation arrival (DESIGN §5),
+ * from her actual tools.
+ * @param channel - the conversation's channel.
+ * @param say - this chat's say tool, when one is registered.
+ * @param ender - the closing tool without speech (`end_turn`), when registered.
+ */
+export function answerLine(channel: ChannelRef, say: string | undefined, ender: string | undefined): string {
+  const who = channel.kind === 'group' ? '群里所有人都看得到' : '只有对方看得到'
+  const speak = say === undefined ? '这里没有说话的工具' : `用 ${say} 说话（${who}）`
+  return `在这里回应：${speak}${ender === undefined ? '' : `，或用 ${ender} 结束不说`}。只写文字不算回应。`
 }
 
 /** One-line summary shown on the collapsed context row. */

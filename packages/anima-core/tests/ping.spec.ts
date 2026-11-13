@@ -12,7 +12,7 @@ async function setup(): Promise<Context> {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
   return ctx
 }
 
@@ -48,7 +48,7 @@ it('unregisters the tool when the plugin is disposed', async () => {
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  const fiber = await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+  const fiber = await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
   expect(ctx.tools.get(animaCore.PING_TOOL)).toBeDefined()
   await fiber.dispose()
   expect(ctx.tools.get(animaCore.PING_TOOL)).toBeUndefined()

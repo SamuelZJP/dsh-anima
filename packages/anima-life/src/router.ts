@@ -7,7 +7,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { AnimaError, channelKey, type SessionInfo, type SessionKind } from '@anima/core'
-import { route, stimulusRef, stimulusSummary, stimulusText, wakes, type ExtraBlock, type PublishedChannel, type Route, type Stimulus } from './stimulus.ts'
+import { answerLine, route, stimulusRef, stimulusSummary, stimulusText, wakes, type ExtraBlock, type PublishedChannel, type Route, type Stimulus } from './stimulus.ts'
 import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
 
 /** Preset ids of the session kinds (bundle/presets/*.patch.yml). */
@@ -45,6 +45,11 @@ export interface SessionHost<A extends HostAgent = HostAgent> {
   rename(agent: A, title: string): void
   /** Queue a waking message and wait until it is durable. */
   deliver(agent: A, text: string, summary: string, stimulus: Stimulus['type'], ref?: string, extra?: readonly ExtraBlock[]): Promise<void>
+  /**
+   * Steer a message into the agent's running turn as its next step (a close
+   * reminder at `agent/turn-stopping`). Optional: without it no reminder is sent.
+   */
+  steer?(agent: A, text: string, summary: string, stimulus: string): void
   /** Queue context for the agent's next step without waking it. */
   inject(agent: A, text: string, summary: string, stimulus: string): Promise<void>
   /** Select the model of the agent's next requests. */
@@ -58,9 +63,17 @@ export interface RouterOptions {
   readonly characterId: string
   /** Self session generation (core `selfGeneration`); defaults to 1. */
   readonly selfGeneration?: number
+  /** Conversation session generation (core `conversationGeneration`); defaults to 1. */
+  readonly conversationGeneration?: number
   readonly dataDir: string
   /** Clock stamp prefixed to every delivered stimulus, e.g. `Tue 2026-11-10 08:12`. */
   readonly stamp?: () => string
+  /**
+   * Her tools for answering in a channel: its say tool and the tool that ends
+   * the turn without speech, when registered. Waking conversation arrivals end
+   * with a line naming them (DESIGN §5); without this option there is no line.
+   */
+  readonly answerTools?: (channel: PublishedChannel) => { say: string | undefined; ender: string | undefined }
 }
 
 /** Routes stimuli to deterministic sessions and remembers which id is which channel. */
@@ -85,7 +98,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
    */
   know(channel: PublishedChannel): () => void {
     const key = channelKey(channel)
-    const sessionId = conversationSessionId(this.options.characterId, key)
+    const sessionId = conversationSessionId(this.options.characterId, key, this.options.conversationGeneration)
     const entry = { channel, channelKey: key }
     this.channels.set(sessionId, entry)
     return () => {
@@ -158,7 +171,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
 
   /** Conversation session id of a channel. */
   conversationId(channel: PublishedChannel): string {
-    return conversationSessionId(this.options.characterId, channelKey(channel))
+    return conversationSessionId(this.options.characterId, channelKey(channel), this.options.conversationGeneration)
   }
 
   /** Known conversation sessions, for status. */
@@ -214,7 +227,7 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
    * @returns the target session id.
    */
   async deliver(stimulus: Stimulus, before?: (agent: A) => void, wake = wakes(stimulus)): Promise<string> {
-    const target = route(this.options.characterId, stimulus, this.options.selfGeneration)
+    const target = route(this.options.characterId, stimulus, this.options.selfGeneration, this.options.conversationGeneration)
     if (target.kind === 'conversation' && !this.channels.has(target.sessionId)) this.know(target.channel)
     if (target.kind === 'triage') this.triage.set(target.sessionId, target.day)
     if (target.kind === 'consolidation') this.consolidation.set(target.sessionId, target.day)
@@ -229,7 +242,12 @@ export class SessionRouter<A extends HostAgent = HostAgent> {
       agent = await this.ensure(target)
     }
     before?.(agent)
-    const text = this.stamped(stimulusText(stimulus))
+    let body = stimulusText(stimulus)
+    if (wake && target.kind === 'conversation') {
+      const tools = this.options.answerTools?.(target.channel)
+      if (tools !== undefined) body = `${body}\n${answerLine(target.channel, tools.say, tools.ender)}`
+    }
+    const text = this.stamped(body)
     if (wake) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus), stimulus.type === 'view' ? stimulus.parts : undefined)
     else await this.host.inject(agent, text, stimulusSummary(stimulus), stimulus.type)
     return target.sessionId

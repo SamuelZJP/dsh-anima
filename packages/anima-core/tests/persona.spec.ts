@@ -22,7 +22,7 @@ describe('persona tool hiding', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
     ctx.tools.register(defineTool({
       name: 'working_directory',
       description: 'cd',
@@ -45,7 +45,7 @@ describe('persona tool hiding', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
     const { scope } = await mintAgentScope(ctx, 'anima-self-y')
     await expect(scope.ctx.plugin(persona, { kind: 'self', hideTools: ['no_such_tool'] })).resolves.toBeDefined()
   })

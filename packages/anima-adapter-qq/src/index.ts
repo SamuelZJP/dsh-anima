@@ -14,7 +14,7 @@ import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-llm'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AnimaError, formatLocal } from '@anima/core'
+import { AnimaError, formatLocal, SAY_META, SAY_PARAMETERS, sayMessages } from '@anima/core'
 import type {} from '@anima/core'
 import type { PublishedChannel } from '@anima/life'
 import type {} from '@anima/life'
@@ -301,7 +301,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       await life.deliver({
         type: 'message', channel,
         sender: { platformUserId: userId, displayName: isOwner ? config.ownerName : names.get(userId) ?? userId, isOwner },
-        text: '[pokes you]', ts: core.clock.now(),
+        text: '[戳了戳你]', ts: core.clock.now(),
         ...channel.kind === 'group' ? { addressed: true } : {},
       })
       return
@@ -347,9 +347,9 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
 
   core.registerBehavior(defineTool({
     name: SAY_TOOL,
-    description: 'Send one message in this QQ chat. They see only what you send this way. In groups you can reply to a message id and mention people by user id.',
+    description: 'Send a message in this QQ chat, or a list of messages sent in order. They see only what you send this way. In groups you can reply to a message id and mention people by user id (both apply to the first message). A say ends your turn unless more: true.',
     parameters: {
-      text: { type: 'string', required: true, description: 'The message, exactly as it should appear.' },
+      ...SAY_PARAMETERS,
       replyTo: { type: 'string', description: 'Optional message id to reply to (the "msg" number shown with each message).' },
       mention: { type: 'array', items: { type: 'string' }, description: 'Optional QQ user ids to @ before the text (groups only).' },
     },
@@ -357,22 +357,24 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       schema: {
         type: 'object', additionalProperties: false,
         properties: {
-          sent: { type: 'boolean', required: true, description: 'Whether the message went out.' },
-          messageId: { type: 'string', required: true, description: 'QQ message id of what you sent.' },
+          sent: { type: 'boolean', required: true, description: 'Whether the messages went out.' },
+          messageId: { type: 'string', required: true, description: 'QQ message id of the (last) message you sent.' },
+          messageIds: { type: 'array', items: { type: 'string' }, description: 'QQ message ids, when you sent several.' },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `sent (msg ${value.messageId})` }],
+      render: (_args, value) => [{ type: 'text', text: value.messageIds === undefined ? `sent (msg ${value.messageId})` : `sent ${value.messageIds.length} messages (msg ${value.messageIds.join(', ')})` }],
     },
     async execute(args, exec) {
       const channel = sessionChannel(exec.agent?.id)
-      if (args.text.trim() === '') throw new AnimaError('anima/empty-message', 'text is empty; to stay silent, call stay_silent instead.')
+      const messages = sayMessages(args)
+      if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
       const mention = args.mention ?? []
       if (mention.length > 0 && channel.kind !== 'group') throw new AnimaError('anima/bad-args', 'mention works only in group chats.')
       if (mention.some(id => !/^\d{4,12}$/.test(id))) throw new AnimaError('anima/bad-args', 'mention takes QQ user ids (digits), as shown with each message.')
       // Typing shows only while a message she chose waits in the outbox, in private chats.
       let typing: ReturnType<typeof setTimeout> | undefined
       try {
-        await life.holdOutgoing(exec.agent!.id, args.text, {
+        await life.holdOutgoing(exec.agent!.id, messages.join('\n'), {
           onHeld: (held) => {
             if (channel.kind !== 'private' || !config.typing.enabled) return
             typing = setTimeout(() => {
@@ -385,11 +387,21 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       } finally {
         clearTimeout(typing)
       }
-      const messageId = await send(channel.kind as 'private' | 'group', channel.id, outgoing(args.text, { replyTo: args.replyTo, mention }))
-      keep(messageId, 'you', args.text)
-      return { sent: true, messageId }
+      const ids: string[] = []
+      for (const [index, text] of messages.entries()) {
+        try {
+          const id = await send(channel.kind as 'private' | 'group', channel.id, outgoing(text, index === 0 ? { replyTo: args.replyTo, mention } : { mention: [] }))
+          keep(id, 'you', text)
+          ids.push(id)
+        } catch (error: unknown) {
+          if (ids.length === 0) throw error
+          const reason = error instanceof Error ? error.message : String(error)
+          throw new AnimaError('anima/partly-sent', `${ids.length} of ${messages.length} messages went out (msg ${ids.join(', ')}); message ${index + 1} failed: ${reason}`)
+        }
+      }
+      return { sent: true, messageId: ids.at(-1)!, ...ids.length > 1 ? { messageIds: ids } : {} }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
 
   core.registerBehavior(defineTool({
     name: HISTORY_TOOL,

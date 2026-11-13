@@ -77,9 +77,9 @@ async function setup(options: { core?: Record<string, unknown>; bili?: Record<st
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent> })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   await ctx.plugin(animaMemory, {})
   const saved: { name?: string; bytes: number }[] = []
   ctx.provide('attachments')
@@ -203,8 +203,8 @@ describe('Bilibili adapter', () => {
     }
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
-    await ctx.plugin(AnimaLife, { host: new FakeHost() as unknown as SessionHost<Agent> })
+    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+    await ctx.plugin(AnimaLife, { host: new FakeHost() as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     let polls = 0
     let loggedIn = false
     const fetchImpl = (async (input: string | URL) => {

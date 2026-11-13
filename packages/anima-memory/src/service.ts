@@ -7,7 +7,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, formatLocal, stringArg, type BehaviorEvent, type SessionInfo } from '@anima/core'
+import { AnimaError, formatLocal, sayMessages, stringArg, type BehaviorEvent, type SessionInfo } from '@anima/core'
 import type {} from '@anima/core'
 import type { Stimulus, StimulusEvent } from '@anima/life'
 import type {} from '@anima/life'
@@ -156,11 +156,13 @@ export class AnimaMemory extends Service {
   }
 
   private onBehavior(event: BehaviorEvent): void {
-    if (event.meta.effect !== 'express' || typeof event.args.text !== 'string') return
+    // A say's text is one message or a list of them (DESIGN §6); each is one transcript line.
+    const messages = event.meta.effect === 'express' ? sayMessages(event.args) : []
+    if (messages.length === 0) return
     const facts = this.facts(event.sessionId)
     const scope = learnScope(facts, this.config.persons)
     if (scope === undefined || facts.info?.kind !== 'conversation' || event.sessionId === undefined) return
-    this.store.record({ ts: event.at, sessionId: event.sessionId, channelKey: facts.info.channelKey, scope, dir: 'out', speaker: 'you', text: event.args.text })
+    for (const text of messages) this.store.record({ ts: event.at, sessionId: event.sessionId, channelKey: facts.info.channelKey, scope, dir: 'out', speaker: 'you', text })
   }
 
   /**

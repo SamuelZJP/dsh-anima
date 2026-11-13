@@ -17,14 +17,15 @@ import { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, t
 import { AnimaClock, formatLocal, parseWhen } from './clock.ts'
 import { SubcommandTable, type Subcommand } from './commands.ts'
 import type { ModeConfig, ResolvedConfig } from './config.ts'
-import { decide, GateCode, QuotaBook, visibleIn, type GateCall, type GateMoment } from './gate.ts'
+import { decide, GateCode, QuotaBook, quotaExempt, visibleIn, type GateCall, type GateMoment } from './gate.ts'
 import { describeGoal, GoalStore, type Goal } from './goals.ts'
 import { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
 import { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfSection } from './selfmodel.ts'
 import { billableTokens, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 import { dayKey, inWindow, modeAt, phaseAt, type Mode, type Phase } from './rhythm.ts'
 import { advance, describeNeeds, feel, initialState, satisfy, spendTurn, type SelfState, type StateModel } from './state.ts'
-import { AnimaError, type BehaviorMeta, type SessionInfo } from './types.ts'
+import type { PlaceFacts } from './primer.ts'
+import { AnimaError, closesTurn, costOf, type BehaviorMeta, type SessionInfo, type SessionKind } from './types.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -57,8 +58,16 @@ export interface BehaviorEvent {
 /** Maps a DSH session id to Anima session info; provided by `anima-life`. */
 export type SessionResolver = (sessionId: string) => SessionInfo | undefined
 
+/** What core knows about a channel: owner or not (gate), display name and an adapter's note (primer). */
+export interface ChannelInfo {
+  readonly isOwner: boolean
+  readonly display?: string | undefined
+  /** A fact line about this channel for the environment primer (Chinese), set by its adapter. */
+  readonly note?: string | undefined
+}
+
 /** What the gate needs to know about a channel; provided by `anima-life`. */
-export type ChannelResolver = (channelKey: string) => { readonly isOwner: boolean } | undefined
+export type ChannelResolver = (channelKey: string) => ChannelInfo | undefined
 
 /**
  * Handles an owner reply command (`cancel o2`, …) that approvals do not.
@@ -182,7 +191,9 @@ export class AnimaCore extends Service {
         record('refused', code, hint)
         return refusal(code, hint)
       }
-      if (this.state.paused) return refuse(GateCode.paused, PAUSED_HINT)
+      // A pause refuses everything except closing a turn: end_turn and friends act on nothing
+      // outside her, and refusing them would leave the turn unclosed (a false lost reply).
+      if (this.state.paused && !quotaExempt(meta)) return refuse(GateCode.paused, PAUSED_HINT)
       const args = exec.arguments !== null && typeof exec.arguments === 'object' ? exec.arguments as Record<string, unknown> : {}
       let facts: Readonly<Record<string, number>> | undefined
       if (meta.facts !== undefined) {
@@ -211,7 +222,7 @@ export class AnimaCore extends Service {
           record('denied', GateCode.denied, hint)
           return refusal(GateCode.denied, hint)
         }
-        if (this.state.paused) return refuse(GateCode.paused, PAUSED_HINT)
+        if (this.state.paused && !quotaExempt(meta)) return refuse(GateCode.paused, PAUSED_HINT)
       }
       const decision = await next()
       if (decision.kind === 'allow') {
@@ -224,8 +235,11 @@ export class AnimaCore extends Service {
       return decision
     }, { prepend: true })
 
-    // Monotonic final denial: nothing later in the pipeline can lift a pause.
-    ctx.tools.guard(exec => this.state.paused && this.behaviorTable.has(exec.name) ? `${GateCode.paused}: ${PAUSED_HINT}` : undefined)
+    // Monotonic final denial: nothing later in the pipeline can lift a pause (turn closers excepted).
+    ctx.tools.guard(exec => {
+      const meta = this.behaviorTable.get(exec.name)
+      return this.state.paused && meta !== undefined && !quotaExempt(meta) ? `${GateCode.paused}: ${PAUSED_HINT}` : undefined
+    })
 
     // Token budget: count billable tokens of every Anima session's model calls.
     ctx.on('session/event', (session, event) => {
@@ -463,8 +477,10 @@ export class AnimaCore extends Service {
       ...definition,
       execute: async (args, exec) => {
         const value = await definition.execute(args, exec)
+        // A closing behavior ends the turn only once it succeeded (DESIGN §6, Turn shape).
+        if (closesTurn(meta, args as Record<string, unknown>)) exec.concludeTurn()
         // A started conversation counts only once it really started; a refused or failed call does not.
-        if (meta.effect === 'initiate') this.today(this.clock.now()).initiates += meta.cost ?? 1
+        if (meta.effect === 'initiate') this.today(this.clock.now()).initiates += costOf(meta, args as Record<string, unknown>)
         this.onBehaviorSuccess(name)
         const event: BehaviorEvent = { name, meta, args: args as Record<string, unknown>, sessionId: exec.agent?.id, at: this.clock.now() }
         this.ctx.emit('anima/behavior', event)
@@ -495,6 +511,68 @@ export class AnimaCore extends Service {
       this.behaviorTable.set(name, meta)
       return () => { this.behaviorTable.delete(name) }
     }, `anima.governTool(${name})`)
+  }
+
+  /**
+   * Ask the gate whether code may do something on her behalf that is not a
+   * tool call (DESIGN §6: a group attention-window wake). Only the pause switch
+   * and the quotas of `name` apply; an allowed admission is counted, and every
+   * decision goes to the activity log like a behavior call.
+   * @param name - pseudo-behavior name quota rules match, e.g. `group_attention`.
+   * @param channelKey - the channel it is for, the counter of `per: channel` rules.
+   * @returns whether it may happen now.
+   */
+  admit(name: string, channelKey: string): boolean {
+    const meta: BehaviorMeta = { effect: 'internal', sessions: ['conversation'], target: () => channelKey }
+    const now = this.clock.now()
+    const call: GateCall = { name, meta, session: undefined, now, args: {} }
+    const record = (decision: 'allowed' | 'refused', code?: string, hint?: string) => this.recordActivity({
+      type: 'gate', behavior: name, decision, session: 'conversation', channel: channelKey,
+      ...code === undefined ? {} : { code }, ...hint === undefined ? {} : { hint },
+    })
+    if (this.state.paused) {
+      record('refused', GateCode.paused, PAUSED_HINT)
+      return false
+    }
+    // Only rules that name it: an admission is not a behavior call, so the global ceiling does not count it.
+    const own = (rule: { behavior?: string | undefined }) => rule.behavior === name
+    const over = this.quota.exceeded(call, this.config.quotas, own)
+    if (over !== undefined) {
+      record('refused', GateCode.overQuota, `limit of ${over.rule.limit} per ${over.rule.windowMinutes} min reached for ${name} in ${channelKey}.`)
+      return false
+    }
+    this.quota.record(call, this.config.quotas, own)
+    this.save()
+    record('allowed')
+    return true
+  }
+
+  /**
+   * Facts of a session for the environment primer (DESIGN §9): its channel, the
+   * behaviors visible there in any mode, and the quotas and limits that can apply.
+   * @param sessionId - the session, when known at assembly time.
+   * @param kind - the preset's session kind, used when the id is not an Anima session yet.
+   */
+  placeFacts(sessionId: string | undefined, kind: SessionKind): PlaceFacts {
+    const described = sessionId === undefined ? undefined : this.describeSession(sessionId)
+    // A conversation is known only with its channel; other kinds are known from the preset alone.
+    const session: SessionInfo | undefined = described ?? (kind === 'conversation' ? undefined : { kind } as SessionInfo)
+    const tools = session === undefined ? [] : [...this.behaviorTable].filter(([, meta]) => visibleIn(meta, session)).map(([name, meta]) => ({ name, meta }))
+    const base = { kind, tools, quotas: this.config.quotas, limits: this.config.limits }
+    if (session?.kind === 'conversation') {
+      const info = this.channelInfo(session.channelKey)
+      return { ...base, channel: { platform: session.channel.platform, kind: session.channel.kind, key: session.channelKey, display: info?.display, isOwner: info?.isOwner === true, note: info?.note } }
+    }
+    if (kind === 'self') {
+      const counts = new Map<string, number>()
+      for (const key of this.state.channelList?.() ?? []) {
+        if (this.channelAllowed(key) === false) continue
+        const platform = key.split(':')[0]!
+        counts.set(platform, (counts.get(platform) ?? 0) + 1)
+      }
+      return { ...base, reach: [...counts].map(([platform, channels]) => ({ platform, channels })), initiatePerDay: this.config.initiate.perDay }
+    }
+    return base
   }
 
   /** Metadata of a registered or governed behavior. */
@@ -880,6 +958,8 @@ export class AnimaCore extends Service {
       approvals: this.approvals.list().length,
       ownerLine: this.state.ownerLine?.name ?? null,
       selfModel: { notes: this.selfModel.entries().length },
+      // Turns that ended without a say or end_turn today (DESIGN §6): the page warns on any.
+      speech: this.daySummary(this.dayKey(now)).speech,
       quotas: this.quota.usage(this.config.quotas, now),
       parts,
     }
@@ -985,7 +1065,7 @@ export class AnimaCore extends Service {
    * What the channel resolver knows about a channel (e.g. whether it is the owner's).
    * @param channelKey - `platform:account:kind:id`.
    */
-  channelInfo(channelKey: string): { readonly isOwner: boolean } | undefined {
+  channelInfo(channelKey: string): ChannelInfo | undefined {
     return this.state.channels?.(channelKey)
   }
 
@@ -1026,6 +1106,7 @@ export class AnimaCore extends Service {
     const now = this.clock.now()
     const speed = this.clock.speed === 1 ? 'real time' : `${this.clock.speed}× speed`
     const goals = this.goals.open()
+    const speech = this.daySummary(this.dayKey(now)).speech
     const lines = [
       `Character: ${this.config.name} (${this.config.characterId}), data in ${this.config.dataDir}`,
       `Paused: ${this.state.paused ? 'yes' : 'no'}`,
@@ -1038,6 +1119,7 @@ export class AnimaCore extends Service {
       `Behaviors: ${[...this.behaviorTable.keys()].sort().join(', ') || '(none)'}`,
       `Owner line: ${this.state.ownerLine?.name ?? 'none (approval-class behaviors are refused)'}`,
       `Pending approvals: ${this.approvals.list().map(p => `${p.id} ${p.summary}`).join('; ') || 'none'}`,
+      `Speech today: ${speech.lostReplies} lost replies, ${speech.reminders} close reminders`,
     ]
     for (const provider of this.statusProviders) lines.push(...provider())
     lines.push('Quotas:', ...this.quota.usage(this.config.quotas, now).map(line => `  ${line}`))

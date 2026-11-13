@@ -31,11 +31,13 @@ describe('fact limits (DESIGN §10)', () => {
     expect(textOf(result)).toBe('Error: anima/bad-args: not a bvid.')
   })
 
-  it('has default limits of 12 frames and 20 minutes for close views', () => {
+  it('has default limits of 12 frames and 20 minutes for close views, and 5 messages per say', () => {
     const config = animaCore.resolveConfig({})
     expect(config.limits).toEqual([
       { behavior: 'bili_view_closely', fact: 'frames', max: 12 },
       { behavior: 'bili_view_closely', fact: 'durationSeconds', max: 1200 },
+      { behavior: 'qq_say', fact: 'messages', max: 5 },
+      { behavior: 'local_say', fact: 'messages', max: 5 },
     ])
     const verdict = decide({ name: 'bili_view_closely', meta: watch, session: { kind: 'self' }, now: 0, facts: { frames: 13 } }, { quotas: [], allow: [], limits: config.limits }, new QuotaBook())
     expect(verdict).toMatchObject({ allowed: false, code: GateCode.overLimit })

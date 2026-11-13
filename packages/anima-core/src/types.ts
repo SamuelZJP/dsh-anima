@@ -56,8 +56,17 @@ export interface BehaviorMeta {
   readonly platform?: string
   /** Effect class. */
   readonly effect: EffectClass
-  /** Weight counted against quotas; defaults to 1. */
-  readonly cost?: number
+  /**
+   * Weight counted against quotas; defaults to 1. A function reads it from the
+   * call's arguments (a say with a list of messages costs one per message).
+   */
+  readonly cost?: number | ((args: Readonly<Record<string, unknown>>) => number)
+  /**
+   * Whether a successful call closes the conversation turn (DESIGN §6, Turn
+   * shape): the core wrapper then concludes the turn. A say closes unless
+   * `more: true`; `end_turn` always closes; gestures and observe calls never do.
+   */
+  readonly closes?: boolean | ((args: Readonly<Record<string, unknown>>) => boolean)
   /** Session kinds that may call it. */
   readonly sessions: readonly SessionKind[]
   /** Heartbeat modes it works in; all when omitted. */
@@ -77,6 +86,50 @@ export interface BehaviorMeta {
    */
   readonly facts?: (args: Readonly<Record<string, unknown>>) => Promise<Readonly<Record<string, number>>>
 }
+
+/** Quota weight of one call (DESIGN §10). */
+export function costOf(meta: BehaviorMeta, args: Readonly<Record<string, unknown>> = {}): number {
+  const cost = typeof meta.cost === 'function' ? meta.cost(args) : meta.cost ?? 1
+  return Number.isFinite(cost) && cost > 0 ? cost : 1
+}
+
+/** Whether a successful call closes the turn (DESIGN §6, Turn shape). */
+export function closesTurn(meta: BehaviorMeta, args: Readonly<Record<string, unknown>> = {}): boolean {
+  return typeof meta.closes === 'function' ? meta.closes(args) : meta.closes === true
+}
+
+/**
+ * The messages of a say call (DESIGN §6): `text`, then each of `also`, in order;
+ * blank ones are dropped. A list passed as `text` is accepted too.
+ * @param args - the say's arguments.
+ */
+export function sayMessages(args: Readonly<Record<string, unknown>>): string[] {
+  const items = [...Array.isArray(args.text) ? args.text : [args.text], ...Array.isArray(args.also) ? args.also : []]
+  return items.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(item => item !== '')
+}
+
+/**
+ * Parameters and metadata every platform say shares (DESIGN §6, Turn shape):
+ * `text` is the message, `also` further messages sent after it, and `more`
+ * keeps the turn open. `text` is a plain string, not a string-or-list union:
+ * with a `oneOf` there, DeepSeek-Flash wrote the string unquoted
+ * (`{"text": 在的}`), which DSH rejects as invalid JSON (Phase 8 check). A say
+ * closes the turn unless `more: true`, costs one quota unit however many
+ * messages it sends (per-message cost spent the owner chat's hourly quota in
+ * eight replies during the supervised QQ hour), and reports how many messages
+ * it sends as the `messages` fact (owner `limits`, 5 by default).
+ */
+export const SAY_PARAMETERS = {
+  text: { type: 'string', required: true, description: 'The message, exactly as it should appear.' },
+  also: { type: 'array', items: { type: 'string' }, description: 'Optional further messages, sent one after another after text.' },
+  more: { type: 'boolean', description: 'true keeps this turn open after sending (you want to do something else first). Omit it for a normal reply: the say ends your turn.' },
+} as const
+
+/** Say metadata shared by every platform (see {@link SAY_PARAMETERS}). */
+export const SAY_META = {
+  closes: (args: Readonly<Record<string, unknown>>) => args.more !== true,
+  facts: async (args: Readonly<Record<string, unknown>>) => ({ messages: sayMessages(args).length }),
+} satisfies Partial<BehaviorMeta>
 
 /** Structured Anima error with a stable `code` and a human-readable hint in the message. */
 export class AnimaError extends Error {

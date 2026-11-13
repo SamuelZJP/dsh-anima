@@ -124,6 +124,12 @@ export interface Config {
    * data directory and carry over.
    */
   selfGeneration: number
+  /**
+   * Generation of her conversation sessions. Raising it starts a fresh session
+   * in every chat; the old ones stay in the sidebar, and memory carries over.
+   * 2 since Phase 8: histories from the old turn shape taught the old habit.
+   */
+  conversationGeneration: number
   /** Her name, used in the default constitution. */
   name: string
   /** Plugin data directory; `~` expands to the home directory. */
@@ -173,6 +179,8 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   { behavior: 'schedule_create', per: 'global', limit: 20, windowMinutes: 24 * 60 },
   // Group triage may wake a group's conversation at most this often (DESIGN §5).
   { behavior: 'group_wake', per: 'channel', limit: 6, windowMinutes: 60 },
+  // Attention window (Phase 8): direct wakes in a group shortly after she spoke there.
+  { behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 },
   // Bilibili browsing: calls per hour, and close views (tier 2) per day (DESIGN §11).
   { platform: 'bili', per: 'platform', limit: 60, windowMinutes: 60 },
   { behavior: 'bili_view_closely', per: 'global', limit: 3, windowMinutes: 24 * 60 },
@@ -187,10 +195,13 @@ export const DEFAULT_QUOTAS: QuotaRule[] = [
   { behavior: 'qq_react', per: 'channel', limit: 10, windowMinutes: 60 },
 ]
 
-/** Default limits: a close view looks at no more than 12 frames of a video up to 20 minutes. */
+/** Default limits: a close view looks at no more than 12 frames of a video up to 20 minutes; a say sends at most 5 messages. */
 export const DEFAULT_LIMITS: LimitRule[] = [
   { behavior: 'bili_view_closely', fact: 'frames', max: 12 },
   { behavior: 'bili_view_closely', fact: 'durationSeconds', max: 20 * 60 },
+  // A say may send a short run of messages in one call (Phase 8).
+  { behavior: 'qq_say', fact: 'messages', max: 5 },
+  { behavior: 'local_say', fact: 'messages', max: 5 },
 ]
 
 /** Default model: DeepSeek-V4.1-Flash on the official API. */
@@ -224,6 +235,8 @@ export const Config: z<Config> = z.object({
     .description('Character identity, part of every session id. Changing it starts new sessions.'),
   selfGeneration: z.natural().min(1).default(1)
     .description('Generation of her Self session. Raising it starts a fresh Self session; state and goals carry over.'),
+  conversationGeneration: z.natural().min(1).default(2)
+    .description('Generation of her conversation sessions. Raising it starts a fresh session in every chat; memory carries over.'),
   name: z.string().default('Anima').description('Her name, used in the default constitution.'),
   dataDir: z.string().default('~/.anima').description('Plugin data directory.'),
   quotas: z.array(z.object({

@@ -86,9 +86,9 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   } })
   ctx.provide('llm')
   ctx.set('llm', { resolveModelInfo: async (_provider: string, model: string) => ({ inputModalities: model === 'blind' ? ['text'] : ['text', 'image'] }) })
-  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 }, ...core })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 }, ...core })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, platforms: { noticeAfterSeconds: 0 }, ...life } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, platforms: { noticeAfterSeconds: 0 }, ...life } })
   await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
     allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },

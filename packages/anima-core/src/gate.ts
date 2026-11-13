@@ -6,7 +6,7 @@
 
 import type { AllowRule, ApproveRule, LimitRule, QuotaRule } from './config.ts'
 import type { Mode } from './rhythm.ts'
-import type { BehaviorMeta, EffectClass, SessionInfo } from './types.ts'
+import { costOf, type BehaviorMeta, type EffectClass, type SessionInfo } from './types.ts'
 
 /** Gate outcome. A refusal carries a stable `code` and a hint she can act on. */
 export type Verdict =
@@ -129,7 +129,17 @@ function counterKey(index: number, rule: QuotaRule, call: GateCall): string {
   }
 }
 
+/**
+ * Whether a behavior only closes the turn with no effect on the world (`end_turn`,
+ * `rest`, `group_pass`): quotas never count or refuse it, because refusing the
+ * close leaves the turn unclosed and turns a spent quota into a lost reply (Phase 8).
+ */
+export function quotaExempt(meta: BehaviorMeta): boolean {
+  return meta.closes === true && meta.effect === 'internal'
+}
+
 function matches(rule: QuotaRule, call: GateCall): boolean {
+  if (quotaExempt(call.meta)) return false
   return (rule.effect === undefined || rule.effect === call.meta.effect)
     && (rule.behavior === undefined || rule.behavior === call.name)
     && (rule.platform === undefined || rule.platform === call.meta.platform)
@@ -163,12 +173,13 @@ export class QuotaBook {
 
   /**
    * Find the first matching rule the call would exceed.
+   * @param only - consider only these rules (indexes stay those of `quotas`).
    * @returns the rule and the time a slot frees up, or undefined when within all quotas.
    */
-  exceeded(call: GateCall, quotas: readonly QuotaRule[]): { rule: QuotaRule; freeAt: number } | undefined {
-    const cost = call.meta.cost ?? 1
+  exceeded(call: GateCall, quotas: readonly QuotaRule[], only?: (rule: QuotaRule) => boolean): { rule: QuotaRule; freeAt: number } | undefined {
+    const cost = costOf(call.meta, call.args)
     for (const [index, rule] of quotas.entries()) {
-      if (!matches(rule, call)) continue
+      if (!matches(rule, call) || only?.(rule) === false) continue
       const windowMs = rule.windowMinutes * 60_000
       const list = this.live(counterKey(index, rule, call), windowMs, call.now)
       let used = list.reduce((sum, entry) => sum + entry.amount, 0)
@@ -196,10 +207,10 @@ export class QuotaBook {
   }
 
   /** Count an allowed call against every rule it matches. */
-  record(call: GateCall, quotas: readonly QuotaRule[]): void {
-    const cost = call.meta.cost ?? 1
+  record(call: GateCall, quotas: readonly QuotaRule[], only?: (rule: QuotaRule) => boolean): void {
+    const cost = costOf(call.meta, call.args)
     for (const [index, rule] of quotas.entries()) {
-      if (!matches(rule, call)) continue
+      if (!matches(rule, call) || only?.(rule) === false) continue
       const key = counterKey(index, rule, call)
       const list = this.entries.get(key) ?? []
       list.push({ at: call.now, amount: cost })
@@ -281,7 +292,7 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   }
   if (meta.effect === 'initiate') {
     const limit = policy.initiatePerDay
-    if (limit !== undefined && moment.initiatesUsed + (meta.cost ?? 1) > limit) {
+    if (limit !== undefined && moment.initiatesUsed + costOf(meta, args) > limit) {
       return deny(GateCode.overQuota, `you already started ${moment.initiatesUsed} of ${limit} conversations allowed today. Wait until tomorrow, or wait for others to reach out.`)
     }
     if (moment.quiet !== undefined) return deny(GateCode.quietHours, `${moment.quiet}; you cannot start conversations now.`)
