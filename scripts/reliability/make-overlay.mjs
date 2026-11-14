@@ -9,7 +9,7 @@ import { ACCOUNT, CHARACTER, CHECK_DIR, GROUPS, OWNER, PORT, USERS } from './cas
 
 // Default quotas, except the global ceiling: ~210 turns in ~1 h are several days of her calls,
 // and the check measures how turns close, not the daily ceiling.
-const { DEFAULT_QUOTAS } = await import(new URL('../../packages/anima-core/lib/config.js', import.meta.url).href)
+const { DEFAULT_QUOTAS } = await import(new URL('../../packages/anima-guard/lib/config.js', import.meta.url).href)
 const quotas = DEFAULT_QUOTAS.map(rule => rule.per === 'global' && rule.behavior === undefined && rule.effect === undefined && rule.platform === undefined ? { ...rule, limit: 2000 } : rule)
 
 const dir = CHECK_DIR.replace(/^~/, homedir())
@@ -30,16 +30,17 @@ const yaml = `# Scripted reliability check (DESIGN §14). Own character and data
     name: 小鲸鱼
     dataDir: ${CHECK_DIR}
     clock: { speed: 1, start: '${start}' }
+- id: anima-guard
+  config:
     # Scripted intents come from the check; Self starts none of its own.
     initiate: { perDay: 0 }
-    modes:
-      day: { tokenBudget: 3000000 }
+    budget: { day: 3000000, night: 20000 }
+    outbox: { delaySeconds: 5 }
     quotas:
 ${quotas.map(rule => `      - ${JSON.stringify(rule)}`).join('\n')}
 - id: anima-life
   config:
     groupTriage: { windowSeconds: 10 }
-    outbox: { delaySeconds: 5 }
 - id: anima-adapter-qq
   disabled: false
   config:

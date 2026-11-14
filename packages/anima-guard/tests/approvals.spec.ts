@@ -1,10 +1,10 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, vi } from 'vitest'
 import { ApprovalBroker, parseOwnerReply } from '../src/approvals.ts'
-import { decide, GateCode, QuotaBook } from '../src/gate.ts'
+import { decide, GuardCode, QuotaBook } from '../src/gate.ts'
 import type { GateCall, GateMoment } from '../src/gate.ts'
-import type { BehaviorMeta, SessionInfo } from '../src/types.ts'
-import { callAs, provideSessions, registerEcho, setupCore, textOf } from './helpers.ts'
+import type { BehaviorMeta, SessionInfo } from '@anima/core'
+import { callAs, provideSessions, registerEcho, setupGuarded, textOf } from './helpers.ts'
 
 const qqChat: SessionInfo = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'group', id: '9' }, channelKey: 'qq:1:group:9' }
 const self: SessionInfo = { kind: 'self' }
@@ -12,7 +12,7 @@ const say: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['conve
 const remember: BehaviorMeta = { effect: 'internal', sessions: ['conversation'] }
 const open: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
 const now = Date.UTC(2026, 10, 10, 10)
-const moment = (extra: Partial<GateMoment> = {}): GateMoment => ({ mode: 'day', overBudget: false, initiatesUsed: 0, mayInitiate: () => true, ...extra })
+const moment = (extra: Partial<GateMoment> = {}): GateMoment => ({ overBudget: false, initiatesUsed: 0, mayInitiate: () => true, ...extra })
 const call = (name: string, meta: BehaviorMeta, session: SessionInfo, args: Record<string, unknown> = {}): GateCall => ({ name, meta, session, now, args })
 
 describe('parseOwnerReply', () => {
@@ -67,39 +67,21 @@ describe('ApprovalBroker', () => {
   })
 })
 
-describe('gate: allowlist and approvals', () => {
+describe('gate: approvals', () => {
   const book = new QuotaBook()
-  it('refuses platform behaviors in a channel off the allowlist', () => {
-    const verdict = decide(call('qq_say', say, qqChat), { quotas: [], allow: [] }, book, moment({ channelAllowed: () => false }))
-    expect(verdict).toMatchObject({ allowed: false, code: GateCode.notAllowlisted })
-    expect(decide(call('memory_remember', remember, qqChat), { quotas: [], allow: [] }, book, moment({ channelAllowed: () => false })).allowed).toBe(true)
-    expect(decide(call('qq_say', say, qqChat), { quotas: [], allow: [] }, book, moment({ channelAllowed: () => undefined })).allowed).toBe(true)
-  })
-  it('refuses initiating toward a channel off the allowlist', () => {
-    const allowed = (key: string) => key === 'qq:1:private:7'
-    expect(decide(call('open_conversation', open, self, { channel: 'qq:1:group:9' }), { quotas: [], allow: [] }, book, moment({ channelAllowed: allowed }))).toMatchObject({ code: GateCode.notAllowlisted })
-    expect(decide(call('open_conversation', open, self, { channel: 'qq:1:private:7' }), { quotas: [], allow: [] }, book, moment({ channelAllowed: allowed })).allowed).toBe(true)
-    // A key nobody published is refused first (before consent and approval), listing the real channels.
-    const unknown = decide(call('open_conversation', open, self, { channel: 'qq:owner:private:owner' }), { quotas: [], allow: [], approve: [{ behavior: 'open_conversation' }] }, book,
-      moment({ channelAllowed: allowed, mayInitiate: () => false, ownerLine: true, channelKnown: () => false, knownChannels: () => ['qq:1:private:7'] }))
-    expect(unknown).toEqual({ allowed: false, code: GateCode.unknownChannel, hint: '没有「qq:owner:private:owner」这个地方。你能去的地方：qq:1:private:7。' })
-  })
-  it('takes an allowed, known key on to consent and then approval', () => {
+  it('takes a call on to consent and then approval', () => {
     const policy = { quotas: [], allow: [], approve: [{ behavior: 'open_conversation' }] }
-    const known = { channelAllowed: () => true, channelKnown: () => true, ownerLine: true }
     const target = { channel: 'qq:1:private:7' }
-    expect(decide(call('open_conversation', open, self, target), policy, book, moment({ ...known, mayInitiate: () => false }))).toMatchObject({ code: GateCode.noConsent })
-    expect(decide(call('open_conversation', open, self, target), policy, book, moment({ ...known, mayInitiate: () => true }))).toMatchObject({ allowed: true, approval: expect.any(String) })
+    expect(decide(call('open_conversation', open, self, target), policy, book, moment({ ownerLine: true, mayInitiate: () => false }))).toMatchObject({ code: GuardCode.noConsent })
+    expect(decide(call('open_conversation', open, self, target), policy, book, moment({ ownerLine: true, mayInitiate: () => true }))).toMatchObject({ allowed: true, approval: expect.any(String) })
   })
   it('asks for approval only when an owner line exists, after the other checks', () => {
     const post: BehaviorMeta = { effect: 'public', sessions: ['self'] }
-    expect(decide(call('core_post', post, self), { quotas: [], allow: [] }, book, moment())).toMatchObject({ code: GateCode.needsApproval })
+    expect(decide(call('core_post', post, self), { quotas: [], allow: [] }, book, moment())).toMatchObject({ code: GuardCode.needsApproval })
     expect(decide(call('core_post', post, self), { quotas: [], allow: [] }, book, moment({ ownerLine: true }))).toMatchObject({ allowed: true, approval: expect.stringContaining('public') })
     expect(decide(call('core_post', post, self), { quotas: [], allow: [{ behavior: 'core_post' }] }, book, moment({ ownerLine: true }))).toEqual({ allowed: true })
-    // Forced approval for any effect class.
     expect(decide(call('open_conversation', open, self, { channel: 'x' }), { quotas: [], allow: [], approve: [{ behavior: 'open_conversation' }] }, book, moment({ ownerLine: true }))).toMatchObject({ allowed: true, approval: expect.stringContaining('approve every open_conversation') })
-    // A night refusal comes first.
-    expect(decide(call('core_post', post, self), { quotas: [], allow: [], allowedEffects: { day: [], night: ['internal'] } }, book, moment({ ownerLine: true, mode: 'night' }))).toMatchObject({ code: GateCode.night })
+    expect(decide(call('memory_remember', remember, qqChat), { quotas: [], allow: [] }, book, moment()).allowed).toBe(true)
   })
   it('counts per-channel quotas against the target channel', () => {
     const wake: BehaviorMeta = { effect: 'internal', sessions: ['group-triage'], target: args => args.channel as string }
@@ -109,14 +91,15 @@ describe('gate: allowlist and approvals', () => {
     const a = call('group_wake', wake, triage, { channel: 'qq:1:group:9' })
     expect(decide(a, { quotas, allow: [] }, books).allowed).toBe(true)
     books.record(a, quotas)
-    expect(decide(a, { quotas, allow: [] }, books)).toMatchObject({ code: GateCode.overQuota })
+    expect(decide(a, { quotas, allow: [] }, books)).toMatchObject({ code: GuardCode.overQuota })
     expect(decide(call('group_wake', wake, triage, { channel: 'qq:1:group:8' }), { quotas, allow: [] }, books).allowed).toBe(true)
+    expect(decide(call('qq_say', say, qqChat), { quotas: [], allow: [] }, book).allowed).toBe(true)
   })
 })
 
 describe('service: owner line', () => {
   it('awaits the owner in pre-execute and consumes reply commands', async () => {
-    const ctx = await setupCore({ approve: [{ behavior: 'core_note' }], approvals: { timeoutSeconds: 30 } })
+    const ctx = await setupGuarded({ approve: [{ behavior: 'core_note' }], approvals: { timeoutSeconds: 30 } })
     provideSessions(ctx, { s1: { kind: 'self' } })
     registerEcho(ctx, 'core_note', { effect: 'internal', sessions: ['self'] })
     const sent: string[] = []
@@ -126,58 +109,59 @@ describe('service: owner line', () => {
     await vi.waitFor(() => expect(sent.length).toBe(1))
     expect(sent[0]).toContain('core_note')
     const id = /approval (a\d+)/.exec(sent[0]!)![1]!
-    expect(ctx.anima.statusText()).toContain(`Pending approvals: ${id}`)
-    expect(ctx.anima.handleOwnerReply('hello there')).toBeUndefined()
-    expect(ctx.anima.handleOwnerReply(`yes ${id}`)).toBe(`Allowed ${id}.`)
+    expect(ctx.animaGuard.statusText()).toContain(`Pending approvals: ${id}`)
+    expect(ctx.bail('anima/owner-message', 'hello there')).toBeUndefined()
+    expect(ctx.bail('anima/owner-message', `yes ${id}`)).toBe(`Allowed ${id}.`)
     expect((await pending).isError).toBe(false)
 
     const refused = callAs(ctx, 's1', 'core_note', { text: 'again' })
     await vi.waitFor(() => expect(sent.length).toBe(2))
     const id2 = /approval (a\d+)/.exec(sent[1]!)![1]!
     expect(id2).not.toBe(id)
-    expect(ctx.anima.handleOwnerReply(`no ${id2}`)).toBe(`Denied ${id2}.`)
+    expect(ctx.bail('anima/owner-message', `no ${id2}`)).toBe(`Denied ${id2}.`)
     const result = await refused
     expect(result.isError).toBe(true)
     expect(textOf(result)).toContain('anima/denied')
-    expect(ctx.anima.handleOwnerReply('cancel o9')).toBe('No pending request o9.')
+    expect(ctx.bail('anima/owner-message', 'cancel o9')).toBe('No message o9 in the outbox (already sent or cancelled).')
   })
 
-  it('denies an unknown target with the reachable keys, without asking the owner', async () => {
-    const ctx = await setupCore({ approve: [{ behavior: 'core_open' }] })
+  it('leaves an unknown target to her body, without asking the owner', async () => {
+    const ctx = await setupGuarded({ approve: [{ behavior: 'core_open' }] })
     provideSessions(ctx, { s1: { kind: 'self' } })
-    const known = ['qq:1:private:7', 'qq:1:group:9']
-    ctx.anima.provideChannels(key => known.includes(key) ? { isOwner: key === 'qq:1:private:7' } : undefined, () => known)
-    ctx.anima.restrictChannels('qq', key => key === 'qq:1:private:7')
+    const known = ['qq:1:private:7']
+    ctx.anima.provideChannels(key => known.includes(key) ? { isOwner: true } : undefined, () => known)
     registerEcho(ctx, 'core_open', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
     const sent: string[] = []
     ctx.anima.provideOwnerLine({ name: 'test', send: async (text) => { sent.push(text) } })
     expect(textOf(await callAs(ctx, 's1', 'core_open', { text: 'qq:list' }))).toBe('Error: anima/unknown-channel: 没有「qq:list」这个地方。你能去的地方：qq:1:private:7。')
-    expect(textOf(await callAs(ctx, 's1', 'core_open', { text: 'qq:1:group:9' }))).toContain('anima/not-allowlisted')
     expect(sent).toEqual([])
-    expect(ctx.anima.todayLedger().initiates).toBe(0)
+    expect(ctx.animaGuard.todayCounts().initiates).toBe(0)
   })
 
   it('refuses approval-class calls without an owner line', async () => {
-    const ctx = await setupCore({ approve: [{ behavior: 'core_note' }] })
+    const ctx = await setupGuarded({ approve: [{ behavior: 'core_note' }] })
     provideSessions(ctx, { s1: { kind: 'self' } })
     registerEcho(ctx, 'core_note', { effect: 'internal', sessions: ['self'] })
     expect(textOf(await callAs(ctx, 's1', 'core_note'))).toContain('anima/needs-approval')
   })
 
-  it('applies a platform allowlist to its behaviors', async () => {
-    const ctx = await setupCore()
-    provideSessions(ctx, { g: qqChat })
-    registerEcho(ctx, 'qq_say', say)
-    const off = ctx.anima.restrictChannels('qq', key => key !== 'qq:1:group:9')
-    expect(textOf(await callAs(ctx, 'g', 'qq_say'))).toContain('anima/not-allowlisted')
-    expect(ctx.anima.channelAllowed('qq:1:group:9')).toBe(false)
-    expect(ctx.anima.channelAllowed('local:owner:private:owner')).toBeUndefined()
-    off()
-    expect((await callAs(ctx, 'g', 'qq_say')).isError).toBe(false)
+  it('answers a friend request through the owner, and leaves it unanswered on a timeout', async () => {
+    const ctx = await setupGuarded({ approvals: { timeoutSeconds: 30 } })
+    const sent: string[] = []
+    ctx.anima.provideOwnerLine({ name: 'test', send: async (text) => { sent.push(text) } })
+    const answers: boolean[] = []
+    const left: string[] = []
+    const taken = ctx.bail('anima/friend-request', { platform: 'qq', userId: '5', summary: 'QQ user 5 wants to add her.', answer: async (accept) => { answers.push(accept) }, leave: why => { left.push(why) } })
+    expect(taken).toBe(true)
+    await vi.waitFor(() => expect(sent.length).toBe(1))
+    const id = /approval (a\d+)/.exec(sent[0]!)![1]!
+    ctx.bail('anima/owner-message', `yes ${id}`)
+    await vi.waitFor(() => expect(answers).toEqual([true]))
+    expect(left).toEqual([])
   })
 
   it('counts an initiate only when the behavior succeeds', async () => {
-    const ctx = await setupCore()
+    const ctx = await setupGuarded()
     provideSessions(ctx, { s1: { kind: 'self' } })
     let fail = true
     ctx.anima.registerBehavior(defineTool({
@@ -186,9 +170,9 @@ describe('service: owner line', () => {
       async execute() { if (fail) throw new Error('no such channel'); return { ok: true } },
     }), { effect: 'initiate', sessions: ['self'] })
     expect((await callAs(ctx, 's1', 'core_open')).isError).toBe(true)
-    expect(ctx.anima.todayLedger().initiates).toBe(0)
+    expect(ctx.animaGuard.todayCounts().initiates).toBe(0)
     fail = false
     expect((await callAs(ctx, 's1', 'core_open')).isError).toBe(false)
-    expect(ctx.anima.todayLedger().initiates).toBe(1)
+    expect(ctx.animaGuard.todayCounts().initiates).toBe(1)
   })
 })

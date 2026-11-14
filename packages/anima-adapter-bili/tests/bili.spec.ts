@@ -150,10 +150,10 @@ describe('Bilibili adapter', () => {
     void ctx; void self
   })
 
-  it.skipIf(!hasFfmpeg)('views closely: refuses long videos in the gate before any download', async () => {
-    const { ctx, self, api } = await setup()
-    const refused = await call(ctx, self, 'bili_view_closely', { bvid: LONG })
-    expect(refused.text).toMatch(/^Error: anima\/over-limit: bili_view_closely 的 durationSeconds 最多 1200，这次是 1500/)
+  it('reports the facts of a close view before it runs, for limits kept outside', async () => {
+    const { ctx, api } = await setup()
+    const facts = await ctx.anima.behavior('bili_view_closely')!.facts!({ bvid: LONG })
+    expect(facts).toMatchObject({ durationSeconds: 1500 })
     expect(api.seen).not.toContain('/x/player/wbi/playurl')
   })
 
@@ -161,7 +161,7 @@ describe('Bilibili adapter', () => {
     const work = temp()
     const video = join(work, 'v.mp4')
     execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=10:duration=12', '-f', 'lavfi', '-i', 'smptebars=size=320x180:rate=10:duration=8', '-filter_complex', '[0][1]concat=n=2:v=1', '-pix_fmt', 'yuv420p', video])
-    const { ctx, self, host, saved, dataDir } = await setup({ video, core: { quotas: [{ behavior: 'bili_view_closely', per: 'global', limit: 1, windowMinutes: 1440 }] } })
+    const { ctx, self, host, saved, dataDir } = await setup({ video })
     let delivered: FakeAgent | undefined
     host.onDeliver = (agent) => {
       if (!agent.id.startsWith('anima-v-')) return
@@ -180,10 +180,6 @@ describe('Bilibili adapter', () => {
     expect(saved).toHaveLength(4)
     expect(readdirSync(join(dataDir, 'bili', 'cache'))).toEqual([])
     expect(ctx.animaMemory.store.recall('colour bars', ['public']).map(m => m.scope)).toEqual(['public'])
-
-    // The second close view of the day is over the owner's quota.
-    const again = await call(ctx, self, 'bili_view_closely', { bvid: SHORT })
-    expect(again.text).toMatch(/^Error: anima\/over-quota: bili_view_closely 这一天总共最多 1 次/)
   })
 
   it.each([false, true])('logs in by QR, stores the cookies 0600 and shows the login in status (webserver: %s)', async (withWeb) => {
@@ -221,7 +217,8 @@ describe('Bilibili adapter', () => {
       return json({ code: -404 })
     }) as typeof fetch
     await ctx.plugin(bili, { config: { minGapMs: 0, closeView: { enabled: false } }, client: { origins: { api: 'http://api.test', passport: 'http://passport.test', www: 'http://www.test' }, fetch: fetchImpl } })
-    const invoke = (raw: string) => ctx.anima.dispatchCommand({ rawInput: raw } as unknown as CommandInvocation)
+    // The subcommand the adapter offers the outside, run as `/anima bili …` would.
+    const invoke = (raw: string) => ctx.anima.platforms().find(p => p.platform === 'bili')!.subcommands![0]!.run(raw.trim().replace(/^bili\s*/, ''), { rawInput: raw } as unknown as CommandInvocation)
     const started = await invoke(' bili login') as { kind: string; text: string }
     expect(started.kind).toBe('success')
     if (withWeb) {
@@ -237,7 +234,7 @@ describe('Bilibili adapter', () => {
     }
     expect(existsSync(join(dataDir, 'bili', 'login-qr.svg'))).toBe(true)
     await vi.waitFor(() => expect(loggedIn && existsSync(join(dataDir, 'bili', 'cookie.json'))).toBe(true), { timeout: 8000, interval: 100 })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('Bilibili: logged in as 小鲸鱼 (777)'), { timeout: 4000 })
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('Bilibili: logged in as 小鲸鱼 (777)'), { timeout: 4000 })
     expect(routes.size).toBe(0)
     const file = join(dataDir, 'bili', 'cookie.json')
     expect(statSync(file).mode & 0o777).toBe(0o600)
@@ -251,11 +248,11 @@ describe('Bilibili adapter', () => {
   it('removes its behaviors and status on unload', async () => {
     const { ctx, fiber } = await setup()
     expect(ctx.anima.behavior('bili_watch')).toBeDefined()
-    expect(ctx.anima.hasSubcommand('bili')).toBe(true)
+    expect(ctx.anima.platforms().some(p => p.subcommands?.some(sub => sub.name === 'bili'))).toBe(true)
     await fiber.dispose()
     expect(ctx.anima.behavior('bili_watch')).toBeUndefined()
     expect(ctx.anima.behavior('bili_view_closely')).toBeUndefined()
-    expect(ctx.anima.hasSubcommand('bili')).toBe(false)
-    expect(ctx.anima.statusText()).not.toContain('Bilibili')
+    expect(ctx.anima.platforms().some(p => p.platform === 'bili')).toBe(false)
+    expect(ctx.anima.statusLines().join('\n')).not.toContain('Bilibili')
   })
 })

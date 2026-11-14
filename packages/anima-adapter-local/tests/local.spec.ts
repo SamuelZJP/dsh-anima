@@ -42,6 +42,14 @@ async function setup(config: Partial<local.Config> = {}) {
   return { ctx, host, dataDir, fiber }
 }
 
+/** Run one of the subcommands this platform offers the outside, as `/anima <rawInput>` would. */
+function command(ctx: Context, rawInput: string) {
+  const [name = '', ...rest] = rawInput.trim().split(/\s+/)
+  const sub = ctx.anima.platforms().flatMap(p => p.subcommands ?? []).find(s => s.name === name)
+  if (sub === undefined) return Promise.resolve({ kind: 'error' as const, text: `no ${name}` })
+  return Promise.resolve(sub.run(rawInput.trim().slice(name.length).trim(), { rawInput, agent: { id: 'x' }, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation))
+}
+
 async function say(ctx: Context, sessionId: string, text: string) {
   const agent = { id: sessionId } as unknown as Agent
   const signal = new AbortController().signal
@@ -73,15 +81,13 @@ describe('local_say', () => {
     expect(ctx.anima.behavior(local.SAY_TOOL)).toMatchObject({ platform: 'local', effect: 'express', sessions: ['conversation'] })
     await fiber.dispose()
     expect(ctx.tools.get(local.SAY_TOOL)).toBeUndefined()
-    expect(ctx.anima.hasSubcommand('chat')).toBe(false)
+    expect(ctx.anima.platforms().some(p => p.subcommands?.some(sub => sub.name === 'chat'))).toBe(false)
     expect(ctx.anima.describeSession(ownerSession)).toBeUndefined()
   })
 })
 
 describe('/anima chat', () => {
-  function chat(ctx: Context, rawInput: string) {
-    return ctx.anima.dispatchCommand({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
-  }
+  const chat = command
 
   it('delivers an owner message to the owner conversation', async () => {
     const { ctx, host } = await setup()
@@ -97,9 +103,7 @@ describe('/anima chat', () => {
 })
 
 describe('/anima chat --as / --in (dev test channels)', () => {
-  function chat(ctx: Context, rawInput: string) {
-    return ctx.anima.dispatchCommand({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
-  }
+  const chat = command
   const aliceSession = conversationSessionId('anima', 'local:owner:private:alice')
   const groupSession = conversationSessionId('anima', 'local:owner:group:test')
 
@@ -140,25 +144,20 @@ describe('/anima chat --as / --in (dev test channels)', () => {
   })
 })
 
-function command(ctx: Context, rawInput: string) {
-  return ctx.anima.dispatchCommand({ rawInput, agent: { id: 'x' }, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
-}
-
 describe('local owner line (dev)', () => {
   it('is off by default', async () => {
     const { ctx } = await setup()
     expect(ctx.anima.ownerLine).toBeUndefined()
   })
 
-  it('asks approvals in owner-line.jsonl and takes "yes <id>" from /anima chat without reaching her', async () => {
+  it('writes what the outside sends into owner-line.jsonl, and lets the outside consume "yes <id>" from /anima chat', async () => {
     const { ctx, host, dataDir } = await setup({ ownerLine: true })
     expect(ctx.anima.ownerLine?.name).toMatch(/local owner line/)
-    const answer = ctx.anima.requestApproval('She wants to call open_conversation.')
-    await new Promise(resolve => setTimeout(resolve, 10))
-    const asked = readFileSync(join(dataDir, 'local', 'owner-line.jsonl'), 'utf8')
-    expect(asked).toMatch(/\[Anima approval a1\] She wants to call open_conversation/)
+    await ctx.anima.ownerLine!.send('[Anima approval a1] She wants to call open_conversation.')
+    expect(readFileSync(join(dataDir, 'local', 'owner-line.jsonl'), 'utf8')).toMatch(/\[Anima approval a1\] She wants to call open_conversation/)
+    // A stand-in for the outside: it takes the owner's reply.
+    ctx.on('anima/owner-message', text => text === 'yes a1' ? 'Allowed a1.' : undefined)
     expect(await command(ctx, ' chat yes a1')).toEqual({ kind: 'success', text: 'Allowed a1.' })
-    expect(await answer).toBe('approved')
     expect(host.delivered).toEqual([])
   })
 })
@@ -166,12 +165,12 @@ describe('local owner line (dev)', () => {
 describe('activity: wakes', () => {
   it('records each delivery that wakes her', async () => {
     const { ctx } = await setup()
+    const records: { type: string }[] = []
+    ctx.on('anima/record', (record) => { records.push(record) })
     await command(ctx, ' chat hello there')
-    const wakes = ctx.anima.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'wake')
+    const wakes = records.filter(r => r.type === 'wake')
     expect(wakes).toEqual([expect.objectContaining({ stimulus: 'message', session: 'conversation', sessionId: ownerSession, channel: 'local:owner:private:owner' })])
-    const outbox = await ctx.anima.ownerView('outbox') as { held: unknown[]; delaySeconds: number }
-    expect(outbox.held).toEqual([])
-    const status = await ctx.anima.ownerView('status') as { parts: { life: { sessions: { conversations: unknown[] } } } }
-    expect(status.parts.life.sessions.conversations).toHaveLength(1)
+    const parts = ctx.anima.statusParts() as { life: { sessions: { conversations: unknown[] } } }
+    expect(parts.life.sessions.conversations).toHaveLength(1)
   })
 })

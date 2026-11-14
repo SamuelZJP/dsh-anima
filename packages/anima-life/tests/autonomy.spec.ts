@@ -7,6 +7,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
+import type { AdmitRefusal, AdmitRequest } from '@anima/core'
 import * as animaCore from '@anima/core'
 import { formatLocal, resolveRhythm } from '@anima/core'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -174,6 +175,11 @@ async function setup(start: string, config: Record<string, unknown> = {}) {
   await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, ...config })
   const clock = { now: at(start) }
   ctx.anima.setClock(() => clock.now)
+  // A stand-in for the outside: it refuses what a test tells it to, and keeps what she reports.
+  const outside: { refuse: (request: AdmitRequest) => AdmitRefusal | undefined } = { refuse: () => undefined }
+  ctx.on('anima/admit', request => outside.refuse(request))
+  const recorded: { type: string }[] = []
+  ctx.on('anima/record', (record) => { recorded.push(record) })
   const host = new FakeHost()
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner]) } })
@@ -183,7 +189,7 @@ async function setup(start: string, config: Record<string, unknown> = {}) {
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
     async execute() { return { ok: true } },
   }), { platform: 'local', effect: 'express', sessions: ['conversation'], closes: args => args.more !== true })
-  return { ctx, host, clock }
+  return { ctx, host, clock, outside, recorded }
 }
 
 let calls = 0
@@ -243,8 +249,7 @@ describe('heartbeat loop', () => {
     const opened = await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'wish him a good morning' })
     expect(opened).toEqual({ isError: false, text: 'Intent i1 handed to the conversation. Its outcome will arrive here as a notice.' })
     const chatId = conversationSessionId('anima', ownerKey)
-    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[来自 Self 的意图\]（i1）你在自己的内心决定来 本地 私聊「Owner」 开口。对方没有发消息给你。\n你想要的：wish him a good morning\n你发出的消息会先在发件箱里等 45 秒，主人在这期间可以取消。Self 会知道结果。\n在这里回应：用 local_say 说话/)
-    expect(ctx.anima.todayLedger().initiates).toBe(1)
+    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[来自 Self 的意图\]（i1）你在自己的内心决定来 本地 私聊「Owner」 开口。对方没有发消息给你。\n你想要的：wish him a good morning\nSelf 会知道结果。\n在这里回应：用 local_say 说话/)
 
     // The conversation declines; Self hears about it without waking.
     event(ctx, chatId, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'intent', ref: 'i1' }, content: [] })
@@ -254,20 +259,18 @@ describe('heartbeat loop', () => {
     await vi.waitFor(() => expect(self.inbox).toHaveLength(2))
     expect(self.inbox[1]).toBe('(inject) [Tue 2026-11-10 08:00] [notice] Your intent i1 for Owner (local) ("wish him a good morning"): declined — you chose not to speak there: too early.')
 
-    // The decline still counts; the next heartbeat report shows it.
-    expect(ctx.anima.todayLedger().initiates).toBe(1)
+    // The next heartbeat report shows it.
     expect((await callAs(ctx, selfId, 'rest', { until: '09:30' })).text).toBe('Resting. Next heartbeat 2026-11-10 09:30.')
     await ctx.animaLife.beat()
     expect(host.sessions.get(triageId)!.inbox[1]).toContain('declined — you chose not to speak there: too early.')
-    expect(host.sessions.get(triageId)!.inbox[1]).toContain('conversations you may still start today: 2 of 3')
   })
 
-  it('refuses initiating at night and more than the daily budget', async () => {
-    const { ctx, clock } = await setup('2026-11-10T09:00', { initiate: { perDay: 1 } })
+  it('cannot start a conversation while asleep (her body), however many she started', async () => {
+    const { ctx, clock } = await setup('2026-11-10T09:00')
     const selfId = selfSessionId('anima')
     await ctx.animaLife.router.ensureSelf()
     expect((await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'a' })).isError).toBe(false)
-    expect((await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'b' })).text).toMatch(/^Error: anima\/over-quota: /)
+    expect((await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'b' })).isError).toBe(false)
     clock.now = at('2026-11-11T02:00')
     expect((await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'c' })).text).toMatch(/^Error: anima\/night: /)
   })
@@ -286,14 +289,13 @@ describe('heartbeat loop', () => {
     expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-11T07:30'))
   })
 
-  it('skips heartbeats while paused, busy, or over the token budget', async () => {
-    const { ctx, host, clock } = await setup('2026-11-10T10:00', { modes: { day: { tokenBudget: 100 } } })
-    const invoke = (rawInput: string) => ctx.anima.dispatchCommand({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal } as never)
-    await invoke('pause')
+  it('skips heartbeats while the outside holds her, while busy, or until waking when it says so', async () => {
+    const { ctx, host, clock, outside } = await setup('2026-11-10T10:00')
+    outside.refuse = request => request.kind === 'turn' ? { code: 'anima/paused', reason: 'paused' } : undefined
     await ctx.animaLife.beat()
     expect(host.sessions.size).toBe(0)
     expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:20'))
-    await invoke('resume')
+    outside.refuse = () => undefined
 
     await ctx.animaLife.router.ensureSelf()
     host.busy.add(selfSessionId('anima'))
@@ -301,7 +303,7 @@ describe('heartbeat loop', () => {
     expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:01'))
     host.busy.clear()
 
-    event(ctx, selfSessionId('anima'), 'assistant/message', { usage: { inputTokens: 100, outputTokens: 0 } })
+    outside.refuse = request => request.kind === 'turn' ? { code: 'anima/over-budget', reason: 'over-budget', untilWake: true } : undefined
     clock.now = at('2026-11-10T11:00')
     await ctx.animaLife.beat()
     expect(host.sessions.has(triageSessionId('anima', '2026-11-10'))).toBe(false)
@@ -343,7 +345,7 @@ describe('turn closing (DESIGN §6, Turn shape)', () => {
     const id = await env.ctx.animaLife.deliver({ type: 'message', channel: owner, sender: { platformUserId: 'owner', displayName: 'Sam', isOwner: true }, text: '在吗', ts: env.clock.now })
     const agent = env.host.sessions.get(id)!
     const stopping = () => env.ctx.emit('agent/turn-stopping' as never, { agent, turn: 1, signal: new AbortController().signal } as never)
-    const records = () => env.ctx.anima.activity.read(env.ctx.anima.dayKey()).filter(r => r.type === 'reminder' || r.type === 'lost-reply')
+    const records = () => env.recorded.filter(r => r.type === 'reminder' || r.type === 'lost-reply')
     return { ...env, id, agent, stopping, records }
   }
 
@@ -377,7 +379,7 @@ describe('turn closing (DESIGN §6, Turn shape)', () => {
       expect.objectContaining({ type: 'reminder', count: 2 }),
       expect.objectContaining({ type: 'lost-reply', channel: ownerKey, sessionId: id, text: '在的在的，怎么了？' }),
     ])
-    expect(ctx.anima.daySummary().speech).toEqual({ reminders: 2, lostReplies: 1 })
+    expect(records().map(r => r.type)).toEqual(['reminder', 'reminder', 'lost-reply'])
   })
 
   it('accepts end_turn and a say after a reminder; a failed say does not close', async () => {

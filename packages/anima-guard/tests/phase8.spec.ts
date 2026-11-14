@@ -1,0 +1,115 @@
+import { primerText, SAY_META, SAY_PARAMETERS, sayMessages } from '@anima/core'
+import { defineTool } from '@deepseek-ai/dsh-tools'
+import { describe, expect, it } from 'vitest'
+import { resolveGuardConfig } from '../src/index.ts'
+import { callAs, provideSessions, registerEcho, setupGuarded, textOf } from './helpers.ts'
+
+const chat = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } as const
+
+async function withSay(config: Parameters<typeof setupGuarded>[0] = {}) {
+  const ctx = await setupGuarded(config)
+  provideSessions(ctx, { c1: chat })
+  const sent: string[][] = []
+  ctx.anima.registerBehavior(defineTool({
+    name: 'qq_say',
+    description: 'say',
+    parameters: { ...SAY_PARAMETERS },
+    output: { schema: { type: 'object', additionalProperties: false, properties: { n: { type: 'integer', required: true } } }, render: (_a, v) => [{ type: 'text', text: `sent ${v.n}` }] },
+    async execute(args) {
+      sent.push(sayMessages(args))
+      return { n: sayMessages(args).length }
+    },
+  }), { platform: 'qq', effect: 'express', sessions: ['conversation'], ...SAY_META })
+  return { ctx, sent }
+}
+
+describe('closing behaviors through the guard', () => {
+  it('does not conclude a refused say, and counts a say once however many messages it sends', async () => {
+    const { ctx } = await withSay({ quotas: [{ effect: 'express', per: 'channel', limit: 2, windowMinutes: 60 }] })
+    expect((await callAs(ctx, 'c1', 'qq_say', { text: 'a', also: ['b', 'c'] })).isError).toBe(false)
+    expect((await callAs(ctx, 'c1', 'qq_say', { text: 'd', also: ['e'] })).isError).toBe(false)
+    const refused = await callAs(ctx, 'c1', 'qq_say', { text: 'f' })
+    expect(refused.isError).toBe(true)
+    expect(refused.concludesTurn).toBeUndefined()
+    expect(textOf(refused)).toContain('anima/over-quota')
+  })
+
+  it('refuses more than five messages in one say by default', async () => {
+    const { ctx } = await withSay()
+    const result = await callAs(ctx, 'c1', 'qq_say', { text: '1', also: ['2', '3', '4', '5', '6'] })
+    expect(result.isError).toBe(true)
+    expect(textOf(result)).toContain('anima/over-limit')
+    expect(textOf(result)).toContain('messages 最多 5')
+  })
+
+  it('lets a turn closer through while paused, and nothing else', async () => {
+    const { ctx, sent } = await withSay()
+    registerEcho(ctx, 'end_turn', { effect: 'internal', sessions: ['conversation'], closes: true })
+    await ctx.animaGuard.ownerAction('pause', {}, 'command')
+    const say = await callAs(ctx, 'c1', 'qq_say', { text: '在的' })
+    expect(say.isError).toBe(true)
+    expect(textOf(say)).toContain('anima/paused')
+    const end = await callAs(ctx, 'c1', 'end_turn')
+    expect(end.isError).toBe(false)
+    expect(end.concludesTurn).toBe(true)
+    expect(sent).toEqual([])
+  })
+})
+
+describe('anima/admit wakes (not tool calls)', () => {
+  it('counts group_attention per channel, records every decision, and refuses while paused', async () => {
+    const ctx = await setupGuarded({ quotas: [
+      { behavior: 'group_attention', per: 'channel', limit: 2, windowMinutes: 60 },
+      { per: 'global', limit: 1, windowMinutes: 60 },
+    ] })
+    expect(ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: 'qq:1:group:9' })).toBeUndefined()
+    expect(ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: 'qq:1:group:9' })).toBeUndefined()
+    expect(ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: 'qq:1:group:9' })).toMatchObject({ code: 'anima/over-quota' })
+    // Another group has its own counter; the global ceiling does not count admissions.
+    expect(ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: 'qq:1:group:8' })).toBeUndefined()
+    await ctx.animaGuard.ownerAction('pause', {}, 'command')
+    expect(ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: 'qq:1:group:7' })).toMatchObject({ code: 'anima/paused' })
+    const records = ctx.animaGuard.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'gate')
+    expect(records.map(r => [(r as { decision: string }).decision, (r as { code?: string }).code])).toEqual([
+      ['allowed', undefined], ['allowed', undefined], ['refused', 'anima/over-quota'], ['allowed', undefined], ['refused', 'anima/paused'],
+    ])
+    expect(records[0]).toMatchObject({ behavior: 'group_attention', channel: 'qq:1:group:9' })
+  })
+
+  it('has a default quota for the attention window', () => {
+    expect(resolveGuardConfig({}).quotas).toContainEqual({ behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 })
+  })
+})
+
+describe('closing without speech is never refused by a quota', () => {
+  it('lets end_turn through when the global ceiling is spent, and does not count it', async () => {
+    const ctx = await setupGuarded({ quotas: [{ per: 'global', limit: 2, windowMinutes: 24 * 60 }] })
+    provideSessions(ctx, { c1: chat })
+    registerEcho(ctx, 'qq_react', { platform: 'qq', effect: 'express', sessions: ['conversation'] })
+    registerEcho(ctx, 'end_turn', { effect: 'internal', sessions: ['conversation'], closes: true })
+    for (let i = 0; i < 3; i++) expect((await callAs(ctx, 'c1', 'end_turn')).isError).toBe(false)
+    expect((await callAs(ctx, 'c1', 'qq_react')).isError).toBe(false)
+    expect((await callAs(ctx, 'c1', 'qq_react')).isError).toBe(false)
+    expect(textOf(await callAs(ctx, 'c1', 'qq_react'))).toContain('anima/over-quota')
+    const closed = await callAs(ctx, 'c1', 'end_turn')
+    expect(closed.isError).toBe(false)
+    expect(closed.concludesTurn).toBe(true)
+  })
+})
+
+describe('limits in her prompt, told from outside', () => {
+  it('adds the owner rules of a place under their own heading', async () => {
+    const ctx = await setupGuarded()
+    ctx.anima.provideChannels(key => key === 'qq:1:private:2' ? { isOwner: true, display: 'Sam' } : undefined, () => ['qq:1:private:2'])
+    provideSessions(ctx, { p: chat, s: { kind: 'self' } })
+    const conv = { sessions: ['conversation'] } as const
+    registerEcho(ctx, 'qq_say', { platform: 'qq', effect: 'express', ...conv, ...SAY_META })
+    registerEcho(ctx, 'qq_poke', { platform: 'qq', effect: 'express', ...conv })
+    registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'] })
+    const t = primerText('# Rin', ctx.anima.placeFacts('p', 'conversation'))
+    expect(t).toContain('- 外面可能拦住你的事（主人定的规矩，不是你的身体）：')
+    expect(t).toContain('`qq_say`：一次最多 5 条消息。')
+    expect(t).toContain('表达类（`qq_say`、`qq_poke`）：在这个聊天里每小时最多 30 次。')
+    expect(primerText('# Rin', ctx.anima.placeFacts('s', 'self'))).toContain('主动开始对话：每天最多 3 次。')
+  })
+})

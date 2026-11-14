@@ -13,7 +13,6 @@ export { consolidationSessionId, conversationSessionId, groupTriageSessionId, se
 export { reminderText, TurnCloser, type StopAction } from './closer.ts'
 export { answerLine, burstText, route, senderLabel, wakes, stimulusRef, stimulusSummary, stimulusText, type ExtraBlock, type PublishedChannel, type Route, type Sender, type Stimulus } from './stimulus.ts'
 export { batchText, GroupTriage, type Batch, type Decision, type MessageStimulus, type TriageHooks, type TriageOptions } from './group-triage.ts'
-export { Outbox, platformOf, type HeldMessage, type HoldOptions, type HoldResult } from './outbox.ts'
 export { Config, resolveLifeConfig } from './config.ts'
 export { Inbox, inboxSummary, type HeldMessage as InboxMessage, type InboxEntry } from './inbox.ts'
 export { paceMessages, typingMs, type PacingConfig } from './pacing.ts'

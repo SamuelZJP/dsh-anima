@@ -41,7 +41,7 @@ What Anima relies on in DSH (DeepSeek Harness). How each API behaved when it was
 | `ImageBlock` in messages and tool results, `ctx.attachments.saveImage`, `resolveModelInfo().inputModalities` | `qq_look`, close views | Verified / read |
 | `ctx.connection.fetch.register`, client slots `sidebar.panellist` and `main`, `dsh.client` manifest | `anima-page` | Verified |
 | `ctx.configEditor` | Settings tab | Verified |
-| Cordis `Events` augmentation, `ctx.emit` | events between Anima packages | Verified |
+| Cordis `Events` augmentation, `ctx.emit`, `ctx.bail` | events between Anima packages; the outside's hooks `anima/admit`, `anima/owner-message`, `anima/friend-request` (first non-undefined answer wins) | Verified (bail: R1 unit tests) |
 | `node:sqlite` `DatabaseSync`, FTS5 `trigram` | memory store | Verified |
 | `executeToolFixture` (`dsh-tool-testkit`, `@internal`) | tests | Verified |
 

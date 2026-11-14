@@ -1,121 +1,22 @@
 /**
- * Activity log (DESIGN §12): what the gate decided, what woke her, what
- * the owner changed, and when a platform went offline or came back, one JSONL file per her day under `<dataDir>/activity/`.
- * It is the evidence the Anima page's Activity tab and the formal test read.
- * Recording never decides anything.
- * @module @anima/core/activity
+ * Activity log (docs/design/outside.md): what the gates decided, what woke
+ * her, what the owner changed, platform health, sleep and the inbox, one JSONL
+ * file per her day under `<dataDir>/activity/`. Recording never decides anything.
+ * @module @anima/guard/activity
  */
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { DayLedger } from './ledger.ts'
+import type { ActivityRecord, GateRecord, SleepActivity, WakeRecord } from '@anima/core'
 
-/** Who ran an owner action. */
-export type OwnerSource = 'command' | 'page'
+export type { ActivityRecord, GateRecord, NewActivity, OwnerRecord, OwnerSource, PlatformRecord, SleepActivity, SpeechRecord, WakeRecord } from '@anima/core'
 
-/** One gate decision on a behavior call. */
-export interface GateRecord {
-  readonly type: 'gate'
-  /** Her clock, ms. */
-  readonly at: number
-  /** Real clock, ms. */
-  readonly real: number
-  readonly behavior: string
-  /** Session kind, absent outside Anima sessions. */
-  readonly session?: string
-  readonly sessionId?: string
-  /** `allowed`, `refused`, or the owner's answer to an approval (`approved`, `denied`). */
-  readonly decision: 'allowed' | 'refused' | 'approved' | 'denied'
-  readonly code?: string
-  readonly hint?: string
-  /** Channel key, for admissions that are not tool calls (`group_attention`). */
-  readonly channel?: string
+/** Budget counters of one day, for the summary. */
+export interface DayCounts {
+  readonly tokens: Readonly<Record<'day' | 'night', number>>
+  readonly initiates: number
+  readonly nightWakes: number
 }
-
-/** One delivery that woke a turn. */
-export interface WakeRecord {
-  readonly type: 'wake'
-  readonly at: number
-  readonly real: number
-  /** Stimulus type, e.g. `message`, `heartbeat`, `intent`. */
-  readonly stimulus: string
-  /** Session kind it went to. */
-  readonly session: string
-  readonly sessionId?: string
-  readonly channel?: string
-}
-
-/** One owner action from a command or the page. */
-export interface OwnerRecord {
-  readonly type: 'owner'
-  readonly at: number
-  readonly real: number
-  readonly action: string
-  readonly source: OwnerSource
-  readonly args: Readonly<Record<string, unknown>>
-  readonly ok: boolean
-  readonly error?: string
-}
-
-/** A platform went offline or came back, as its adapter reported it (a development warning, Phase 7). */
-export interface PlatformRecord {
-  readonly type: 'platform'
-  readonly at: number
-  readonly real: number
-  readonly platform: string
-  readonly online: boolean
-  readonly reason?: string
-}
-
-/**
- * A conversation turn that was about to stop without a closing action (DESIGN
- * §6, Turn shape): `reminder` when a reminder was steered into it, `lost-reply`
- * when it ended unclosed after the reminders. Nothing is ever forwarded.
- */
-export interface SpeechRecord {
-  readonly type: 'reminder' | 'lost-reply'
-  readonly at: number
-  readonly real: number
-  readonly channel: string
-  readonly sessionId: string
-  /** Her last plain text in that turn, which nobody saw (may be empty). */
-  readonly text: string
-  /** Reminder number in the turn (reminders only). */
-  readonly count?: number
-  /** Lost replies only: how the turn ended when it was not by running out of reminders, e.g. `error: MALFORMED_RESPONSE`. */
-  readonly reason?: string
-}
-
-/**
- * Sleep and the inbox (Phase 9): she fell asleep (`sleep`, by her or at the
- * latest bedtime), the owner woke her (`woken`), a chat message was held while
- * she slept or was paused (`inbox-held`), or held messages went to their chat
- * (`inbox-release`: answered from Self, or joined a new wake).
- */
-export interface SleepActivity {
-  readonly type: 'sleep' | 'woken' | 'inbox-held' | 'inbox-release'
-  readonly at: number
-  readonly real: number
-  /** `sleep`: how. */
-  readonly by?: 'her' | 'latest'
-  /** `sleep`: her note; `inbox-release`: Self's note. */
-  readonly note?: string
-  readonly sessionId?: string
-  /** Inbox records: the channel key. */
-  readonly channel?: string
-  /** `inbox-held`: why held (`asleep`, `paused`); `inbox-release`: how (`answer`, `wake`, `intent`). */
-  readonly reason?: string
-  /** `inbox-release`: how many messages. */
-  readonly count?: number
-  /** `woken`: until when (her clock). */
-  readonly until?: number
-}
-
-/** Any activity record. */
-export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SpeechRecord | SleepActivity
-
-/** Activity record without its timestamps, as producers hand it in. */
-export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SpeechRecord, 'at' | 'real'> | Omit<SleepActivity, 'at' | 'real'>
 
 /** Day summary for the Activity tab. */
 export interface DaySummary {
@@ -209,7 +110,7 @@ function ranked(counts: Record<string, number>): { name: string; count: number }
  * @param records - that day's records.
  * @param ledger - that day's budget counters.
  */
-export function summarize(day: string, records: readonly ActivityRecord[], ledger: Readonly<DayLedger>): DaySummary {
+export function summarize(day: string, records: readonly ActivityRecord[], ledger: DayCounts): DaySummary {
   const gates = records.filter((r): r is GateRecord => r.type === 'gate')
   const wakes = records.filter((r): r is WakeRecord => r.type === 'wake')
   const decisions = countBy(gates, r => r.decision)

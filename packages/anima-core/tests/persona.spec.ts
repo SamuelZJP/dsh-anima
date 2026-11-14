@@ -50,3 +50,10 @@ describe('persona tool hiding', () => {
     await expect(scope.ctx.plugin(persona, { kind: 'self', hideTools: ['no_such_tool'] })).resolves.toBeDefined()
   })
 })
+
+describe('viewing session kind', () => {
+  it('has persona rules that ask for one viewing_note', async () => {
+    const { personaText } = await import('../src/persona.ts')
+    expect(personaText('# Her', 'viewing')).toMatch(/viewing_note\(note\)/)
+  })
+})

@@ -3,8 +3,8 @@
  * intent from Self) waits a short delay before it goes out, and the owner can
  * cancel it in that time. When its platform is offline at the end of the
  * delay, it keeps waiting until the platform is back, or expires.
- * Platform-independent; every say tool asks it first.
- * @module @anima/life/outbox
+ * Platform-independent; the guard holds the say call in `tools/pre-execute`.
+ * @module @anima/guard/outbox
  */
 
 /** A message waiting in the outbox. */

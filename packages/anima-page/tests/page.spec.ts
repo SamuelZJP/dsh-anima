@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import * as animaCore from '@anima/core'
+import * as animaGuard from '@anima/guard'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import * as page from '../src/index.ts'
 import type { ConfigEditorLike, FetchRoute } from '../src/index.ts'
@@ -17,7 +18,7 @@ function tempDir(): string {
   return dir
 }
 
-/** Root context with core and the page, and a fake Connection that collects routes. */
+/** Root context with core, the guard and the page, and a fake Connection that collects routes. */
 async function setup(editor?: ConfigEditorLike) {
   const ctx = new Context()
   onTestFinished(() => ctx.fiber.dispose())
@@ -27,6 +28,7 @@ async function setup(editor?: ConfigEditorLike) {
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
   await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDir(), clock: { speed: 1, start: '2026-11-10T10:00' } })
+  await ctx.plugin(animaGuard, {})
   const fiber = await ctx.plugin(page)
   const get = async (query: string) => routes.get(page.VIEW_PATH)!.fetch(new Request(`http://h${page.VIEW_PATH}?${query}`))
   const post = async (body: unknown) => routes.get(page.ACTION_PATH)!.fetch(new Request(`http://h${page.ACTION_PATH}`, { method: 'POST', body: JSON.stringify(body) }))
@@ -41,8 +43,8 @@ describe('page routes', () => {
     expect(status.status).toBe(200)
     expect(await status.json()).toMatchObject({ value: { paused: false, clock: { day: '2026-11-10' } } })
     expect(await (await post({ name: 'pause' })).json()).toEqual({ value: { paused: true } })
-    expect(ctx.anima.paused).toBe(true)
-    const owner = ctx.anima.activity.read('2026-11-10').filter(r => r.type === 'owner')
+    expect(ctx.animaGuard.paused).toBe(true)
+    const owner = ctx.animaGuard.activity.read('2026-11-10').filter(r => r.type === 'owner')
     expect(owner).toEqual([expect.objectContaining({ action: 'pause', source: 'page', ok: true })])
   })
 
@@ -119,7 +121,7 @@ describe('settings through the config editor', () => {
     expect(await (await post({ name: 'settings.save', args: { id: 'anima-adapter-qq', config: {} } })).json()).toMatchObject({ error: { code: 'anima/settings-read-only' } })
     expect(await (await post({ name: 'settings.save', args: { id: 'anima-memory', config: { inject: 3 } } })).json()).toMatchObject({ error: { code: 'anima/settings-invalid' } })
     expect(await (await post({ name: 'settings.save', args: { id: 'anima-memory', config: [] } })).json()).toMatchObject({ error: { code: 'anima/bad-args' } })
-    expect(ctx.anima.activity.read('2026-11-10').filter(r => r.type === 'owner').map(r => r.type === 'owner' && r.ok)).toEqual([true, false, false, false])
+    expect(ctx.animaGuard.activity.read('2026-11-10').filter(r => r.type === 'owner').map(r => r.type === 'owner' && r.ok)).toEqual([true, false, false, false])
   })
 
   it('has no settings view without the config editor', async () => {

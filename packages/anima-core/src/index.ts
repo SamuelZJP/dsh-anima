@@ -1,30 +1,29 @@
 /**
- * Anima core plugin: the `anima` service (behaviors, policy gate, pause,
- * session resolver slot), the `/anima` owner command, and `anima_ping`.
+ * Anima core plugin: the `anima` service (her body: behaviors, the body
+ * check, clock, state, sleep, goals, self-model, resolver slots) and `anima_ping`.
+ * The `/anima` owner command is outside the persona, in `anima-guard`.
  * @module @anima/core
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type {} from '@deepseek-ai/dsh-commands'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from './config.ts'
 import { AnimaCore } from './service.ts'
 
 export * from './types.ts'
-export { DEFAULT_APPROVE, DEFAULT_LIMITS, DEFAULT_MODEL, DEFAULT_QUOTAS, expandHome, resolveConfig, type AllowRule, type ApproveRule, type LimitRule, type InitiateConfig, type ModeConfig, type ModelRoute, type QuotaRule, type QuotaScope, type ResolvedConfig, type TimeWindow } from './config.ts'
-export { decide, GateCode, OPEN_MOMENT, QuotaBook, quotaExempt, visibleIn, type GateCall, type GateMoment, type Policy, type Verdict } from './gate.ts'
+export { DEFAULT_MODEL, expandHome, resolveConfig, type ModeConfig, type ModelRoute, type ResolvedConfig } from './config.ts'
+export { bodyCheck, GateCode, quotaExempt, visibleIn, type BodyCall, type BodyMoment, type BodyVerdict } from './gate.ts'
 export { AnimaClock, formatLocal, formatStamp, localDate, nextAtClock, parseClockTime, parseLocalDateTime, parseWhen, type ClockConfig } from './clock.ts'
 export { asleepAt, dayKey, dayStart, earliestBedtime, inWindow, latestBedtime, modeAt, nextWake, phaseAt, resolveRhythm, wokenUntil, type Mode, type Phase, type Rhythm, type RhythmConfig, type SleepRecord } from './rhythm.ts'
 export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction, satisfy, spendTurn, type EnergyConfig, type MoodConfig, type NeedSpec, type SelfState, type StateModel } from './state.ts'
-export { billableTokens, emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
+export { emptyDay, Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
-export { parseSubcommand, SubcommandTable, type Subcommand } from './commands.ts'
-export { ActivityLog, summarize, type ActivityRecord, type DaySummary, type GateRecord, type NewActivity, type OwnerRecord, type OwnerSource, type PlatformRecord, type SleepActivity, type WakeRecord } from './activity.ts'
-export { optionalStringArg, OwnerRegistry, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
+export type { Subcommand } from './commands.ts'
+export type { ActivityRecord, GateRecord, NewActivity, OwnerRecord, OwnerSource, PlatformRecord, SleepActivity, SpeechRecord, WakeRecord } from './records.ts'
+export { optionalStringArg, stringArg, type OwnerAction, type OwnerView, type PlatformProvider, type PlatformView, type ViewParams } from './owner.ts'
 export { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfEntry, type SelfModelLimits, type SelfSection } from './selfmodel.ts'
-export { HER_WORLD, placeName, placeText, platformName, primerText, SESSION_RULES, type PlaceChannel, type PlaceFacts, type PlaceReach, type PlaceTool } from './primer.ts'
-export { AnimaCore, defaultConstitution, describeDiff, GATE_INFO_NAME, type BedtimeInfo, type BehaviorEvent, type ChannelAllowlist, type ChannelInfo, type ChannelResolver, type OwnerReplyHandler, type SessionResolver } from './service.ts'
-export { ApprovalBroker, parseOwnerReply, type ApprovalAnswer, type OwnerLine, type OwnerReply, type PendingApproval } from './approvals.ts'
+export { EFFECT_NAMES, HER_WORLD, placeName, placeText, platformName, primerText, SESSION_RULES, type PlaceChannel, type PlaceFacts, type PlaceReach, type PlaceTool } from './primer.ts'
+export { AnimaCore, defaultConstitution, describeDiff, GATE_INFO_NAME, type BedtimeInfo, type BehaviorEvent, type ChannelInfo, type ChannelResolver, type SessionResolver } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-core'
@@ -38,8 +37,6 @@ export const Config = ConfigSchema
 
 /** Name of the integration probe tool. */
 export const PING_TOOL = 'anima_ping'
-/** Name of the owner command. */
-export const COMMAND = 'anima'
 
 /**
  * Register Anima core contributions.
@@ -48,15 +45,6 @@ export const COMMAND = 'anima'
  */
 export function apply(ctx: Context, config: Partial<Config> | undefined): void {
   ctx.plugin(AnimaCore, resolveConfig(config))
-
-  ctx.inject(['anima', 'commands'], (ctx) => {
-    ctx.effect(() => ctx.commands.register({
-      name: COMMAND,
-      description: 'Anima owner controls: /anima help lists subcommands',
-      input: { hint: 'status | pause | resume | goal … | selfmodel … | chat <text> | self [text] | outbox | approve <id> | help' },
-      handler: invocation => ctx.anima.dispatchCommand(invocation),
-    }), 'anima.command')
-  })
 
   ctx.tools.register(defineTool({
     name: PING_TOOL,

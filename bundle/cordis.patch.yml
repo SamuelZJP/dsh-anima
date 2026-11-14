@@ -11,17 +11,22 @@
       name: '@anima/adapter-local'
     # QQ over OneBot v11 (NapCatQQ or any OneBot v11 runtime). Disabled here
     # because it needs url, account and owner; a profile patch or --patch
-    # overlay enables it with that config (docs/DSH-INTEGRATION.md).
+    # overlay enables it with that config (docs/design/channels.md).
     - id: anima-adapter-qq
       name: '@anima/adapter-qq'
       disabled: true
-    # Bilibili, read-only browsing on her own account (DESIGN §11). Disabled
+    # Bilibili, read-only browsing on her own account (docs/design/channels.md). Disabled
     # here so a profile never browses before the owner chose to; a patch sets
     # disabled: false (config is optional; log in with /anima bili login).
     - id: anima-adapter-bili
       name: '@anima/adapter-bili'
       disabled: true
+    # Outside the persona: the safety gate, approvals, outbox hold, budgets,
+    # pause, activity log and the /anima owner command (docs/design/outside.md).
+    # Disable this row and she runs with no restriction but her physiology.
+    - id: anima-guard
+      name: '@anima/guard'
     # The Anima page in DSH's web UI (sidebar entry, tabs); owner routes under
-    # /api/anima (DESIGN §12, DSH-INTEGRATION §8e).
+    # /api/anima, over anima-guard's owner surface.
     - id: anima-page
       name: '@anima/page'

@@ -2,14 +2,13 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { createScope, type Scope } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as animaCore from '../src/index.ts'
-import { ActivityLog, SelfModelStore, summarize, emptyDay } from '../src/index.ts'
+import { SelfModelStore } from '../src/index.ts'
 import * as persona from '../src/persona.ts'
 import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
@@ -25,10 +24,6 @@ function store(dir = tempDataDir()) {
   return new SelfModelStore(join(dir, 'self-model.json'), join(dir, 'self-model-log.jsonl'), limits)
 }
 
-function invoke(ctx: Context, rawInput: string) {
-  const invocation = { rawInput, agent: fakeAgent('any'), attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation
-  return ctx.anima.dispatchCommand(invocation)
-}
 
 describe('self-model store', () => {
   it('adds, changes and removes notes, logging each as a diff', () => {
@@ -89,8 +84,8 @@ describe('self-model store', () => {
   })
 })
 
-describe('self_note behavior and its daily cap', () => {
-  it('changes the self-model and is refused over the default 3 per day', async () => {
+describe('self_note behavior and its slow pace (physiology)', () => {
+  it('changes the self-model, and takes no more than 3 changes in a day', async () => {
     const ctx = await setupCore()
     provideSessions(ctx, { 'self-1': self })
     for (let i = 1; i <= 3; i++) {
@@ -100,7 +95,7 @@ describe('self_note behavior and its daily cap', () => {
     }
     const fourth = await callAs(ctx, 'self-1', 'self_note', { section: 'tastes', text: 'taste 4', reason: 'noticed' })
     expect(fourth.isError).toBe(true)
-    expect(textOf(fourth)).toMatch(/^Error: anima\/over-quota: .*self_note/)
+    expect(textOf(fourth)).toMatch(/^Error: anima\/self-model-slow: 你对自己的看法一天里变不了这么多次/)
     expect(ctx.anima.selfModel.entries()).toHaveLength(3)
     expect(ctx.anima.selfModel.diffs()[0]).toMatchObject({ sessionId: 'self-1', by: 'her' })
   })
@@ -129,19 +124,6 @@ describe('self_note behavior and its daily cap', () => {
     expect(ctx.anima.selfModelReportLine()).toMatch(/^Your self-model: no notes yet\. self_note keeps/)
     ctx.anima.selfModel.note({ section: 'habits', text: 'Quiet mornings.', reason: 'r', at: ctx.anima.clock.now(), real: 1 })
     expect(ctx.anima.selfModelReportLine()).toMatch(/^Your self-model: 1 note, last changed 2026-11-10 10:00\./)
-  })
-
-  it('lists and reverts through /anima selfmodel, logged as an owner command', async () => {
-    const ctx = await setupCore()
-    provideSessions(ctx, { 'self-1': self })
-    await callAs(ctx, 'self-1', 'self_note', { section: 'opinions', text: 'Mornings are best.', reason: 'sunrise' })
-    const list = await invoke(ctx, ' selfmodel')
-    expect(list).toMatchObject({ kind: 'success' })
-    expect((list as { text: string }).text).toMatch(/n1 \[opinions\] Mornings are best\.[\s\S]*d1: added n1/)
-    expect(await invoke(ctx, ' selfmodel revert d1 not her')).toMatchObject({ kind: 'success', text: expect.stringMatching(/Reverted: d2: reverted d1/) })
-    expect(ctx.anima.selfModel.entries()).toEqual([])
-    const owner = ctx.anima.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'owner')
-    expect(owner).toEqual([expect.objectContaining({ action: 'selfmodel.revert', source: 'command', ok: true, args: { id: 'd1', reason: 'not her' } })])
   })
 })
 
@@ -212,86 +194,5 @@ describe('persona: self-model digest and live constitution', () => {
     expect(readFileSync(join(ctx.anima.config.dataDir, 'constitution.md.bak'), 'utf8')).toBe(before)
     expect(() => ctx.anima.saveConstitution('  \n')).toThrow(/anima\/constitution-empty/)
     expect(ctx.anima.constitution()).toContain('Mira')
-  })
-})
-
-describe('owner surface and activity log', () => {
-  it('records gate decisions with codes, and summarizes the day', async () => {
-    const ctx = await setupCore({ quotas: [{ effect: 'express', per: 'channel', limit: 1, windowMinutes: 10 }] })
-    provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', { platform: 'local', effect: 'express', sessions: ['conversation'] })
-    await callAs(ctx, 'chat-1', 'local_say')
-    await callAs(ctx, 'chat-1', 'local_say')
-    ctx.anima.recordActivity({ type: 'wake', stimulus: 'message', session: 'conversation', sessionId: 'chat-1' })
-    const day = ctx.anima.dayKey()
-    const gates = ctx.anima.activity.read(day).filter(r => r.type === 'gate')
-    expect(gates).toEqual([
-      expect.objectContaining({ behavior: 'local_say', decision: 'allowed', session: 'conversation', sessionId: 'chat-1' }),
-      expect.objectContaining({ behavior: 'local_say', decision: 'refused', code: 'anima/over-quota' }),
-    ])
-    const summary = ctx.anima.daySummary(day)
-    expect(summary).toMatchObject({ calls: { allowed: 1, refused: 1 }, refusals: [{ code: 'anima/over-quota', count: 1 }], wakes: { total: 1, bySession: { conversation: 1 } } })
-    const view = await ctx.anima.ownerView('activity', {}) as { day: string; days: string[]; records: unknown[] }
-    expect(view.days).toEqual([day])
-    expect(view.records).toHaveLength(3)
-  })
-
-  it('runs the same action for a command and the page, logging each source', async () => {
-    const ctx = await setupCore()
-    expect(await invoke(ctx, ' pause')).toMatchObject({ kind: 'success' })
-    expect(ctx.anima.paused).toBe(true)
-    await ctx.anima.ownerAction('resume', {}, 'page')
-    expect(ctx.anima.paused).toBe(false)
-    await ctx.anima.ownerAction('goal.add', { text: 'Call mum', due: '2026-11-11 09:00' }, 'page')
-    await expect(ctx.anima.ownerAction('goal.add', { text: '' }, 'page')).rejects.toThrow(/anima\/bad-args/)
-    await expect(ctx.anima.ownerAction('nope', {}, 'page')).rejects.toThrow(/anima\/unknown-action/)
-    const owner = ctx.anima.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'owner')
-    expect(owner.map(r => [r.action, r.source, r.ok])).toEqual([
-      ['pause', 'command', true], ['resume', 'page', true], ['goal.add', 'page', true], ['goal.add', 'page', false], ['nope', 'page', false],
-    ])
-    const goals = await ctx.anima.ownerView('goals') as { goals: { text: string; owner: string }[] }
-    expect(goals.goals).toEqual([expect.objectContaining({ text: 'Call mum', owner: 'owner' })])
-    expect(await invoke(ctx, ' goal list')).toMatchObject({ text: expect.stringContaining('Call mum') })
-  })
-
-  it('serves structured status and platform views', async () => {
-    const ctx = await setupCore()
-    ctx.anima.addStatusPart('life', () => ({ nextHeartbeat: '2026-11-10 11:00' }))
-    ctx.anima.providePlatform({
-      platform: 'qq', title: 'QQ', view: () => ({ health: 'ok', summary: 'connected', details: { account: '1' } }),
-      actions: { ping: () => ({ pong: true }) },
-    })
-    const status = await ctx.anima.ownerView('status') as Record<string, unknown>
-    expect(status).toMatchObject({ paused: false, clock: { day: '2026-11-10', mode: 'day' }, parts: { life: { nextHeartbeat: '2026-11-10 11:00' } } })
-    expect(await ctx.anima.ownerView('platforms')).toEqual([{ platform: 'qq', title: 'QQ', view: { health: 'ok', summary: 'connected', details: { account: '1' } } }])
-    expect(await ctx.anima.ownerAction('qq.ping', {}, 'page')).toEqual({ pong: true })
-    await expect(ctx.anima.ownerView('nope')).rejects.toThrow(/anima\/unknown-view/)
-  })
-
-  it('answers approvals from the page', async () => {
-    const ctx = await setupCore()
-    const sent: string[] = []
-    ctx.anima.provideOwnerLine({ name: 'test line', send: async (text) => { sent.push(text) } })
-    const pending = ctx.anima.requestApproval('She wants to call x.')
-    await Promise.resolve()
-    const view = await ctx.anima.ownerView('approvals') as { pending: { id: string }[] }
-    expect(view.pending).toHaveLength(1)
-    expect(await ctx.anima.ownerAction('approve', { id: view.pending[0]!.id }, 'page')).toEqual({ answered: true })
-    expect(await pending).toBe('approved')
-  })
-})
-
-describe('activity log file', () => {
-  it('lists days, skips a torn line, and summarizes', () => {
-    const dir = tempDataDir()
-    const log = new ActivityLog(join(dir, 'activity'))
-    expect(log.days()).toEqual([])
-    log.append('2026-11-10', { type: 'gate', at: 1, real: 1, behavior: 'rest', decision: 'allowed' })
-    log.append('2026-11-11', { type: 'gate', at: 2, real: 2, behavior: 'say', decision: 'refused', code: 'anima/quiet-hours' })
-    expect(log.days()).toEqual(['2026-11-10', '2026-11-11'])
-    expect(existsSync(join(dir, 'activity', '2026-11-10.jsonl'))).toBe(true)
-    expect(log.read('../x')).toEqual([])
-    const summary = summarize('2026-11-11', log.read('2026-11-11'), { ...emptyDay(), tokens: { day: 10, night: 0 } })
-    expect(summary).toMatchObject({ calls: { refused: 1 }, refusals: [{ code: 'anima/quiet-hours', count: 1 }], tokens: { day: 10 } })
   })
 })

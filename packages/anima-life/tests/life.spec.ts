@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import * as animaCore from '@anima/core'
@@ -192,22 +191,10 @@ describe('AnimaLife service', () => {
     expect(ctx.anima.describeSession(id)).toBeUndefined()
   })
 
-  it('delivers /anima self text to the Self session', async () => {
-    const { ctx, host } = await setup()
-    const invocation = { rawInput: 'self how are you?', agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation
-    expect(await ctx.anima.dispatchCommand(invocation)).toMatchObject({ kind: 'success' })
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox).toEqual(['[Tue 2026-11-10 10:00] [通知] The owner says: how are you?\nChannels you can reach: none.'])
-    await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
-    ctx.anima.restrictChannels('qq', () => false)
-    await ctx.anima.dispatchCommand(invocation)
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox[1]).toContain('Channels you can reach: Owner (local): "local:owner:private:owner".')
-  })
-
-  it('withdraws the resolver and subcommand on unload', async () => {
+  it('withdraws the resolver on unload', async () => {
     const { ctx, fiber } = await setup()
     await fiber.dispose()
     expect(ctx.anima.describeSession(selfSessionId('anima'))).toBeUndefined()
-    expect(ctx.anima.hasSubcommand('self')).toBe(false)
   })
 
   it('routes consolidation to the day\'s consolidation session with its preset and model', async () => {

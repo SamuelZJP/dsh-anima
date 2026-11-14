@@ -8,7 +8,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, channelKey, type ChannelRef, closesTurn, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, stringArg, writeJson } from '@anima/core'
+import { AnimaError, channelKey, type ChannelRef, closesTurn, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, writeJson, type AdmitRefusal } from '@anima/core'
 import type {} from '@anima/core'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -21,8 +21,7 @@ import { reminderText, TurnCloser } from './closer.ts'
 import { groupTriageModel, resolveLifeConfig, type Config as LifeConfig } from './config.ts'
 import { batchText, GroupTriage, type Batch, type MessageStimulus } from './group-triage.ts'
 import { nextHeartbeat } from './heartbeat.ts'
-import { answeringIntent, describeOutcome, IntentTracker, OUTBOX_CANCELLED, OUTBOX_EXPIRED, type Outcome, type TrackerState } from './intent.ts'
-import { Outbox, platformOf, type HeldMessage } from './outbox.ts'
+import { answeringIntent, describeOutcome, IntentTracker, type Outcome, type TrackerState } from './intent.ts'
 import { buildReport, type ChannelLine } from './report.ts'
 import { Inbox, inboxSummary } from './inbox.ts'
 import { SessionRouter, type ModelChoice, type SessionHost } from './router.ts'
@@ -268,12 +267,14 @@ export class AnimaLife extends Service {
   private lastReport = ''
   private disposed = false
   private readonly reportLines = new Set<() => string[]>()
+  private readonly budgetLines = new Set<() => string[]>()
   /** Life config. */
   readonly config: Readonly<LifeConfig>
   /** Group triage buffers and batches. */
   readonly triage: GroupTriage
   /** Her initiated messages waiting to go out. */
-  readonly outbox: Outbox
+  /** Seconds the outside holds a message she starts, for her intent arrival; none when nothing holds it. */
+  private holdSeconds: () => number | undefined = () => undefined
   /** Batch whose turn is running in the group-triage session. */
   private triageTurn: string | undefined
   /** Viewing sessions waiting for their note, by session id. */
@@ -315,7 +316,7 @@ export class AnimaLife extends Service {
     this.file = { ...emptyFile(), ...readJson<LifeFile>(this.path) }
     this.tracker = new IntentTracker(this.file.intents, name => core.behavior(name)?.effect === 'express')
     this.closer = new TurnCloser(this.config.conversation.closeReminders)
-    const { groupTriage, outbox } = this.config
+    const { groupTriage } = this.config
     this.triage = new GroupTriage(
       { windowMs: groupTriage.windowSeconds * 1000, maxBatch: groupTriage.maxBatch, timeoutMs: groupTriage.timeoutSeconds * 1000 },
       {
@@ -326,17 +327,11 @@ export class AnimaLife extends Service {
       error => ctx.logger.warn(`anima group triage: ${error instanceof Error ? error.message : String(error)}`),
     )
     ctx.effect(() => () => this.triage.dispose(), 'animaLife.groupTriage')
-    this.outbox = new Outbox(() => { this.file.outboxSeq += 1; this.save(); return this.file.outboxSeq }, outbox.delaySeconds * 1000, outbox.offlineHoldMinutes * 60_000)
     ctx.effect(() => () => {
-      this.outbox.cancelAll()
       for (const health of this.platforms.values()) clearTimeout(health.timer)
       for (const entry of this.settling.values()) clearTimeout(entry.timer)
       this.settling.clear()
-    }, 'animaLife.outbox')
-    core.addOwnerReply((reply) => {
-      if (reply.verb !== 'cancel' || !reply.id.startsWith('o')) return undefined
-      return this.outbox.cancel(reply.id) ? `Cancelled ${reply.id}; it will not be sent.` : `No message ${reply.id} in the outbox (already sent or cancelled).`
-    })
+    }, 'animaLife.timers')
 
     core.provideSessions(id => this.router.describe(id))
     core.provideChannels(key => {
@@ -344,81 +339,7 @@ export class AnimaLife extends Service {
       return channel === undefined ? undefined : { isOwner: channel.isOwner === true, display: channel.display, note: channel.note }
     }, () => this.router.known().map(({ channel }) => channelKey(channel)))
     core.addStatus(() => this.statusLines())
-    core.addSubcommand({
-      name: 'self',
-      usage: 'self [text] — open her Self session; with text, deliver it there as an owner notice',
-      run: async (args) => {
-        if (args === '') {
-          const agent = await this.router.ensureSelf()
-          return { kind: 'success', text: `Self session: ${agent.id}. It shows in the sidebar after its first turn; use /anima self <text> to start one.` }
-        }
-        // A notice comes without a situation report, so it names the channels she can reach.
-        const reachable = this.router.known()
-          .map(({ channel }) => ({ key: channelKey(channel), display: channel.display }))
-          .filter(({ key }) => core.channelAllowed(key) !== false)
-          .map(({ key, display }) => `${display}: "${key}"`)
-        const text = `The owner says: ${args}\nChannels you can reach: ${reachable.join('; ') || 'none'}.`
-        const id = await this.deliver({ type: 'notice', text, ts: core.clock.now() })
-        return { kind: 'success', text: `Delivered to the Self session ${id}.` }
-      },
-    })
-    core.addSubcommand({
-      name: 'heartbeat',
-      usage: 'heartbeat — run a heartbeat now instead of at the scheduled time',
-      run: async () => {
-        await core.ownerAction('heartbeat', {}, 'command')
-        return { kind: 'success', text: `Heartbeat delivered to the triage session of ${core.dayKey()}.` }
-      },
-    })
-
-    core.addSubcommand({
-      name: 'outbox',
-      usage: 'outbox [cancel <id>] — list her held initiated messages, or cancel one before it goes out',
-      run: async (args) => {
-        const [verb = '', id = ''] = args.split(/\s+/)
-        if (verb === '') {
-          const held = this.outbox.list()
-          if (held.length === 0) return { kind: 'success', text: `The outbox is empty (delay ${this.config.outbox.delaySeconds} s).` }
-          return { kind: 'success', text: held.map(m => `${m.id} → ${m.display} in ${Math.max(0, Math.round((m.sendsAt - Date.now()) / 1000))} s (intent ${m.intentId}): ${m.text}`).join('\n') }
-        }
-        if (verb.toLowerCase() !== 'cancel' || id === '') return { kind: 'error', text: 'Usage: /anima outbox [cancel <id>]' }
-        const { cancelled } = await core.ownerAction('outbox.cancel', { id }, 'command') as { cancelled: boolean }
-        return cancelled ? { kind: 'success', text: `Cancelled ${id.toLowerCase()}.` } : { kind: 'error', text: `No message ${id} in the outbox.` }
-      },
-    })
-
-    // Owner surface shared with the Anima page (DESIGN §12).
-    core.addOwnerView('outbox', () => ({
-      delaySeconds: this.config.outbox.delaySeconds,
-      held: this.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, intentId: m.intentId, text: m.text, sendsAt: m.sendsAt, offlineSince: m.offlineSince ?? null })),
-    }))
-    core.addOwnerAction('outbox.cancel', args => ({ cancelled: this.outbox.cancel(stringArg(args, 'id')) }))
-    core.addOwnerAction('heartbeat', async () => {
-      await this.beat()
-      return { day: core.dayKey() }
-    })
     core.addStatusPart('life', () => this.statusPart())
-    core.addOwnerView('inbox', () => ({
-      channels: this.inbox.entries().map(({ key, channel, messages }) => ({
-        key, display: channel.display,
-        messages: messages.map(m => ({ ts: m.ts, sender: m.sender.displayName, isOwner: m.sender.isOwner, text: m.text, addressed: m.addressed === true, reason: m.reason })),
-      })),
-    }))
-    core.addSubcommand({
-      name: 'inbox',
-      usage: 'inbox — messages waiting for her while she sleeps or is paused',
-      run: () => {
-        const entries = this.inbox.entries()
-        if (entries.length === 0) return { kind: 'success', text: 'Her inbox is empty.' }
-        return {
-          kind: 'success',
-          text: entries.flatMap(({ key, channel, messages }) => [
-            `${channel.display} (${key}): ${messages.length}`,
-            ...messages.map(m => `  ${formatLocal(m.ts)} ${m.sender.displayName}${m.addressed === true ? ' (@her)' : ''} [${m.reason}]: ${m.text}`),
-          ]).join('\n'),
-        }
-      },
-    })
 
     this.registerBehaviors()
 
@@ -480,6 +401,17 @@ export class AnimaLife extends Service {
   }
 
   /**
+   * Add budget lines to every situation report (what is left of what the
+   * outside allows), owned by the calling plugin. Facts only.
+   */
+  addBudgetLine(provider: () => string[]): () => void {
+    return this.ctx.effect(() => {
+      this.budgetLines.add(provider)
+      return () => { this.budgetLines.delete(provider) }
+    }, 'animaLife.addBudgetLine()')
+  }
+
+  /**
    * Route and deliver one stimulus. A group message that does not address her
    * and is not from the owner goes to group triage first (DESIGN §5), unless the
    * group is in its attention window after she spoke there. Every other chat
@@ -487,17 +419,13 @@ export class AnimaLife extends Service {
    * at most `settleMaxSeconds`), so a burst is one arrival (DESIGN §6); an
    * addressed group message takes the group's buffered messages into its burst.
    * While she is asleep or paused, chat messages that would wake her go to her
-   * inbox instead (Phase 9). Channel stimuli for a channel off its platform's
-   * allowlist are refused.
+   * inbox instead (Phase 9). While the outside holds her (a pause), the same.
    * @param options.model - model to select on the target session before delivery.
    * @returns the target session id.
    */
   async deliver(stimulus: Stimulus, options: { model?: ModelChoice } = {}): Promise<string> {
     if (stimulus.type === 'message' || stimulus.type === 'channel-event' || stimulus.type === 'intent' || stimulus.type === 'burst') {
       const key = channelKey(stimulus.channel)
-      if (this.ctx.anima.channelAllowed(key) === false) {
-        throw new AnimaError('anima/not-allowlisted', `${key} is not on the owner's allowlist; the stimulus was dropped.`)
-      }
       if (stimulus.type === 'message') {
         // Known without replacing the adapter's own entry, so unloading the adapter still forgets it.
         if (this.router.channel(key) === undefined) this.router.know(stimulus.channel)
@@ -529,14 +457,19 @@ export class AnimaLife extends Service {
     return this.deliverOne(stimulus, options)
   }
 
-  /** Whether she cannot be reached now: asleep, outside a deliberate wake, or paused (Phase 9). */
+  /** Whether she cannot be reached now: asleep (outside a deliberate wake), or held from outside (a pause). */
   private unreachable(): boolean {
-    return this.ctx.anima.paused || this.ctx.anima.asleep()
+    return this.ctx.anima.asleep() || this.heldBy() !== undefined
+  }
+
+  /** Why the outside holds her now, if it does (`anima/admit` reach). */
+  private heldBy(): AdmitRefusal | undefined {
+    return this.ctx.anima.admit({ kind: 'reach' })
   }
 
   /** Hold a chat message in her inbox (Phase 9); its platform does not mark it read. */
   private hold(stimulus: MessageStimulus): string {
-    const reason = this.ctx.anima.paused ? 'paused' : 'asleep'
+    const reason: 'asleep' | 'paused' = this.ctx.anima.asleep() || this.heldBy() === undefined ? 'asleep' : 'paused'
     this.inbox.hold(stimulus, reason)
     this.file.lastContact[channelKey(stimulus.channel)] = stimulus.ts
     this.save()
@@ -598,8 +531,8 @@ export class AnimaLife extends Service {
 
   /**
    * A chat settled: its messages go to her as one burst. A burst of only
-   * unaddressed attention-window messages first asks the gate (`group_attention`
-   * quota); refused, it goes to group triage like any other chatter. If she fell
+   * unaddressed attention-window messages first asks the outside (`group_attention`
+   * wake); refused, it goes to group triage like any other chatter. If she fell
    * asleep (or was paused) meanwhile, waking messages go to her inbox.
    */
   private flushSettled(key: string): void {
@@ -615,7 +548,7 @@ export class AnimaLife extends Service {
       return
     }
     if (!waking) {
-      if (!this.ctx.anima.admit('group_attention', key)) {
+      if (this.ctx.anima.admit({ kind: 'wake', name: 'group_attention', channelKey: key }) !== undefined) {
         for (const message of messages) this.triage.add(message)
         return
       }
@@ -762,7 +695,7 @@ export class AnimaLife extends Service {
     const now = core.clock.now()
     this.groupDay(batch.channelKey, now).batches += 1
     this.save()
-    if (core.paused || core.mode(now) === 'night' || core.overBudget(now)) return false
+    if (core.mode(now) === 'night' || core.admit({ kind: 'turn', purpose: 'group-triage' }) !== undefined) return false
     const day = core.dayKey(now)
     this.router.groupTriageId(day)
     const lines = batch.messages.map(m => `${formatLocal(m.ts).slice(11)} ${senderLabel(m)}: ${m.text}`)
@@ -806,35 +739,30 @@ export class AnimaLife extends Service {
     this.save()
   }
 
-  // ---- outbox ----
+  // ---- her own initiations (read by the outside) ----
 
   /**
-   * Called by every say tool before it sends. When this turn is answering an
-   * intent (her own initiation), the message waits in the outbox for the
-   * configured delay, and the owner can cancel it (DESIGN §10).
+   * The intent a conversation turn is answering, if the session is answering
+   * one: she started this conversation herself. The outside may hold such a
+   * message before it goes out.
    * @param sessionId - the calling conversation session.
-   * @param text - the message, for the outbox listing.
-   * @throws AnimaError `anima/outbox-cancelled` when it must not be sent.
    */
-  async holdOutgoing(sessionId: string, text: string, options: { onHeld?: (held: HeldMessage) => void } = {}): Promise<void> {
+  answering(sessionId: string): { readonly intentId: string; readonly channelKey: string; readonly display: string } | undefined {
     const intent = answeringIntent(this.file.intents, sessionId)
-    if (intent === undefined) return
-    const core = this.ctx.anima
-    const platform = platformOf(intent.channelKey)
-    const result = await this.outbox.hold({ sessionId, channelKey: intent.channelKey, display: intent.display, text, intentId: intent.id }, {
-      online: () => this.platformOnline(platform),
-      onHeld: (held) => {
-        options.onHeld?.(held)
-        if (!this.config.outbox.notifyOwner || core.channelInfo(intent.channelKey)?.isOwner === true) return
-        core.ownerLine?.send(`[Anima outbox ${held.id}] In ${this.config.outbox.delaySeconds} s she sends to ${held.display}: "${text}". Reply "cancel ${held.id}" to stop it.`)
-          .catch((error: unknown) => this.ctx.logger.warn(`anima: could not notify the owner about ${held.id}: ${String(error)}`))
-      },
-    })
-    if (result === 'cancelled') throw new AnimaError(OUTBOX_CANCELLED, 'the owner cancelled this message before it went out. Do not send it again now.')
-    if (result === 'expired') {
-      throw new AnimaError(OUTBOX_EXPIRED, `${platform} stayed offline for ${this.config.outbox.offlineHoldMinutes} min after the message was due, so it was never sent. Do not send it again now; you hear when ${platform} is back.`)
-    }
-    if (core.paused) throw new AnimaError(OUTBOX_CANCELLED, 'Anima was paused while the message waited in the outbox, so it was not sent.')
+    return intent === undefined ? undefined : { intentId: intent.id, channelKey: intent.channelKey, display: intent.display }
+  }
+
+  /**
+   * Tell her intent arrivals how long the outside holds what she starts
+   * (arrival facts only). Owned by the calling plugin.
+   */
+  provideHoldSeconds(seconds: () => number | undefined): () => void {
+    return this.ctx.effect(() => {
+      this.holdSeconds = seconds
+      return () => {
+        if (this.holdSeconds === seconds) this.holdSeconds = () => undefined
+      }
+    }, 'animaLife.provideHoldSeconds()')
   }
 
   // ---- platform health ----
@@ -847,8 +775,8 @@ export class AnimaLife extends Service {
   /**
    * An adapter reports its platform's health (DESIGN §11). Going offline, her
    * Self session gets a notice once it has lasted `platforms.noticeAfterSeconds`;
-   * coming back, held outbox messages go out, and she is told it is back if she
-   * was told it went down. Logged; never alerts anyone.
+   * coming back, she is told it is back if she was told it went down. Recorded
+   * (`anima/record`); never alerts anyone.
    * @param platform - platform id, e.g. `qq`.
    * @param online - whether the account can send and receive now.
    * @param reason - why it is offline, in a few words.
@@ -882,10 +810,9 @@ export class AnimaLife extends Service {
       return
     }
     this.ctx.logger.info(`anima: ${name} back online`)
-    const released = this.outbox.release(platform)
     if (health.notified) {
       health.notified = false
-      this.tellSelf(`${name} is back online at ${formatLocal(health.since)}.${released === 0 ? '' : ` ${released} held message${released === 1 ? '' : 's'} went out now.`}`, `${name} back online`, 'platform-online')
+      this.tellSelf(`${name} is back online at ${formatLocal(health.since)}.`, `${name} back online`, 'platform-online')
     }
     health.reason = undefined
   }
@@ -949,8 +876,8 @@ export class AnimaLife extends Service {
       const core = this.ctx.anima
       const now = core.clock.now()
       const mode = core.mode(now)
-      if (core.paused) return this.schedule(now + core.modeConfig('day').minIntervalMinutes * MIN)
-      if (core.overBudget(now)) return this.schedule(nextWakeOf(core, now))
+      const held = core.admit({ kind: 'turn', purpose: 'heartbeat' })
+      if (held !== undefined) return this.schedule(held.untilWake === true ? nextWakeOf(core, now) : now + core.modeConfig('day').minIntervalMinutes * MIN)
       if (mode === 'night' && core.nightWakesLeft(now) <= 0) return this.schedule(nextWakeOf(core, now))
       const day = core.dayKey(now)
       const triageId = this.router.triageId(day)
@@ -1000,7 +927,7 @@ export class AnimaLife extends Service {
     const core = this.ctx.anima
     const channels: ChannelLine[] = this.router.known().map(({ channel }) => {
       const key = `${channel.platform}:${channel.account}:${channel.kind}:${channel.id}`
-      return { key, display: channel.display, mayInitiate: core.mayInitiate(key), lastContact: this.file.lastContact[key] }
+      return { key, display: channel.display, mayInitiate: core.admit({ kind: 'initiate', channelKey: key }) === undefined, lastContact: this.file.lastContact[key] }
     })
     const notes = [...this.sleepLines(now), core.selfModelReportLine(), ...[...this.reportLines].flatMap(provider => provider())]
     if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`)
@@ -1009,7 +936,7 @@ export class AnimaLife extends Service {
       state: core.stateText(),
       goals: core.goals.open().map(describeGoal),
       events: this.file.events,
-      budgets: core.budgetText(now),
+      budgets: [...this.budgetLines].flatMap(provider => provider()),
       channels, now, notes,
     })
   }
@@ -1101,7 +1028,7 @@ export class AnimaLife extends Service {
     this.file.counts.intents += 1
     this.file.lastContact[key] = now
     this.save()
-    await this.routed({ type: 'intent', channel, intentId, intent, context, heldSeconds: this.config.outbox.delaySeconds, ts: now })
+    await this.routed({ type: 'intent', channel, intentId, intent, context, heldSeconds: this.holdSeconds(), ts: now })
     return { intentId, sessionId }
   }
 
@@ -1468,7 +1395,6 @@ export class AnimaLife extends Service {
       selfActing: this.file.awaitingSelfRest,
       counts,
       intents: [...intents.pending, ...intents.active].map(i => ({ id: i.id, display: i.display })),
-      outboxHeld: this.outbox.list().length,
       inbox: this.inbox.entries().map(({ key, channel, messages }) => ({ key, display: channel.display, count: messages.length, first: messages[0]!.ts, last: messages.at(-1)!.ts })),
       groupsToday: this.file.groups[core.dayKey()] ?? {},
       sessions: {
@@ -1490,7 +1416,6 @@ export class AnimaLife extends Service {
       `Settle window: ${this.config.conversation.settleSeconds} s quiet, at most ${this.config.conversation.settleMaxSeconds} s; waiting: ${[...this.settling].map(([key, e]) => `${key} (${e.messages.length}${e.typing > 0 ? `, typing ${e.typing}` : ''})`).join(', ') || 'none'}`,
       `Group triage: window ${this.config.groupTriage.windowSeconds} s, attention ${this.config.groupTriage.attentionSeconds} s (in it: ${[...this.attention].filter(([, until]) => until > Date.now()).map(([key]) => key).join(', ') || 'none'}); open buffers ${this.triage.open().map(b => `${b.channelKey} (${b.messages})`).join(', ') || 'none'}; undecided batches ${this.triage.undecided().map(b => b.id).join(', ') || 'none'}`,
       ...Object.entries(this.file.groups[core.dayKey()] ?? {}).map(([key, g]) => `  ${key} today: wakes ${g.direct} direct + ${g.triage} triage${g.attention === undefined ? '' : ` + ${g.attention} attention`}; batches ${g.batches} (remember ${g.remember}, ignore ${g.ignore}, fallback ${g.fallback})`),
-      `Outbox: delay ${this.config.outbox.delaySeconds} s, offline hold ${this.config.outbox.offlineHoldMinutes} min; held ${this.outbox.list().map(m => `${m.id} → ${m.display}${m.offlineSince === undefined ? '' : ' (waiting for its platform)'}`).join(', ') || 'none'}`,
       `Self session: ${this.router.selfId}`,
       `Triage session today: ${this.router.triageId(core.dayKey())}`,
       ...this.router.known().map(({ sessionId, channel }) => `Conversation ${channel.display}: ${sessionId}`),

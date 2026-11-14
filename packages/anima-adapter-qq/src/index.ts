@@ -89,8 +89,8 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   const channels = allowedChannels(config)
   const byKey = new Map(channels.map(channel => [qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id), channel]))
   const channelOf = (kind: 'private' | 'group', id: string) => byKey.get(qqChannelKey(config.account, kind, id))
+  // She has the chats this adapter is configured with; events from any other chat are dropped.
   life.publish(channels)
-  core.restrictChannels(PLATFORM, key => byKey.has(key))
 
   const names = new Map<string, string>()
   const sentIds = new Set<string>()
@@ -206,6 +206,18 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     client.call(action, params).catch((error: unknown) => ctx.logger.debug(`anima qq: ${action}: ${error instanceof Error ? error.message : String(error)}`))
   })
 
+  // While the outside holds a message she started in a private chat, QQ shows typing shortly before it goes out.
+  ctx.on('anima/outgoing-held', (held) => {
+    const channel = byKey.get(held.channelKey)
+    if (channel === undefined || channel.kind !== 'private' || !config.typing.enabled) return
+    const typing = setTimeout(() => {
+      if (!login.ready) return
+      client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
+        .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
+    }, Math.max(0, held.sendsAt - Date.now() - config.typing.leadSeconds * 1000))
+    void held.done.finally(() => clearTimeout(typing))
+  })
+
   core.provideOwnerLine({
     name: `QQ private chat with the owner (${config.owner})`,
     send: async (text) => { await send('private', config.owner, [{ type: 'text', data: { text } }]) },
@@ -253,7 +265,8 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     names.set(message.userId, message.displayName)
     const isOwner = message.userId === config.owner
     if (isOwner && message.kind === 'private') {
-      const answer = core.handleOwnerReply(message.text)
+      // The outside consumes owner replies such as "yes a3"; then they never reach her.
+      const answer = ctx.bail('anima/owner-message', message.text)
       if (answer !== undefined) {
         await send('private', config.owner, [{ type: 'text', data: { text: answer } }])
         return
@@ -338,14 +351,17 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     const comment = (event.comment ?? '').trim()
     if (event.request_type === 'friend') {
       const who = `QQ user ${userId}${comment === '' ? '' : ` ("${comment}")`}`
-      life.note(`${who} asked to be your friend on QQ; the owner was asked to decide.`)
-      const answer = await core.requestApproval(`${who} wants to add her (${config.account}) as a QQ friend.`)
-      if (answer === 'approved' || answer === 'denied') {
-        await client.call('set_friend_add_request', { flag: event.flag, approve: answer === 'approved' })
-        life.note(`The owner ${answer === 'approved' ? 'accepted' : 'declined'} the QQ friend request from ${userId}.`)
-      } else {
-        life.note(`The QQ friend request from ${userId} was left unanswered (${answer === 'timeout' ? 'the owner did not answer in time' : 'the owner could not be asked'}).`)
-      }
+      // Whoever handles friend requests outside the persona answers it; without anyone, it stays unanswered.
+      const taken = ctx.bail('anima/friend-request', {
+        platform: PLATFORM, userId,
+        summary: `${who} wants to add her (${config.account}) as a QQ friend.`,
+        answer: async (accept) => {
+          await client.call('set_friend_add_request', { flag: event.flag, approve: accept })
+          life.note(`The owner ${accept ? 'accepted' : 'declined'} the QQ friend request from ${userId}.`)
+        },
+        leave: why => life.note(`The QQ friend request from ${userId} was left unanswered (${why}).`),
+      }) === true
+      life.note(taken ? `${who} asked to be your friend on QQ; the owner was asked to decide.` : `${who} asked to be your friend on QQ; it stays unanswered.`)
       return
     }
     if (event.request_type === 'group' && event.sub_type === 'invite') {
@@ -389,22 +405,6 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       const mention = args.mention ?? []
       if (mention.length > 0 && channel.kind !== 'group') throw new AnimaError('anima/bad-args', 'mention works only in group chats.')
       if (mention.some(id => !/^\d{4,12}$/.test(id))) throw new AnimaError('anima/bad-args', 'mention takes QQ user ids (digits), as shown with each message.')
-      // Typing shows only while a message she chose waits in the outbox, in private chats.
-      let typing: ReturnType<typeof setTimeout> | undefined
-      try {
-        await life.holdOutgoing(exec.agent!.id, messages.join('\n'), {
-          onHeld: (held) => {
-            if (channel.kind !== 'private' || !config.typing.enabled) return
-            typing = setTimeout(() => {
-              if (!login.ready) return
-              client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
-                .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
-            }, Math.max(0, held.sendsAt - Date.now() - config.typing.leadSeconds * 1000))
-          },
-        })
-      } finally {
-        clearTimeout(typing)
-      }
       const ids: string[] = []
       // Messages after the first wait a typing time from their length, with typing shown in private chats (Phase 9).
       await paceMessages(messages, config.pacing, async (index, text) => {

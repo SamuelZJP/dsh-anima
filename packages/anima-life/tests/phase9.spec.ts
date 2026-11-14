@@ -49,7 +49,7 @@ async function setup(life: Record<string, unknown> = {}, start = '2026-11-10T10:
   const clock = { now: at(start) }
   ctx.anima.setClock(() => clock.now)
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0, ...life.conversation as object }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object }, outbox: { delaySeconds: 0.2 } } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0, ...life.conversation as object }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object } } })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([ownerChat, group]) } })
   ctx.anima.registerBehavior(defineTool({
     name: 'qq_say', description: 'say', parameters: { text: { type: 'string', required: true } },
@@ -58,9 +58,15 @@ async function setup(life: Record<string, unknown> = {}, start = '2026-11-10T10:
   }), { platform: 'qq', effect: 'express', sessions: ['conversation'] })
   const stimuli: StimulusEvent[] = []
   ctx.on('anima/stimulus', event => { stimuli.push(event) })
+  // A stand-in for the outside: a pause it can switch, and what she reports.
+  const outside = { paused: false }
+  ctx.on('anima/admit', request => outside.paused && (request.kind === 'reach' || request.kind === 'turn') ? { code: 'anima/paused', reason: 'paused' } : undefined)
+  const recorded: { type: string; reason?: string; count?: number }[] = []
+  ctx.on('anima/record', (record) => { recorded.push(record as never) })
+  const pause = (paused: boolean) => { outside.paused = paused; ctx.emit('anima/paused', paused) }
   const reads: string[] = []
   ctx.on('anima/read', ({ channel }) => { reads.push(animaCore.channelKey(channel)) })
-  return { ctx, host, clock, stimuli, reads, dataDir }
+  return { ctx, host, clock, stimuli, reads, dataDir, recorded, pause }
 }
 
 let calls = 0
@@ -82,7 +88,7 @@ const chatter = (ctx: Context, text: string, extra: Record<string, unknown> = {}
 
 describe('the inbox (DESIGN §5, Phase 9)', () => {
   it('holds chat messages while she sleeps: no wake, nothing read, persisted, in the transcript', async () => {
-    const { ctx, host, clock, stimuli, reads, dataDir } = await setup({}, '2026-11-11T01:00')
+    const { ctx, host, clock, stimuli, reads, dataDir, recorded } = await setup({}, '2026-11-11T01:00')
     expect(ctx.anima.asleep()).toBe(true)
     await dm(ctx, '睡了吗')
     clock.now = at('2026-11-11T01:12')
@@ -96,7 +102,7 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
     expect(saved.channels[ownerKey]!.messages).toHaveLength(2)
     expect(new Inbox(join(dataDir, 'inbox.json')).size()).toBe(3)
     expect(inboxSummary(ctx.animaLife.inbox.entries())).toBe(`收件箱：Sam 2 条（最后 01:12，channel "${ownerKey}"），Test group @你 1 条（最后 01:12，channel "${groupKey}"）。用 inbox_read 看，用 inbox_answer 交给那个聊天去回。`)
-    expect(ctx.anima.activity.read('2026-11-10').filter(r => r.type === 'inbox-held')).toHaveLength(3)
+    expect(recorded.filter(r => r.type === 'inbox-held')).toHaveLength(3)
   })
 
   it('keeps unaddressed group chatter out of the inbox at night (remembered without a model)', async () => {
@@ -107,7 +113,7 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
   })
 
   it('shows Self the inbox at the first heartbeat after waking; inbox_answer hands one chat its burst as a reply', async () => {
-    const { ctx, host, clock, reads } = await setup({}, '2026-11-11T01:00')
+    const { ctx, host, clock, reads, recorded } = await setup({}, '2026-11-11T01:00')
     await dm(ctx, '睡了吗')
     clock.now = at('2026-11-11T01:12')
     await dm(ctx, '晚安')
@@ -130,11 +136,11 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
     expect(chat[0]).toMatch(/Sam（主人）发来 2 条：\n  01:00（你睡着时收到） \[msg \d+\] 睡了吗\n  01:12（你睡着时收到） \[msg \d+\] 晚安\n（这些是你睡着时收到的，发送时间如上；你现在已经醒了。）\n（你在内心里想的：他昨晚睡得晚）\n在这里回应：用 qq_say 说话/)
     expect(reads).toEqual([ownerKey])
     expect(ctx.animaLife.inbox.size()).toBe(0)
-    // It is a reply: no initiate budget used.
-    expect(ctx.anima.todayLedger().initiates).toBe(0)
+    // It is a reply, not a conversation she started.
+    expect(ctx.anima.behavior('inbox_answer')?.effect).toBe('express')
     const empty = await callAs(ctx, selfId, 'inbox_answer', { channel: ownerKey })
     expect(empty.text).toMatch(/^Error: anima\/inbox-empty: 收件箱里没有 Sam 的消息/)
-    expect(ctx.anima.daySummary('2026-11-11').sleep).toMatchObject({ answered: 2 })
+    expect(recorded.filter(r => r.type === 'inbox-release' && r.reason === 'answer')).toEqual([expect.objectContaining({ count: 2 })])
   })
 
   it('releases held messages into the next burst when that chat wakes her again', async () => {
@@ -151,7 +157,7 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
   it('wakes Self when the owner wakes her on purpose, with the inbox in her report', async () => {
     const { ctx, host } = await setup({}, '2026-11-11T02:00')
     await dm(ctx, '醒醒')
-    await ctx.anima.ownerAction('wake', {}, 'page')
+    ctx.anima.wakeByOwner()
     await vi.waitFor(() => expect(host.sessions.get(selfId)?.inbox.length).toBe(1))
     const text = host.sessions.get(selfId)!.inbox[0]!
     expect(text).toContain('[被叫醒] 主人把你叫醒了。')
@@ -163,12 +169,12 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
   })
 
   it('holds messages while paused, and shows them in Self on resume', async () => {
-    const { ctx, host } = await setup()
-    await ctx.anima.ownerAction('pause', {}, 'command')
+    const { ctx, host, pause } = await setup()
+    pause(true)
     await dm(ctx, 'hi')
     expect(host.sessions.has(ownerSession)).toBe(false)
     expect(ctx.animaLife.inbox.peek(ownerKey)).toEqual([expect.objectContaining({ text: 'hi', reason: 'paused' })])
-    await ctx.anima.ownerAction('resume', {}, 'command')
+    pause(false)
     await vi.waitFor(() => expect(host.sessions.get(selfId)?.inbox.length).toBe(1))
     expect(host.sessions.get(selfId)!.inbox[0]).toContain('[继续] 主人让你继续了。')
     await callAs(ctx, selfId, 'inbox_answer', { channel: ownerKey })
@@ -179,7 +185,7 @@ describe('the inbox (DESIGN §5, Phase 9)', () => {
     const { ctx, host } = await setup({}, '2026-11-11T02:00')
     await ctx.animaLife.deliver({ type: 'notice', text: 'look at this', ts: ctx.anima.clock.now() })
     expect(host.sessions.has(selfId)).toBe(false)
-    expect(ctx.anima.statusText()).toContain('Asleep since')
+    expect(ctx.anima.statusLines().join('\n')).toContain('Asleep since')
   })
 
   it('moves messages settling when she falls asleep into the inbox', async () => {
@@ -217,7 +223,7 @@ describe('settle timing (DESIGN §6, Phase 9)', () => {
     await dm(ctx, '今天发生了一件事')
     await vi.waitFor(() => expect(host.sessions.get(ownerSession)?.inbox.length).toBe(1))
     expect(host.sessions.get(ownerSession)!.inbox[0]).toMatch(/发来 2 条/)
-    expect(ctx.anima.statusText()).toContain('Settle window: 0.08 s quiet, at most 1 s')
+    expect(ctx.anima.statusLines().join('\n')).toContain('Settle window: 0.08 s quiet, at most 1 s')
   })
 
   it('has the owner-approved defaults: 15 s of quiet, at most 60 s', async () => {

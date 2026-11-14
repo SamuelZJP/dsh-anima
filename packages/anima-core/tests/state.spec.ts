@@ -3,7 +3,7 @@ import { AnimaClock, formatLocal, parseWhen } from '../src/clock.ts'
 import { resolveConfig } from '../src/config.ts'
 import { dayKey, modeAt, nextWake, phaseAt, resolveRhythm } from '../src/rhythm.ts'
 import { advance, DEFAULT_NEEDS, feel, initialState, satisfy, spendTurn, type StateModel } from '../src/state.ts'
-import { billableTokens, Ledger } from '../src/ledger.ts'
+import { Ledger } from '../src/ledger.ts'
 import { GoalStore } from '../src/goals.ts'
 
 const at = (text: string) => new Date(text).getTime()
@@ -144,15 +144,11 @@ describe('self state', () => {
 })
 
 describe('ledger', () => {
-  it('counts billable tokens without cache reads', () => {
-    expect(billableTokens({ inputTokens: 900, outputTokens: 150, cacheReadTokens: 9000, cacheWriteTokens: 10 })).toBe(1060)
-  })
-
   it('keeps only the last days', () => {
     const ledger = new Ledger({}, 2)
-    for (const key of ['2026-11-08', '2026-11-09', '2026-11-10']) ledger.day(key).initiates = 1
+    for (const key of ['2026-11-08', '2026-11-09', '2026-11-10']) ledger.day(key).nightWakes = 1
     expect(Object.keys(ledger.toJSON())).toEqual(['2026-11-09', '2026-11-10'])
-    expect(ledger.peek('2026-11-01').initiates).toBe(0)
+    expect(ledger.peek('2026-11-01').nightWakes).toBe(0)
   })
 })
 
@@ -160,9 +156,9 @@ describe('config defaults', () => {
   it('fills Phase 2 defaults', () => {
     const config = resolveConfig({})
     expect(config.rhythm).toMatchObject({ wake: '07:30', bedtime: { earliest: '22:30', latest: '00:30', wokenMinutes: 30 }, evening: '18:00' })
-    expect(config.modes.day).toMatchObject({ minIntervalMinutes: 20, maxIntervalMinutes: 240, tokenBudget: 300_000, triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
+    expect(config.modes.day).toMatchObject({ minIntervalMinutes: 20, maxIntervalMinutes: 240, triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
     expect(config.modes.night).toMatchObject({ maxWakes: 1, allowedEffects: ['observe', 'internal'] })
-    expect(config.initiate).toEqual({ perDay: 3, quietHours: [], consent: { owner: true, channels: [] } })
+    expect(config.selfModel.changesPerDay).toBe(3)
     expect(config.clock.speed).toBe(1)
     expect(config.needs.map(need => need.name)).toEqual(['connect', 'curiosity', 'expression', 'rest', 'order'])
   })
@@ -174,14 +170,13 @@ describe('config defaults', () => {
 })
 
 describe('goals', () => {
-  it('adds, notes and closes goals; owner goals need a reason from her', () => {
+  it('adds, notes and closes goals; she may close the owner\'s without a reason', () => {
     const store = new GoalStore(undefined)
     const mine = store.add({ text: 'tidy notes', owner: 'her', now: 1 })
     const owners = store.add({ text: 'ask about the exam', owner: 'owner', due: at('2026-11-10T21:00'), now: 2 })
     expect(store.open().map(goal => goal.id)).toEqual([owners.id, mine.id])
     store.note(mine.id, 'started', 3)
-    expect(() => store.close(owners.id, { status: 'dropped', by: 'her', now: 4 })).toThrow(/anima\/reason-required/)
-    expect(store.close(owners.id, { status: 'done', reason: 'asked him', by: 'her', now: 4 }).status).toBe('done')
+    expect(store.close(owners.id, { status: 'done', by: 'her', now: 4 }).status).toBe('done')
     expect(() => store.close(owners.id, { status: 'done', by: 'owner', now: 5 })).toThrow(/anima\/goal-closed/)
     expect(() => store.get('g99')).toThrow(/anima\/goal-not-found/)
     expect(store.open()).toHaveLength(1)

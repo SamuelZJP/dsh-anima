@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-attachment'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AnimaError, formatLocal, type BehaviorMeta } from '@anima/core'
+import { AnimaError, formatLocal, type BehaviorMeta, type Subcommand } from '@anima/core'
 import type {} from '@anima/core'
 import type { ExtraBlock } from '@anima/life'
 import type {} from '@anima/life'
@@ -266,7 +266,8 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
 
   // ---- login commands ----
 
-  core.addSubcommand({
+  // Offered to the owner from outside: the guard registers platform subcommands and actions.
+  const biliCommand: Subcommand = {
     name: 'bili',
     usage: 'bili login | bili status | bili logout — her Bilibili account (QR login)',
     run: async (args) => {
@@ -274,7 +275,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
       switch (verb) {
         case 'login': return loginCommand()
         case 'logout': {
-          const { removed } = await core.ownerAction('bili.logout', {}, 'command') as { removed: boolean }
+          const { removed } = logout()
           return { kind: 'success', text: removed ? 'Logged out: her Bilibili cookies are deleted.' : 'She was not logged in.' }
         }
         case '':
@@ -285,7 +286,15 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
         default: return { kind: 'error', text: 'Usage: /anima bili login | status | logout' }
       }
     },
-  })
+  }
+
+  /** Delete her Bilibili cookies. */
+  function logout(): { removed: boolean } {
+    const removed = store.remove()
+    client.clearLogin()
+    refreshToken = undefined
+    return { removed }
+  }
 
   /**
    * Start a QR login (command and page share it).
@@ -334,19 +343,16 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
         const started = await beginLogin(false)
         return { svg: started.svg, expiresAt: started.expiresAt }
       },
-      logout: () => {
-        const removed = store.remove()
-        client.clearLogin()
-        refreshToken = undefined
-        return { removed }
-      },
+      logout: () => logout(),
+      'login-link': () => beginLogin(true),
     },
+    subcommands: [biliCommand],
   })
 
   async function loginCommand() {
     let started: Awaited<ReturnType<typeof beginLogin>>
     try {
-      started = await core.ownerAction('bili.login-link', {}, 'command') as Awaited<ReturnType<typeof beginLogin>>
+      started = await beginLogin(true)
     } catch (error: unknown) {
       return { kind: 'error' as const, text: message(error).replace(/^anima\/bili-login-pending: /, '') }
     }
@@ -358,7 +364,6 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
     if (link !== undefined) return { kind: 'success' as const, text: [head, `Open this in your browser: ${link}`, `(Also saved as ${svg}.) ${tail}`].join('\n') }
     return { kind: 'success' as const, text: [head, qrText, `If it does not scan, open ${svg} instead. ${tail}`].join('\n') }
   }
-  core.addOwnerAction('bili.login-link', () => beginLogin(true))
 
   /**
    * Serve the pending QR on DSH's webserver, when this host has one, at a

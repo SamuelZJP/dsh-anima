@@ -190,8 +190,6 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
       }
       const messages = sayMessages(args)
       if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
-      // Her own initiations wait in the outbox first (DESIGN §10).
-      await ctx.animaLife.holdOutgoing(sessionId!, messages.join('\n'))
       const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
       for (const text of messages) appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text })}\n`)
@@ -199,37 +197,43 @@ export function apply(ctx: Context, config: Partial<Config> | undefined): void {
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
 
-  ctx.anima.addSubcommand({
-    name: 'chat',
-    usage: 'chat [--as <name>] [--in group:<id>] <text> — message her as the owner, or (dev) as another person or in a simulated group',
-    run: async (args) => {
-      const chat = parseChat(args)
-      if ('error' in chat) return { kind: 'error', text: chat.error }
-      // On the local owner line, the owner's "yes a3" answers an approval and never reaches her.
-      if (config?.ownerLine === true && chat.as === undefined && chat.group === undefined) {
-        const answer = ctx.anima.handleOwnerReply(chat.text)
-        if (answer !== undefined) return { kind: 'success', text: answer }
-      }
-      const channel = chatChannel(chat)
-      remember(channel)
-      const sender = chat.as === undefined
-        ? { platformUserId: 'owner', displayName: ownerName, isOwner: true }
-        : { platformUserId: chat.as.toLowerCase(), displayName: displayName(chat.as), isOwner: false }
-      const addressed = channel.kind === 'group' ? addressesHer(chat.text, ctx.anima.config.name) : undefined
-      const sessionId = await ctx.animaLife.deliver({
-        type: 'message',
-        channel,
-        sender,
-        text: chat.text,
-        ts: ctx.anima.clock.now(),
-        ...addressed === undefined ? {} : { addressed },
-      })
-      const how = channel.kind === 'group' && addressed !== true && !sender.isOwner
-        ? 'into group triage (it does not address her; after the triage window a cheap check decides whether to ignore, remember or wake her)'
-        : ''
-      return { kind: 'success', text: how === ''
-        ? `Delivered to "Anima · ${channel.display}" (${sessionId}). Open it in the sidebar to watch her reply.`
-        : `Sent ${how}.` }
-    },
+  // `/anima chat` is offered to the owner from outside (the guard registers platform subcommands).
+  ctx.anima.providePlatform({
+    platform: PLATFORM,
+    title: 'Local',
+    view: () => ({ health: 'ok', summary: `${known.size} test channel${known.size === 1 ? '' : 's'} besides the owner's chat`, details: { ownerLine: config?.ownerLine === true } }),
+    subcommands: [{
+      name: 'chat',
+      usage: 'chat [--as <name>] [--in group:<id>] <text> — message her as the owner, or (dev) as another person or in a simulated group',
+      run: async (args) => {
+        const chat = parseChat(args)
+        if ('error' in chat) return { kind: 'error', text: chat.error }
+        // On the local owner line, the owner's "yes a3" answers an approval and never reaches her.
+        if (config?.ownerLine === true && chat.as === undefined && chat.group === undefined) {
+          const answer = ctx.bail('anima/owner-message', chat.text)
+          if (answer !== undefined) return { kind: 'success', text: answer }
+        }
+        const channel = chatChannel(chat)
+        remember(channel)
+        const sender = chat.as === undefined
+          ? { platformUserId: 'owner', displayName: ownerName, isOwner: true }
+          : { platformUserId: chat.as.toLowerCase(), displayName: displayName(chat.as), isOwner: false }
+        const addressed = channel.kind === 'group' ? addressesHer(chat.text, ctx.anima.config.name) : undefined
+        const sessionId = await ctx.animaLife.deliver({
+          type: 'message',
+          channel,
+          sender,
+          text: chat.text,
+          ts: ctx.anima.clock.now(),
+          ...addressed === undefined ? {} : { addressed },
+        })
+        const how = channel.kind === 'group' && addressed !== true && !sender.isOwner
+          ? 'into group triage (it does not address her; after the triage window a cheap check decides whether to ignore, remember or wake her)'
+          : ''
+        return { kind: 'success', text: how === ''
+          ? `Delivered to "Anima · ${channel.display}" (${sessionId}). Open it in the sidebar to watch her reply.`
+          : `Sent ${how}.` }
+      },
+    }],
   })
 }

@@ -46,7 +46,7 @@ export const Config: z<Config> = z.object({
  * @returns the complete system prompt text.
  */
 export function personaText(constitution: string, facts: PlaceFacts | SessionKind): string {
-  return primerText(constitution, typeof facts === 'string' ? { kind: facts, tools: [], quotas: [], limits: [] } : facts)
+  return primerText(constitution, typeof facts === 'string' ? { kind: facts, tools: [] } : facts)
 }
 
 /** Name of the self-model context contribution. */

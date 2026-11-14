@@ -15,7 +15,7 @@ import { deflateSync, crc32 } from 'node:zlib'
 import { ACCOUNT, GROUPS, OWNER, PORT, USERS } from './cast.mjs'
 
 export const name = 'anima-reliability-check'
-export const inject = ['anima', 'animaLife']
+export const inject = ['anima', 'animaLife', 'animaGuard']
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -199,6 +199,7 @@ export function apply(ctx, config = {}) {
   const port = config.port ?? PORT
   const target = config.targetTurns ?? 210
   const core = ctx.anima
+  const guard = ctx.animaGuard
   const life = ctx.animaLife
   const logFile = join(core.config.dataDir, 'reliability.log')
   const log = (...args) => {
@@ -410,7 +411,7 @@ export function apply(ctx, config = {}) {
     night.conversationTurnsAsleep = conversationTurns().filter(t => t.step === 'night: messages while asleep').length
     // The owner wakes her on purpose; Self sees the inbox.
     step = 'night: owner wakes her'
-    await core.ownerAction('wake', {}, 'command')
+    await guard.ownerAction('wake', {}, 'command')
     await sleep(3000)
     await idle(9000)
     // Back to sleep after the deliberate wake, then more messages.
@@ -435,8 +436,8 @@ export function apply(ctx, config = {}) {
 
   function report(final) {
     const conv = conversationTurns()
-    const lost = core.activity.days().flatMap(day => core.activity.read(day)).filter(r => r.type === 'lost-reply' && r.real >= started)
-    const reminders = core.activity.days().flatMap(day => core.activity.read(day)).filter(r => r.type === 'reminder' && r.real >= started)
+    const lost = guard.activity.days().flatMap(day => guard.activity.read(day)).filter(r => r.type === 'lost-reply' && r.real >= started)
+    const reminders = guard.activity.days().flatMap(day => guard.activity.read(day)).filter(r => r.type === 'reminder' && r.real >= started)
     // A turn closes cleanly only by completing without a reminder; an errored turn never does.
     const clean = conv.filter(t => t.reminders === 0 && t.end === 'completed').length
     const byStep = {}
@@ -460,7 +461,7 @@ export function apply(ctx, config = {}) {
       conversationTurnsEndedByError: conv.filter(t => t.end === 'error').length,
       otherTurns: turns.length - conv.length,
       otherTurnsEndedByError: turns.filter(t => t.kind !== 'conversation' && t.end === 'error').length,
-      tokens: core.todayLedger().tokens,
+      tokens: guard.todayCounts().tokens,
       sentByHer: bot.sent.filter(s => s.action.startsWith('send_')).length,
       // Phase 9
       bursts: bursts.length,

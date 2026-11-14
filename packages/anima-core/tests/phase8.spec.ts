@@ -53,37 +53,6 @@ describe('closing behaviors through the pipeline', () => {
     expect(sent).toEqual([['在的'], ['等下', '我看看']])
   })
 
-  it('does not conclude a refused say, and counts a say once however many messages it sends', async () => {
-    const { ctx } = await withSay({ quotas: [{ effect: 'express', per: 'channel', limit: 2, windowMinutes: 60 }] })
-    expect((await callAs(ctx, 'c1', 'qq_say', { text: 'a', also: ['b', 'c'] })).isError).toBe(false)
-    expect((await callAs(ctx, 'c1', 'qq_say', { text: 'd', also: ['e'] })).isError).toBe(false)
-    const refused = await callAs(ctx, 'c1', 'qq_say', { text: 'f' })
-    expect(refused.isError).toBe(true)
-    expect(refused.concludesTurn).toBeUndefined()
-    expect(textOf(refused)).toContain('anima/over-quota')
-  })
-
-  it('refuses more than five messages in one say by default', async () => {
-    const { ctx } = await withSay()
-    const result = await callAs(ctx, 'c1', 'qq_say', { text: '1', also: ['2', '3', '4', '5', '6'] })
-    expect(result.isError).toBe(true)
-    expect(textOf(result)).toContain('anima/over-limit')
-    expect(textOf(result)).toContain('messages 最多 5')
-  })
-
-  it('lets a turn closer through while paused, and nothing else', async () => {
-    const { ctx, sent } = await withSay()
-    registerEcho(ctx, 'end_turn', { effect: 'internal', sessions: ['conversation'], closes: true })
-    await ctx.anima.ownerAction('pause', {}, 'command')
-    const say = await callAs(ctx, 'c1', 'qq_say', { text: '在的' })
-    expect(say.isError).toBe(true)
-    expect(textOf(say)).toContain('anima/paused')
-    const end = await callAs(ctx, 'c1', 'end_turn')
-    expect(end.isError).toBe(false)
-    expect(end.concludesTurn).toBe(true)
-    expect(sent).toEqual([])
-  })
-
   it('leaves the turn open for behaviors without closes', async () => {
     const ctx = await setupCore()
     provideSessions(ctx, { c1: chat })
@@ -91,33 +60,6 @@ describe('closing behaviors through the pipeline', () => {
     const result = await callAs(ctx, 'c1', 'qq_poke')
     expect(result.isError).toBe(false)
     expect(result.concludesTurn).toBeUndefined()
-  })
-})
-
-describe('admit (code-side gate check)', () => {
-  it('counts group_attention per channel, records every decision, and refuses while paused', async () => {
-    const ctx = await setupCore({ quotas: [
-      { behavior: 'group_attention', per: 'channel', limit: 2, windowMinutes: 60 },
-      { per: 'global', limit: 1, windowMinutes: 60 },
-    ] })
-    expect(ctx.anima.admit('group_attention', 'qq:1:group:9')).toBe(true)
-    expect(ctx.anima.admit('group_attention', 'qq:1:group:9')).toBe(true)
-    expect(ctx.anima.admit('group_attention', 'qq:1:group:9')).toBe(false)
-    // Another group has its own counter; the global ceiling does not count admissions.
-    expect(ctx.anima.admit('group_attention', 'qq:1:group:8')).toBe(true)
-    await ctx.anima.ownerAction('pause', {}, 'command')
-    expect(ctx.anima.admit('group_attention', 'qq:1:group:7')).toBe(false)
-    const records = ctx.anima.activity.read(ctx.anima.dayKey()).filter(r => r.type === 'gate')
-    expect(records.map(r => [(r as { decision: string }).decision, (r as { code?: string }).code])).toEqual([
-      ['allowed', undefined], ['allowed', undefined], ['refused', 'anima/over-quota'], ['allowed', undefined], ['refused', 'anima/paused'],
-    ])
-    expect(records[0]).toMatchObject({ behavior: 'group_attention', channel: 'qq:1:group:9' })
-  })
-
-  it('has default quotas for the attention window and fresh conversation sessions', async () => {
-    const ctx = await setupCore()
-    expect(ctx.anima.config.quotas).toContainEqual({ behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 })
-    expect(ctx.anima.config.conversationGeneration).toBe(2)
   })
 })
 
@@ -148,7 +90,7 @@ describe('environment primer (DESIGN §9)', () => {
   }
   const text = (ctx: Awaited<ReturnType<typeof world>>, id: string, kind: 'conversation' | 'self') => animaPrimer(ctx, id, kind)
 
-  it('tells a QQ private chat with the owner where she is, how to speak and close, and its limits', async () => {
+  it('tells a QQ private chat with the owner where she is and how to speak and close', async () => {
     const ctx = await world()
     const t = text(ctx, 'p', 'conversation')
     expect(t).toContain('- 这里是 QQ 私聊「Sam」（频道 `qq:1:private:2`）。')
@@ -157,8 +99,8 @@ describe('environment primer (DESIGN §9)', () => {
     expect(t).toContain('- 不说话或不再说：`end_turn`，它结束这一轮。')
     expect(t).toContain('- 其他动作（不结束这一轮）：`qq_poke`。')
     expect(t).toContain('- 能看的：`qq_look`、`memory_recall`。')
-    expect(t).toContain('`qq_say`：一次最多 5 条消息。')
-    expect(t).toContain('表达类（`qq_say`、`qq_poke`）：在这个聊天里每小时最多 30 次。')
+    // No limits of her own: what may stop her here is told only from outside.
+    expect(t).not.toContain('外面可能拦住你的事')
     expect(t).not.toContain('local_say')
     expect(t).not.toContain('open_conversation')
   })
@@ -184,7 +126,6 @@ describe('environment primer (DESIGN §9)', () => {
     expect(t).toContain('- B站：你只能看，那里没有人看得到你，你也不能在那里说话。')
     expect(t).toContain('- 去和人说话：`open_conversation`。')
     expect(t).toContain('- 结束：`rest`。')
-    expect(t).toContain('主动开始对话：每天最多 3 次。')
     expect(t).not.toContain('qq_say')
   })
 
@@ -214,19 +155,3 @@ describe('environment primer (DESIGN §9)', () => {
 function animaPrimer(ctx: Awaited<ReturnType<typeof setupCore>>, id: string, kind: 'conversation' | 'self'): string {
   return primerText('# Rin', ctx.anima.placeFacts(id, kind))
 }
-
-describe('closing without speech is never refused by a quota', () => {
-  it('lets end_turn through when the global ceiling is spent, and does not count it', async () => {
-    const ctx = await setupCore({ quotas: [{ per: 'global', limit: 2, windowMinutes: 24 * 60 }] })
-    provideSessions(ctx, { c1: chat })
-    registerEcho(ctx, 'qq_react', { platform: 'qq', effect: 'express', sessions: ['conversation'] })
-    registerEcho(ctx, 'end_turn', { effect: 'internal', sessions: ['conversation'], closes: true })
-    for (let i = 0; i < 3; i++) expect((await callAs(ctx, 'c1', 'end_turn')).isError).toBe(false)
-    expect((await callAs(ctx, 'c1', 'qq_react')).isError).toBe(false)
-    expect((await callAs(ctx, 'c1', 'qq_react')).isError).toBe(false)
-    expect(textOf(await callAs(ctx, 'c1', 'qq_react'))).toContain('anima/over-quota')
-    const closed = await callAs(ctx, 'c1', 'end_turn')
-    expect(closed.isError).toBe(false)
-    expect(closed.concludesTurn).toBe(true)
-  })
-})

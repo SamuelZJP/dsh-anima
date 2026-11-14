@@ -133,6 +133,59 @@ export const SAY_META = {
   facts: async (args: Readonly<Record<string, unknown>>) => ({ messages: sayMessages(args).length }),
 } satisfies Partial<BehaviorMeta>
 
+/** A way to send plain text to the owner that is not her speech (approvals, notices); provided by an adapter. */
+export interface OwnerLine {
+  /** Human-readable name, e.g. `QQ private chat with the owner`. */
+  readonly name: string
+  /** Send one plain-text message to the owner. */
+  send(text: string): Promise<void>
+}
+
+/**
+ * Something the persona is about to do that the outside may stop
+ * (`anima/admit`, docs/design/outside.md). Without a listener, everything is admitted.
+ * - `reach`: whether anything may reach her now (a message, a notice).
+ * - `turn`: whether code may start a model turn for her (`heartbeat`, `group-triage`, `consolidation`).
+ * - `wake`: a wake that is not a tool call, counted outside (`group_attention` in a channel).
+ * - `initiate`: whether she may start a conversation in a channel (for her report).
+ */
+export type AdmitRequest =
+  | { readonly kind: 'reach' }
+  | { readonly kind: 'turn'; readonly purpose: 'heartbeat' | 'group-triage' | 'consolidation' }
+  | { readonly kind: 'wake'; readonly name: string; readonly channelKey: string }
+  | { readonly kind: 'initiate'; readonly channelKey: string }
+
+/** Why the outside stopped something. */
+export interface AdmitRefusal {
+  /** Stable code, e.g. `anima/paused`. */
+  readonly code: string
+  /** Short reason word for records and her inbox (`paused`, `over-budget`). */
+  readonly reason: string
+  /** Try again at her next waking rather than soon (a spent daily budget). */
+  readonly untilWake?: boolean
+}
+
+/** A friend request an adapter received; whoever handles it outside answers it (`anima/friend-request`). */
+export interface FriendRequest {
+  readonly platform: string
+  readonly userId: string
+  /** One line for the owner, e.g. `QQ user 123 ("hi") wants to add her as a QQ friend.` */
+  readonly summary: string
+  /** Accept or decline on the platform. */
+  answer(accept: boolean): Promise<void>
+  /** Nobody answered (timeout, no owner line); `why` in a few words. */
+  leave(why: string): void
+}
+
+/** A message the outside holds before it goes out (`anima/outgoing-held`), so an adapter can show typing. */
+export interface OutgoingHeld {
+  readonly channelKey: string
+  /** Real epoch ms when it is due. */
+  readonly sendsAt: number
+  /** Settles when the hold ends, however it ends. */
+  readonly done: Promise<unknown>
+}
+
 /** Structured Anima error with a stable `code` and a human-readable hint in the message. */
 export class AnimaError extends Error {
   /**

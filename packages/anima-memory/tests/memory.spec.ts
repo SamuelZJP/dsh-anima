@@ -3,7 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { createUserMessage, ToolCallId, type UserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -341,15 +340,6 @@ describe('AnimaMemory', () => {
     expect(segment?.scope).toBe(`group:${GROUP.platform}:${GROUP.account}:${GROUP.kind}:${GROUP.id}`)
   })
 
-  it('offers /anima memory list and forget', async () => {
-    const { ctx } = await setup()
-    await callAs(ctx, sessionOf(ALICE), 'memory_remember', { text: 'Alice likes tea.' })
-    const run = (rawInput: string) => ctx.anima.dispatchCommand({ rawInput, agent: {}, attachments: [], signal: new AbortController().signal } as unknown as CommandInvocation)
-    expect(await run('memory list')).toMatchObject({ kind: 'success', text: expect.stringContaining('heard by: private, test:alice): Alice likes tea.') })
-    expect(await run('memory forget m1')).toMatchObject({ kind: 'success' })
-    expect(await run('memory list')).toMatchObject({ text: 'No memories.' })
-  })
-
   it('removes its registrations on unload', async () => {
     const { ctx, fiber } = await setup()
     expect(ctx.anima.behavior('memory_recall')).toMatchObject({ effect: 'observe' })
@@ -358,7 +348,6 @@ describe('AnimaMemory', () => {
       expect(ctx.anima.behavior(name)).toBeUndefined()
       expect(ctx.tools.get(name)).toBeUndefined()
     }
-    expect(ctx.anima.hasSubcommand('memory')).toBe(false)
   })
 })
 

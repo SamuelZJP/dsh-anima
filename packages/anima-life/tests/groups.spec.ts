@@ -3,14 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { CommandInvocation } from '@deepseek-ai/dsh-commands'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools, { defineTool } from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { AnimaLife, conversationSessionId, groupTriageSessionId, describeOutcome, IntentTracker, Outbox, selfSessionId, type ModelChoice, type PublishedChannel, type SessionHost, type StimulusEvent } from '../src/index.ts'
+import type { AdmitRefusal, AdmitRequest } from '@anima/core'
+import { AnimaLife, conversationSessionId, groupTriageSessionId, describeOutcome, IntentTracker, type ModelChoice, type PublishedChannel, type SessionHost, type StimulusEvent } from '../src/index.ts'
 
 interface FakeAgent { id: string; inbox: string[]; models: ModelChoice[] }
 
@@ -48,13 +48,16 @@ async function setup(life: Record<string, unknown> = {}, core: Record<string, un
   const clock = { now: new Date(start).getTime() }
   ctx.anima.setClock(() => clock.now)
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0, ...life.conversation as object }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object }, outbox: { delaySeconds: 0.2, ...life.outbox as object } } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0, ...life.conversation as object }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3, ...life.groupTriage as object } } })
+  // A stand-in for the outside: it sees every admission and refuses what a test tells it to.
+  const outside: { refuse: (request: AdmitRequest) => AdmitRefusal | undefined } = { refuse: () => undefined }
+  const admits: AdmitRequest[] = []
+  ctx.on('anima/admit', (request) => { admits.push(request); return outside.refuse(request) })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
   ctx.anima.registerBehavior(defineTool({
     name: 'local_say', description: 'say', parameters: { text: { type: 'string', required: true } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
-    async execute(args, exec) {
-      await ctx.animaLife.holdOutgoing(exec.agent!.id, args.text)
+    async execute(args) {
       sent.push(args.text)
       return { ok: true }
     },
@@ -62,7 +65,7 @@ async function setup(life: Record<string, unknown> = {}, core: Record<string, un
   const sent: string[] = []
   const stimuli: StimulusEvent[] = []
   ctx.on('anima/stimulus', event => { stimuli.push(event) })
-  return { ctx, host, clock, sent, stimuli }
+  return { ctx, host, clock, sent, stimuli, outside, admits }
 }
 
 let calls = 0
@@ -87,10 +90,6 @@ function chatter(ctx: Context, text: string, extra: Record<string, unknown> = {}
   return ctx.animaLife.deliver({ type: 'message', channel: group, sender: bob, text, ts: ctx.anima.clock.now(), messageId: String(++calls), ...extra })
 }
 
-function command(ctx: Context, input: string) {
-  return ctx.anima.dispatchCommand({ rawInput: ` ${input}` } as unknown as CommandInvocation)
-}
-
 describe('group triage', () => {
   it('batches chatter after the window and lets her pass with memory', async () => {
     const { ctx, host, stimuli } = await setup()
@@ -112,7 +111,7 @@ describe('group triage', () => {
     expect(stimuli.map(s => s.delivery)).toEqual(['record', 'record'])
     expect(stimuli[0]!.sessionId).toBe(groupSession)
     expect((await callAs(ctx, triageSession, 'group_pass', { batch: 'b1', remember: false })).text).toContain('anima/batch-settled')
-    expect(ctx.anima.statusText()).toContain(`${groupKey} today: wakes 0 direct + 0 triage; batches 1 (remember 1, ignore 0, fallback 0)`)
+    expect(ctx.anima.statusLines().join('\n')).toContain(`${groupKey} today: wakes 0 direct + 0 triage; batches 1 (remember 1, ignore 0, fallback 0)`)
   })
 
   it('wakes the group with earlier messages as context when she chooses to', async () => {
@@ -161,7 +160,7 @@ describe('group triage', () => {
     await ctx.animaLife.deliver({ type: 'message', channel: group, sender: { platformUserId: '1', displayName: 'Sam', isOwner: true }, text: 'hi all', ts: 0 })
     expect(inbox).toHaveLength(2)
     expect(host.sessions.has(triageSession)).toBe(false)
-    expect(ctx.anima.statusText()).toContain('wakes 2 direct + 0 triage')
+    expect(ctx.anima.statusLines().join('\n')).toContain('wakes 2 direct + 0 triage')
   })
 
   it('skips the model at night and while paused: batches are remembered', async () => {
@@ -169,24 +168,6 @@ describe('group triage', () => {
     await chatter(ctx, 'late chatter')
     await vi.waitFor(() => expect(ctx.animaLife.triage.batch('b1')).toMatchObject({ decision: 'remember', by: 'skipped' }))
     expect(host.sessions.has(triageSession)).toBe(false)
-  })
-
-  it('caps triage wakes per group through the gate', async () => {
-    const { ctx, host } = await setup({}, { quotas: [{ behavior: 'group_wake', per: 'channel', limit: 1, windowMinutes: 60 }] })
-    await chatter(ctx, 'one')
-    await vi.waitFor(() => expect(host.sessions.get(triageSession)?.inbox.length).toBe(1))
-    expect((await callAs(ctx, triageSession, 'group_wake', { batch: 'b1', reason: 'r' })).isError).toBe(false)
-    await chatter(ctx, 'two')
-    await vi.waitFor(() => expect(host.sessions.get(triageSession)?.inbox.length).toBe(2))
-    const refused = await callAs(ctx, triageSession, 'group_wake', { batch: 'b2', reason: 'r' })
-    expect(refused.text).toContain('anima/over-quota')
-    expect(ctx.animaLife.triage.batch('b2')?.decision).toBeUndefined()
-  })
-
-  it('refuses stimuli for channels off the allowlist', async () => {
-    const { ctx } = await setup()
-    ctx.anima.restrictChannels('qq', key => key !== groupKey)
-    await expect(chatter(ctx, 'hi')).rejects.toThrow('anima/not-allowlisted')
   })
 
   it('delivers channel events only into existing sessions, without waking', async () => {
@@ -199,85 +180,13 @@ describe('group triage', () => {
   })
 })
 
-describe('outbox', () => {
-  it('holds only messages that answer an intent, and the owner can cancel them', async () => {
-    const { ctx, sent, host } = await setup()
-    const ownerSession = conversationSessionId('anima', 'local:owner:private:owner')
-    // An ordinary reply goes out at once.
-    expect((await callAs(ctx, ownerSession, 'local_say', { text: 'reply' })).isError).toBe(false)
-    expect(sent).toEqual(['reply'])
-
-    // Self opens a conversation; the conversation claims the intent.
-    expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: 'local:owner:private:owner', intent: 'say hi' })).isError).toBe(false)
-    event(ctx, ownerSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i1' } })
-    const held = callAs(ctx, ownerSession, 'local_say', { text: 'good morning!' })
-    await vi.waitFor(() => expect(ctx.animaLife.outbox.list()).toHaveLength(1))
-    expect((await command(ctx, 'outbox')).text).toContain('o1 → Owner (local)')
-    expect(sent).toEqual(['reply'])
-    expect(await held).toMatchObject({ isError: false })
-    expect(sent).toEqual(['reply', 'good morning!'])
-
-    // A second intent, cancelled from the owner line.
-    await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: 'local:owner:private:owner', intent: 'again' })
-    event(ctx, ownerSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i2' } })
-    const cancelled = callAs(ctx, ownerSession, 'local_say', { text: 'second' })
-    await vi.waitFor(() => expect(ctx.animaLife.outbox.list()).toHaveLength(1))
-    expect(ctx.anima.handleOwnerReply('cancel o2')).toBe('Cancelled o2; it will not be sent.')
-    const result = await cancelled
-    expect(result.isError).toBe(true)
-    expect(result.text).toContain('anima/outbox-cancelled')
-    expect(sent).toEqual(['reply', 'good morning!'])
-    expect(ctx.anima.handleOwnerReply('cancel o2')).toContain('No message o2')
-    expect(host.sessions.size).toBeGreaterThan(0)
-  })
-
-  it('cancels when paused during the wait, and notifies the owner for other channels', async () => {
-    const { ctx, sent } = await setup({ outbox: { notifyOwner: true } }, { initiate: { consent: { owner: true, channels: [groupKey] } }, approve: [] })
-    const lines: string[] = []
-    ctx.anima.provideOwnerLine({ name: 'test', send: async (text) => { lines.push(text) } })
-    await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: groupKey, intent: 'hello group' })
-    event(ctx, groupSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i1' } })
-    const held = ctx.animaLife.holdOutgoing(groupSession, 'hi everyone')
-    await vi.waitFor(() => expect(lines).toHaveLength(1))
-    expect(lines[0]).toContain('[Anima outbox o1] In 0.2 s she sends to Test group: "hi everyone". Reply "cancel o1"')
-    await command(ctx, 'pause')
-    await expect(held).rejects.toThrow('anima/outbox-cancelled')
-    expect(sent).toEqual([])
-  })
-
+describe('intent outcomes of a held say', () => {
   it('reports a cancelled say as a cancelled intent', () => {
     const tracker = new IntentTracker({ pending: [], active: [], awaitingReply: [] }, name => name === 'local_say')
     tracker.open({ id: 'i1', sessionId: 'c', channelKey: 'k', display: 'Owner', intent: 'hi', at: 0 })
     tracker.onUserMessage('c', 'i1')
     tracker.onToolCall('c', 'x', 'local_say')
     expect(tracker.onToolResult('c', 'x', true, 'Error: anima/outbox-cancelled: …')).toMatchObject({ kind: 'cancelled' })
-  })
-
-  it('sends at once with a zero delay', async () => {
-    const outbox = new Outbox(() => 1, 0)
-    expect(await outbox.hold({ sessionId: 's', channelKey: 'k', display: 'd', text: 't', intentId: 'i1' })).toBe('send')
-  })
-})
-
-describe('outbox through a disconnect (Phase 7)', () => {
-  it('waits past the delay while offline, then sends on release', async () => {
-    let online = false
-    const outbox = new Outbox(() => 1, 10, 60_000)
-    const held = outbox.hold({ sessionId: 's', channelKey: 'qq:1:private:2', display: 'd', text: 't', intentId: 'i1' }, { online: () => online })
-    await new Promise(resolve => setTimeout(resolve, 40))
-    expect(outbox.list()[0]?.offlineSince).toBeDefined()
-    expect(outbox.release('local')).toBe(0)
-    online = true
-    expect(outbox.release('qq')).toBe(1)
-    expect(await held).toBe('send')
-  })
-
-  it('expires after the offline hold, and holds even with a zero delay', async () => {
-    const outbox = new Outbox(() => 1, 0, 20)
-    const held = outbox.hold({ sessionId: 's', channelKey: 'qq:1:private:2', display: 'd', text: 't', intentId: 'i1' }, { online: () => false })
-    expect(outbox.list()).toHaveLength(1)
-    expect(await held).toBe('expired')
-    expect(outbox.counts.expired).toBe(1)
   })
 
   it('reports an expired say as an expired intent', () => {
@@ -308,7 +217,7 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
       event(env.ctx, groupSession, 'tool/call', { callId, name: 'qq_say', arguments: '{"text":"hi"}' })
       event(env.ctx, groupSession, 'tool/result', { message: { toolCallId: callId, isError: false, content: [] } })
     }
-    const gate = () => env.ctx.anima.activity.read(day).filter(r => r.type === 'gate' && r.behavior === 'group_attention')
+    const gate = () => env.admits.filter(r => r.kind === 'wake' && r.name === 'group_attention')
     return { ...env, spoke, gate }
   }
 
@@ -341,20 +250,21 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
     await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(1))
     expect(host.sessions.get(groupSession)!.inbox[0]).toMatch(/哈哈对\n.*你也去吗\n（你刚在这个群里说过话，所以这些直接到了你这里。）/)
     expect(host.sessions.has(triageSession)).toBe(false)
-    expect(gate()).toEqual([expect.objectContaining({ decision: 'allowed', channel: groupKey, session: 'conversation' })])
-    expect(ctx.anima.statusText()).toContain(`${groupKey} today: wakes 0 direct + 0 triage + 1 attention;`)
+    expect(gate()).toEqual([{ kind: 'wake', name: 'group_attention', channelKey: groupKey }])
+    expect(ctx.anima.statusLines().join('\n')).toContain(`${groupKey} today: wakes 0 direct + 0 triage + 1 attention;`)
   })
 
-  it('sends chatter to triage when the attention quota is spent or the window is off', async () => {
-    const quotas = [{ behavior: 'group_attention', per: 'channel', limit: 1, windowMinutes: 60 }]
-    const { ctx, host, spoke, gate } = await withQqSay({ conversation: { settleSeconds: 0.02 } }, { quotas })
+  it('sends chatter to triage when the outside refuses the wake, or the window is off', async () => {
+    const { ctx, host, spoke, gate, outside } = await withQqSay({ conversation: { settleSeconds: 0.02 } })
+    let wakes = 0
+    outside.refuse = request => request.kind === 'wake' && ++wakes > 1 ? { code: 'anima/over-quota', reason: 'over-quota' } : undefined
     spoke('s1')
     await chatter(ctx, 'one')
     await vi.waitFor(() => expect(host.sessions.get(groupSession)?.inbox.length).toBe(1))
     await chatter(ctx, 'two')
     await vi.waitFor(() => expect(host.sessions.get(triageSession)?.inbox.length).toBe(1))
     expect(host.sessions.get(triageSession)!.inbox[0]).toContain('two')
-    expect(gate().map(r => (r as { decision: string }).decision)).toEqual(['allowed', 'refused'])
+    expect(gate()).toHaveLength(2)
 
     const off = await withQqSay({ groupTriage: { attentionSeconds: 0 } })
     off.spoke('s2')

@@ -1,14 +1,14 @@
 /**
  * Host half of `@anima/page`: authenticated owner routes the Anima page in
  * DSH's web UI calls (DESIGN §12, docs/DSH-INTEGRATION.md §8e). Every read is
- * an owner view and every write an owner action of the `anima` service, the
+ * an owner view and every write an owner action of the `animaGuard` service, the
  * same functions the `/anima` commands call; actions are logged with source
  * `page`. Settings are read and written through DSH's config editor.
  * @module @anima/page
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { AnimaError, type ViewParams } from '@anima/core'
-import type {} from '@anima/core'
+import type {} from '@anima/guard'
 import { registerSettings } from './settings.ts'
 
 export { editableRows, redact, settingsRows, type ConfigEditorLike, type SettingsRow } from './settings.ts'
@@ -16,7 +16,7 @@ export { editableRows, redact, settingsRows, type ConfigEditorLike, type Setting
 /** Cordis plugin name. */
 export const name = 'anima-page'
 /** Services used. */
-export const inject = ['anima', 'connection']
+export const inject = ['anima', 'animaGuard', 'connection']
 
 /** Path of the view route. */
 export const VIEW_PATH = '/api/anima/view'
@@ -60,7 +60,7 @@ export async function handleView(ctx: Context, request: Request): Promise<Respon
     if (name === null || name === '') throw new AnimaError('anima/bad-args', 'the "name" query parameter is required.')
     const params: Record<string, string> = {}
     for (const [key, value] of url.searchParams) if (key !== 'name') params[key] = value
-    const value = await ctx.anima.ownerView(name, params as ViewParams)
+    const value = await ctx.animaGuard.ownerView(name, params as ViewParams)
     return Response.json({ value: value ?? null }, { headers: { 'cache-control': 'no-store' } })
   } catch (error: unknown) {
     return failure(error)
@@ -77,7 +77,7 @@ export async function handleAction(ctx: Context, request: Request): Promise<Resp
     const body = await request.json().catch(() => undefined) as { name?: unknown; args?: unknown } | undefined
     if (body === undefined || typeof body.name !== 'string') throw new AnimaError('anima/bad-args', 'send JSON { "name": "<action>", "args": { … } }.')
     const args = body.args !== null && typeof body.args === 'object' && !Array.isArray(body.args) ? body.args as Record<string, unknown> : {}
-    const value = await ctx.anima.ownerAction(body.name, args, 'page')
+    const value = await ctx.animaGuard.ownerAction(body.name, args, 'page')
     return Response.json({ value: value ?? null }, { headers: { 'cache-control': 'no-store' } })
   } catch (error: unknown) {
     return failure(error)

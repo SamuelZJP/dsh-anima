@@ -1,46 +1,32 @@
 /**
- * Daily budgets kept per her day (wake to wake): initiated conversations,
- * tokens per mode, night wake-ups. Plus the small JSON file helpers Anima's
- * stores share.
+ * Day counters of her body, per her day (wake to wake): night wake-ups. Plus
+ * the small JSON file helpers Anima's stores share.
  * @module @anima/core/ledger
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import type { TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { Mode } from './rhythm.ts'
 import { AnimaError } from './types.ts'
 
 /** Counters of one day. */
 export interface DayLedger {
-  initiates: number
-  tokens: Record<Mode, number>
   nightWakes: number
 }
 
 /** Fresh counters. */
 export function emptyDay(): DayLedger {
-  return { initiates: 0, tokens: { day: 0, night: 0 }, nightWakes: 0 }
-}
-
-/**
- * Tokens counted against the budget: everything that is not a cache hit.
- * DSH's DeepSeek adapter reports `inputTokens` without cache reads.
- * @param usage - one model call's usage.
- */
-export function billableTokens(usage: TokenUsage): number {
-  return usage.inputTokens + usage.outputTokens + (usage.cacheWriteTokens ?? 0)
+  return { nightWakes: 0 }
 }
 
 /** Day ledgers keyed by day; keeps the last few days only. */
-export class Ledger {
-  constructor(private readonly days: Record<string, DayLedger> = {}, private readonly keep = 7) {}
+export class Ledger<T extends object = DayLedger> {
+  constructor(private readonly days: Record<string, T> = {}, private readonly keep = 7, private readonly empty: () => T = emptyDay as unknown as () => T) {}
 
   /** Counters of a day (created on first use). */
-  day(key: string): DayLedger {
+  day(key: string): T {
     let entry = this.days[key]
     if (entry === undefined) {
-      entry = emptyDay()
+      entry = { ...this.empty(), ...this.days[key] }
       this.days[key] = entry
       const keys = Object.keys(this.days).sort()
       for (const old of keys.slice(0, Math.max(0, keys.length - this.keep))) delete this.days[old]
@@ -49,12 +35,12 @@ export class Ledger {
   }
 
   /** Read-only view of a day without creating it. */
-  peek(key: string): DayLedger {
-    return this.days[key] ?? emptyDay()
+  peek(key: string): T {
+    return { ...this.empty(), ...this.days[key] }
   }
 
   /** Serializable form. */
-  toJSON(): Record<string, DayLedger> {
+  toJSON(): Record<string, T> {
     return this.days
   }
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { asleepAt, decide, earliestBedtime, formatLocal, GateCode, latestBedtime, modeAt, phaseAt, QuotaBook, resolveRhythm, summarize, wokenUntil, type ActivityRecord, type BehaviorMeta } from '../src/index.ts'
+import { asleepAt, earliestBedtime, formatLocal, latestBedtime, modeAt, phaseAt, resolveRhythm, wokenUntil } from '../src/index.ts'
 import { resolveConfig } from '../src/config.ts'
-import { emptyDay } from '../src/ledger.ts'
 import { callAs, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
 const at = (text: string) => new Date(text).getTime()
@@ -57,26 +56,27 @@ describe('sleep, the latest bedtime and the owner wake (Phase 9)', () => {
     provideSessions(ctx, { s: self, c: chat })
     const clock = { now: at(start) }
     ctx.anima.setClock(() => clock.now)
-    return { ctx, clock }
+    const records: Record<string, unknown>[] = []
+    ctx.on('anima/record', (record) => { records.push(record as never) })
+    return { ctx, clock, records }
   }
 
   it('refuses sleep before the earliest bedtime in her words, then lets her sleep and closes the turn', async () => {
-    const { ctx, clock } = await core('2026-11-10T21:00')
+    const { ctx, clock, records } = await core('2026-11-10T21:00')
     const early = await callAs(ctx, 'c', 'sleep', {})
-    expect(textOf(early)).toBe('Error: anima/not-bedtime: 还不到睡觉的时候：你今天 07:30 才起床，主人定的最早上床时间是今晚 22:30。')
+    expect(textOf(early)).toBe('Error: anima/not-bedtime: 还不到睡觉的时候：你今天 07:30 才起床，最早也要到今晚 22:30 才睡得着。')
     clock.now = at('2026-11-10T22:50')
     const slept = await callAs(ctx, 'c', 'sleep', { note: '今天好累' })
     expect(slept.isError).toBe(false)
     expect(slept.concludesTurn).toBe(true)
     expect(ctx.anima.asleep()).toBe(true)
     expect(ctx.anima.bedtimeInfo()).toMatchObject({ asleep: true, since: at('2026-11-10T22:50'), by: 'her' })
-    const records = ctx.anima.activity.read('2026-11-10')
-    expect(records.filter(r => r.type === 'sleep')).toEqual([expect.objectContaining({ by: 'her', note: '今天好累', sessionId: 'c' })])
+    expect(records.filter(r => r.type === 'sleep')).toEqual([expect.objectContaining({ by: 'her', note: '今天好累', sessionId: 'c', day: '2026-11-10' })])
     // Asleep, a day behavior meets the night backstop in her words.
     registerEcho(ctx, 'local_say', { platform: 'local', effect: 'express', sessions: ['conversation'] })
     const said = await callAs(ctx, 'c', 'local_say', {})
     expect(textOf(said)).toMatch(/^Error: anima\/night: 你现在睡着了/)
-    expect(ctx.anima.daySummary('2026-11-10').sleep).toMatchObject({ byHer: 1, atLatest: 0, backstop: { night: 1, paused: 0 } })
+    expect(records.filter(r => r.type === 'gate')).toEqual([expect.objectContaining({ code: 'anima/not-bedtime' }), expect.objectContaining({ code: 'anima/night' })])
   })
 
   it('falls asleep at the latest bedtime once, and restores energy only while asleep', async () => {
@@ -95,22 +95,20 @@ describe('sleep, the latest bedtime and the owner wake (Phase 9)', () => {
     expect(ctx.anima.selfState().energy).toBeCloseTo(Math.min(1, before + 0.3), 5)
   })
 
-  it('lets only the owner wake her: awake for wokenMinutes past the latest bedtime, then asleep again', async () => {
+  it('wakes when woken from outside: awake for wokenMinutes past the latest bedtime, then asleep again', async () => {
     const { ctx, clock } = await core('2026-11-11T02:00')
     const woken: number[] = []
     ctx.on('anima/woken', ({ until }) => { woken.push(until) })
-    const awakeNow = await ctx.anima.ownerAction('wake', {}, 'command')
-    expect(awakeNow).toEqual({ woken: true, until: at('2026-11-11T02:30') })
+    expect(ctx.anima.wakeByOwner()).toEqual({ woken: true, until: at('2026-11-11T02:30') })
     expect(ctx.anima.mode()).toBe('day')
-    expect(ctx.anima.statusText()).toContain('Awake; bedtime 22:30–00:30; woken by the owner at 2026-11-11 02:00 until 2026-11-11 02:30')
-    expect(await ctx.anima.ownerAction('wake', {}, 'command')).toEqual({ woken: false })
+    expect(ctx.anima.statusLines().join('\n')).toContain('Awake; bedtime 22:30–00:30; woken by the owner at 2026-11-11 02:00 until 2026-11-11 02:30')
+    expect(ctx.anima.wakeByOwner()).toEqual({ woken: false })
     expect(woken).toEqual([at('2026-11-11T02:30')])
     clock.now = at('2026-11-11T02:31')
     const slept: string[] = []
     ctx.on('anima/sleep', ({ by }) => { slept.push(by) })
     ctx.anima.checkBedtime()
     expect(slept).toEqual(['latest'])
-    expect(ctx.anima.daySummary('2026-11-10').sleep).toMatchObject({ woken: 1, atLatest: 1 })
   })
 
   it('keeps the sleep record across a restart', async () => {
@@ -121,47 +119,5 @@ describe('sleep, the latest bedtime and the owner wake (Phase 9)', () => {
     first.fiber.dispose()
     const second = await setupCore({ dataDir, clock: { speed: 1, start: '2026-11-10T23:00' } })
     expect(second.anima.asleep()).toBe(true)
-  })
-})
-
-describe('refusals in her world\'s terms (DESIGN §10, Phase 9)', () => {
-  const chat = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } as const
-  const say: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['conversation'] }
-  const call = (name: string, meta: BehaviorMeta) => ({ name, meta, session: chat, now: 0, args: {} })
-
-  it('says a spent chat quota as "you said a lot here", with the code in front', () => {
-    const book = new QuotaBook()
-    const policy = { quotas: [{ effect: 'express' as const, per: 'channel' as const, limit: 1, windowMinutes: 60 }], allow: [] }
-    book.record(call('qq_say', say), policy.quotas)
-    const verdict = decide(call('qq_say', say), policy, book)
-    expect(verdict).toEqual({ allowed: false, code: GateCode.overQuota, hint: '这个聊天里你这一小时已经说了很多了（最多 1 次），过一会儿再说吧：大约 60 分钟后才行，现在别再试了。' })
-  })
-
-  it('writes every gate hint she can meet in Chinese', () => {
-    const book = new QuotaBook()
-    const open = { quotas: [], allow: [] }
-    const night = decide(call('qq_say', say), { ...open, allowedEffects: { day: ['express'], night: ['internal'] } }, book, { mode: 'night', overBudget: false, initiatesUsed: 0, mayInitiate: () => true })
-    const budget = decide(call('qq_say', say), open, book, { mode: 'day', overBudget: true, initiatesUsed: 0, mayInitiate: () => true })
-    const approval = decide(call('qq_post', { ...say, effect: 'public' }), open, book)
-    for (const verdict of [night, budget, approval]) {
-      expect(verdict.allowed).toBe(false)
-      if (!verdict.allowed) expect(verdict.hint).toMatch(/[一-鿿]/)
-    }
-  })
-})
-
-describe('day summary (Phase 9)', () => {
-  it('counts sleeps, wakes, inbox holds and releases, and backstop refusals', () => {
-    const base = { at: 0, real: 0 }
-    const records: ActivityRecord[] = [
-      { ...base, type: 'sleep', by: 'her' },
-      { ...base, type: 'woken', until: 1 },
-      { ...base, type: 'sleep', by: 'latest' },
-      { ...base, type: 'inbox-held', channel: 'c', reason: 'asleep' },
-      { ...base, type: 'inbox-held', channel: 'c', reason: 'asleep' },
-      { ...base, type: 'inbox-release', channel: 'c', reason: 'answer', count: 2 },
-      { ...base, type: 'gate', behavior: 'qq_say', decision: 'refused', code: 'anima/paused', session: 'conversation' },
-    ]
-    expect(summarize('d', records, emptyDay()).sleep).toEqual({ byHer: 1, atLatest: 1, woken: 1, held: 2, answered: 2, released: 2, backstop: { night: 0, paused: 1 } })
   })
 })

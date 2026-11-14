@@ -86,17 +86,20 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   } })
   ctx.provide('llm')
   ctx.set('llm', { resolveModelInfo: async (_provider: string, model: string) => ({ inputModalities: model === 'blind' ? ['text'] : ['text', 'image'] }) })
-  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 }, ...core })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...core })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, platforms: { noticeAfterSeconds: 0 }, ...life } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, platforms: { noticeAfterSeconds: 0 }, ...life } })
   await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
     allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },
     callTimeoutSeconds: 2, reconnect: { maxSeconds: 1 },
     ...extra,
   })
-  await vi.waitFor(() => expect(ctx.anima.statusText()).toMatch(/QQ: connected .* \(Anima\)/))
-  return { ctx, host, server, dataDir, saved }
+  await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toMatch(/QQ: connected .* \(Anima\)/))
+  // What she reports for the log kept outside the persona.
+  const recorded: { type: string; online?: boolean; reason?: string }[] = []
+  ctx.on('anima/record', (record) => { recorded.push(record as never) })
+  return { ctx, host, server, dataDir, saved, recorded }
 }
 
 let calls = 0
@@ -126,14 +129,6 @@ function event(ctx: Context, sessionId: string, type: string, data: unknown) {
 }
 
 /** Open an intent from Self into a chat and let its conversation turn claim it. */
-async function intentInto(ctx: Context, key: string, session: string) {
-  const opened = await callAs(ctx, selfId, 'open_conversation', { channel: key, intent: 'say hi' })
-  expect(opened.isError).toBe(false)
-  const id = /Intent (i\d+)/.exec(opened.text)![1]!
-  event(ctx, session, 'user/message', { source: { kind: 'anima-stimulus', ref: id } })
-  return id
-}
-
 describe('images she chooses to look at', () => {
   it('gives image and sticker placeholders ids and never attaches them on its own', async () => {
     const { host, server } = await setup()
@@ -199,13 +194,13 @@ describe('images she chooses to look at', () => {
     expect((await callAs(ctx, selfId, 'qq_look', { id: 'i1' })).text).toContain('anima/wrong-session')
   })
 
-  it('counts looks against the gate quota', async () => {
+  it('has no limit of its own on looks (limits are the outside\'s)', async () => {
     const images = await imageServer()
-    const { ctx, host, server } = await setup({}, {}, { quotas: [{ behavior: 'qq_look', per: 'channel', limit: 1, windowMinutes: 60 }] })
+    const { ctx, host, server } = await setup()
     server.push(privateMessage(OWNER, [{ type: 'image', data: { file: 'a.png', url: `${images.base}/a.png` } }]))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
     expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i1' })).isError).toBe(false)
-    expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i1' })).text).toContain('anima/over-quota')
+    expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i1' })).isError).toBe(false)
   })
 })
 
@@ -276,15 +271,12 @@ describe('pokes and reactions', () => {
     expect(emojiId('👍👍')).toBeUndefined()
   })
 
-  it('goes through the gate: own quota keys, allowlist and session checks', async () => {
-    const { ctx, server } = await setup({}, {}, { quotas: [{ behavior: 'qq_poke', per: 'channel', limit: 1, windowMinutes: 60 }, { behavior: 'qq_react', per: 'channel', limit: 1, windowMinutes: 60 }] })
+  it('passes her body check: only in QQ chats she has', async () => {
+    const { ctx, server } = await setup()
     server.respond('friend_poke', () => null)
     server.respond('set_msg_emoji_like', () => ({ result: true }))
     expect((await callAs(ctx, ownerSession, 'qq_poke')).isError).toBe(false)
-    expect((await callAs(ctx, ownerSession, 'qq_poke')).text).toContain('anima/over-quota')
-    // A reaction has its own key, and pokes elsewhere count separately.
     expect((await callAs(ctx, ownerSession, 'qq_react', { messageId: '1', emoji: '😂' })).isError).toBe(false)
-    expect((await callAs(ctx, ownerSession, 'qq_react', { messageId: '2', emoji: '😂' })).text).toContain('anima/over-quota')
     expect((await callAs(ctx, friendSession, 'qq_poke')).isError).toBe(false)
     expect((await callAs(ctx, selfId, 'qq_poke')).text).toContain('anima/wrong-session')
     const stranger = conversationSessionId('anima', `qq:${ACCOUNT}:private:55555`)
@@ -293,82 +285,48 @@ describe('pokes and reactions', () => {
   })
 })
 
-describe('typing and the outbox', () => {
-  it('shows typing only while her chosen message waits in a private outbox', async () => {
-    const { ctx, server } = await setup({ typing: { enabled: true, leadSeconds: 5 } }, { outbox: { delaySeconds: 0.3 } })
+describe('typing while the outside holds her message', () => {
+  const held = (ctx: Awaited<ReturnType<typeof setup>>['ctx'], channelKey: string, ms: number) => {
+    let done!: () => void
+    ctx.emit('anima/outgoing-held', { channelKey, sendsAt: Date.now() + ms, done: new Promise<void>((resolve) => { done = resolve }) })
+    return () => done()
+  }
+
+  it('shows typing shortly before a held message in a private chat goes out', async () => {
+    const { ctx, server } = await setup({ typing: { enabled: true, leadSeconds: 5 } })
     server.respond('set_input_status', () => null)
-    // A direct reply is not held, so no typing.
-    expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'reply' })).isError).toBe(false)
-    expect(server.callsOf('set_input_status')).toHaveLength(0)
-    await intentInto(ctx, ownerKey, ownerSession)
-    expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'good morning' })).isError).toBe(false)
-    expect(server.callsOf('set_input_status').map(c => c.params)).toEqual([{ user_id: Number(OWNER), event_type: 1 }])
-    const typed = server.calls.findIndex(c => c.action === 'set_input_status')
-    const sent = server.calls.findIndex(c => c.action === 'send_private_msg' && JSON.stringify(c.params).includes('good morning'))
-    expect(typed).toBeLessThan(sent)
+    const finish = held(ctx, ownerKey, 300)
+    await vi.waitFor(() => expect(server.callsOf('set_input_status').map(c => c.params)).toEqual([{ user_id: Number(OWNER), event_type: 1 }]))
+    finish()
   })
 
-  it('never shows typing in groups', async () => {
-    const { ctx, server } = await setup({}, { outbox: { delaySeconds: 0.2 } }, { initiate: { consent: { owner: true, channels: [groupKey] } }, approve: [] })
+  it('never shows typing in groups, and not after the hold ended', async () => {
+    const { ctx, server } = await setup({ typing: { enabled: true, leadSeconds: 0.01 } })
     server.respond('set_input_status', () => null)
-    await intentInto(ctx, groupKey, groupSession)
-    expect((await callAs(ctx, groupSession, 'qq_say', { text: 'hi all' })).isError).toBe(false)
+    held(ctx, groupKey, 50)
+    held(ctx, ownerKey, 200)()
+    await new Promise(resolve => setTimeout(resolve, 300))
     expect(server.callsOf('set_input_status')).toHaveLength(0)
-  })
-
-  it('holds her message through a disconnect and sends it when QQ is back', async () => {
-    const { ctx, host, server } = await setup({}, { outbox: { delaySeconds: 0.05, offlineHoldMinutes: 1 } })
-    await host.create(selfId)
-    await intentInto(ctx, ownerKey, ownerSession)
-    server.accepting = false
-    server.dropAll()
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('QQ OFFLINE since'))
-    const said = callAs(ctx, ownerSession, 'qq_say', { text: 'still here' })
-    await vi.waitFor(() => expect(ctx.animaLife.outbox.list()[0]?.offlineSince).toBeDefined())
-    server.accepting = true
-    const result = await said
-    expect(result.isError).toBe(false)
-    expect(server.callsOf('send_private_msg').some(c => JSON.stringify(c.params).includes('still here'))).toBe(true)
-    await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('QQ is back online') && line.includes('1 held message went out now'))).toBe(true))
-  })
-
-  it('expires a held message when QQ stays offline, and tells her', async () => {
-    const { ctx, host, server } = await setup({}, { outbox: { delaySeconds: 0.05, offlineHoldMinutes: 0.01 } })
-    await host.create(selfId)
-    await intentInto(ctx, ownerKey, ownerSession)
-    server.accepting = false
-    server.dropAll()
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('QQ OFFLINE since'))
-    const said = await callAs(ctx, ownerSession, 'qq_say', { text: 'lost' })
-    expect(said.text).toContain('anima/outbox-expired')
-    // The tool/result event is what tells her Self the intent expired.
-    event(ctx, ownerSession, 'tool/call', { callId: 'x1', name: 'qq_say', arguments: '{}' })
-    event(ctx, ownerSession, 'tool/result', { message: { toolCallId: 'x1', isError: true, content: [{ type: 'text', text: said.text }] } })
-    await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('expired — the platform stayed offline'))).toBe(true))
-    expect(server.callsOf('send_private_msg').some(c => JSON.stringify(c.params).includes('lost'))).toBe(false)
   })
 })
 
 describe('offline notices', () => {
   it('tells her Self session when QQ goes down and comes back, and the page says why', async () => {
-    const { ctx, host, server, dataDir } = await setup()
+    const { ctx, host, server, recorded } = await setup()
     await host.create(selfId)
     server.push({ post_type: 'notice', notice_type: 'bot_offline', user_id: Number(ACCOUNT), message: 'kicked' })
     await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('[notice] QQ went offline') && line.includes('NapCat reports the account offline (bot offline: kicked)'))).toBe(true))
-    const views = await ctx.anima.ownerView('platforms') as { platform: string; view: { summary: string; details: { offline: { reason: string } | null } } }[]
-    const qqView = views.find(p => p.platform === 'qq')!.view
+    const qqView = await ctx.anima.platforms().find(p => p.platform === 'qq')!.view() as { summary: string; details: { offline: { reason: string } | null } }
     expect(qqView.summary).toMatch(/^OFFLINE since .*: NapCat reports the account offline/)
     expect(qqView.details.offline?.reason).toContain('kicked')
-    expect(ctx.anima.statusText()).toContain('QQ OFFLINE since')
+    expect(ctx.anima.statusLines().join('\n')).toContain('QQ OFFLINE since')
     server.push({ post_type: 'meta_event', meta_event_type: 'heartbeat', interval: 30000, status: { online: true } })
     await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('[notice] QQ is back online'))).toBe(true))
     expect(host.inbox(selfId).every(line => line.startsWith('(inject)'))).toBe(true)
-    // Each transition is in the activity log (the formal test's evidence).
-    const { readdirSync } = await import('node:fs')
-    const records = readdirSync(join(dataDir, 'activity')).flatMap(file => readFileSync(join(dataDir, 'activity', file), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { type: string; online?: boolean; reason?: string }))
-      .filter(record => record.type === 'platform')
-    expect(records.map(r => r.online)).toEqual([false, true, false, true])
-    expect(records[2]!.reason).toContain('kicked')
+    // Each transition after connecting is reported for the log outside.
+    const records = recorded.filter(record => record.type === 'platform')
+    expect(records.map(r => r.online)).toEqual([false, true])
+    expect(records[0]!.reason).toContain('kicked')
   })
 
   it('stays quiet about drops shorter than noticeAfterSeconds', async () => {
@@ -412,7 +370,7 @@ describe('Phase 9: typing keeps the window open, spaced messages, read marks', (
     server.push(privateMessage(OWNER, [{ type: 'text', data: { text: '今天好好笑' } }]))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
     expect(host.inbox(ownerSession)[0]).toMatch(/Sam（主人）发来 2 条：\n.*我跟你说\n.*今天好好笑/)
-    expect(ctx.anima.statusText()).toContain('Settle window: 0.12 s quiet, at most 3 s')
+    expect(ctx.anima.statusLines().join('\n')).toContain('Settle window: 0.12 s quiet, at most 3 s')
   })
 
   it('spaces the messages of one say by a typing time, showing typing in private chats', async () => {

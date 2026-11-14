@@ -7,7 +7,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, formatLocal, sayMessages, stringArg, type BehaviorEvent, type SessionInfo } from '@anima/core'
+import { AnimaError, formatLocal, sayMessages, type BehaviorEvent, type SessionInfo } from '@anima/core'
 import type {} from '@anima/core'
 import type { Stimulus, StimulusEvent } from '@anima/life'
 import type {} from '@anima/life'
@@ -108,21 +108,6 @@ export class AnimaMemory extends Service {
 
     ctx.animaLife.addReportLine(() => [this.reportLine()])
     core.addStatus(() => this.statusLines())
-    core.addSubcommand({
-      name: 'memory',
-      usage: 'memory list [text] | memory forget <id> — inspect or forget memories (all scopes)',
-      run: args => this.command(args),
-    })
-
-    // Owner surface shared with the Anima page (DESIGN §12).
-    core.addOwnerView('memory', (params) => {
-      const status = params.status === 'archived' || params.status === 'superseded' || params.status === 'all' ? params.status : 'active'
-      const limit = Math.min(200, Math.max(1, Number(params.limit ?? 50) || 50))
-      const offset = Math.max(0, Number(params.offset ?? 0) || 0)
-      const page = this.store.browse({ query: params.query, scope: params.scope, status, limit, offset })
-      return { ...page, limit, offset, counts: this.store.counts(), scopes: this.store.scopes(), pending: this.store.pendingCount() }
-    })
-    core.addOwnerAction('memory.forget', args => ({ forgotten: this.store.forget(stringArg(args, 'id')) }))
 
     ctx.effect(() => {
       const timer = setInterval(() => this.tick(), TICK_MS)
@@ -291,7 +276,7 @@ export class AnimaMemory extends Service {
     }
     this.decayIfDue(now)
     const oldest = this.store.oldestPending()
-    if (this.run === undefined && oldest !== undefined && !core.paused && !core.overBudget(now)
+    if (this.run === undefined && oldest !== undefined && core.admit({ kind: 'turn', purpose: 'consolidation' }) === undefined
       && now - oldest > this.config.consolidation.fallbackHours * HOUR) {
       this.consolidate('fallback').catch((error: unknown) => this.ctx.logger.warn(`anima-memory: fallback consolidation failed: ${error instanceof Error ? error.message : String(error)}`))
     }
@@ -507,24 +492,4 @@ export class AnimaMemory extends Service {
       `Transcript: ${this.store.pendingCount()} lines pending; last consolidation ${this.lastConsolidation()}${this.run === undefined ? '' : `; run ${this.run.id} in progress`}`,
     ]
   }
-
-  private async command(args: string): Promise<{ kind: 'success' | 'error'; text: string }> {
-    const [verb = '', ...rest] = args.split(/\s+/)
-    const text = rest.join(' ').trim()
-    switch (verb.toLowerCase()) {
-      case 'list': {
-        const all = await this.ctx.anima.ownerView('memory', { query: text, status: 'all', limit: '50' }).then(v => (v as { memories: Memory[] }).memories)
-        if (all.length === 0) return { kind: 'success', text: 'No memories.' }
-        return { kind: 'success', text: all.map(memory => `${memoryLine(memory, true)}${memory.status === 'active' ? '' : ` [${memory.status}${memory.replacedBy === undefined ? '' : ` by ${memory.replacedBy}`}]`}`).join('\n') }
-      }
-      case 'forget': {
-        if (text === '') return { kind: 'error', text: 'Usage: /anima memory forget <id>' }
-        const { forgotten } = await this.ctx.anima.ownerAction('memory.forget', { id: text }, 'command') as { forgotten: boolean }
-        return forgotten ? { kind: 'success', text: `Forgot ${text}.` } : { kind: 'error', text: `No memory "${text}".` }
-      }
-      default:
-        return { kind: 'error', text: 'Usage: /anima memory list [text] | memory forget <id>' }
-    }
-  }
 }
-

@@ -1,6 +1,6 @@
 /**
- * Goals (DESIGN §7): kept by her through tools, or set by the owner through
- * `/anima goal`. Goals the owner set cannot be closed by her without a reason.
+ * Goals: kept by her through tools, or set by the owner from outside. She may
+ * close any of them.
  * Stored in `<dataDir>/goals.json`.
  * @module @anima/core/goals
  */
@@ -85,15 +85,12 @@ export class GoalStore {
 
   /**
    * Close a goal.
-   * @param by - who closes it; she needs a reason for an owner goal.
+   * @param by - who closes it.
    */
   close(id: string, input: { status: 'done' | 'dropped'; reason?: string | undefined; by: GoalOwner; now: number }): Goal {
     const goal = this.get(id)
     if (goal.status !== 'open') throw new AnimaError('anima/goal-closed', `goal ${id} is already ${goal.status}.`)
     const reason = input.reason?.trim()
-    if (input.by === 'her' && goal.owner === 'owner' && (reason === undefined || reason === '')) {
-      throw new AnimaError('anima/reason-required', `goal ${id} was set by the owner; give a reason to close it.`)
-    }
     goal.status = input.status
     goal.closedAt = input.now
     if (reason !== undefined && reason !== '') goal.closeReason = reason

@@ -8,7 +8,6 @@
  * @module @anima/core/primer
  */
 
-import type { LimitRule, QuotaRule } from './config.ts'
 import { closesTurn, type BehaviorMeta, type EffectClass, type SessionKind } from './types.ts'
 
 /** A behavior she can call in this session. */
@@ -43,17 +42,16 @@ export interface PlaceFacts {
   readonly channel?: PlaceChannel | undefined
   /** Behaviors visible in this session (any mode). */
   readonly tools: readonly PlaceTool[]
-  readonly quotas: readonly QuotaRule[]
-  readonly limits: readonly LimitRule[]
   /** Self only: platforms with channels she can reach. */
   readonly reach?: readonly PlaceReach[]
-  /** Self only: conversations she may start per day. */
-  readonly initiatePerDay?: number
+  /** Fact lines from outside the persona about what may be stopped here (owner rules). */
+  readonly outside?: readonly string[]
 }
 
 const PLATFORM_NAMES: Readonly<Record<string, string>> = { qq: 'QQ', local: '本地', bili: 'B站' }
 const KIND_NAMES: Readonly<Record<string, string>> = { private: '私聊', group: '群' }
-const EFFECT_NAMES: Readonly<Record<EffectClass, string>> = {
+/** Chinese names of effect classes. */
+export const EFFECT_NAMES: Readonly<Record<EffectClass, string>> = {
   observe: '观看', internal: '内心', workspace: '工作区', express: '表达', initiate: '发起', public: '公开', irreversible: '不可撤回',
 }
 
@@ -142,43 +140,8 @@ export const SESSION_RULES: Record<SessionKind, string> = {
   ].join('\n'),
 }
 
-function windowName(minutes: number): string {
-  if (minutes === 60) return '每小时'
-  if (minutes === 24 * 60) return '每天'
-  if (minutes % (24 * 60) === 0) return `每 ${minutes / (24 * 60)} 天`
-  if (minutes % 60 === 0) return `每 ${minutes / 60} 小时`
-  return `每 ${minutes} 分钟`
-}
-
 function names(tools: readonly PlaceTool[]): string {
   return tools.map(tool => `\`${tool.name}\``).join('、')
-}
-
-/** The quotas and limits that can apply to the tools here, as fact lines. */
-function limitLines(facts: PlaceFacts): string[] {
-  const here = facts.kind === 'conversation'
-  const lines: string[] = []
-  for (const rule of facts.quotas) {
-    const matching = facts.tools.filter(tool => !(tool.meta.closes === true && tool.meta.effect === 'internal') && (rule.behavior === undefined || rule.behavior === tool.name)
-      && (rule.platform === undefined || rule.platform === tool.meta.platform)
-      && (rule.effect === undefined || rule.effect === tool.meta.effect))
-    if (matching.length === 0) continue
-    const scope = rule.per === 'channel' ? here ? '在这个聊天里' : '每个频道分开算，' : rule.per === 'platform' ? '整个平台' : ''
-    const what = rule.behavior !== undefined ? `\`${rule.behavior}\``
-      : rule.effect !== undefined ? `${EFFECT_NAMES[rule.effect]}类（${names(matching)}）`
-        : rule.platform !== undefined ? `${platformName(rule.platform)} 的工具`
-          : '所有工具合计'
-    const perMessage = matching.some(tool => typeof tool.meta.cost === 'function') && rule.behavior === undefined ? '；一次发几条消息就算几次' : ''
-    lines.push(`${what}：${scope}${windowName(rule.windowMinutes)}最多 ${rule.limit} 次${perMessage}。`)
-  }
-  for (const rule of facts.limits) {
-    if (!facts.tools.some(tool => tool.name === rule.behavior)) continue
-    lines.push(rule.fact === 'messages' ? `\`${rule.behavior}\`：一次最多 ${rule.max} 条消息。` : `\`${rule.behavior}\`：${rule.fact} 最多 ${rule.max}。`)
-  }
-  if (facts.initiatePerDay !== undefined && facts.tools.some(tool => tool.meta.effect === 'initiate')) {
-    lines.push(`主动开始对话：每天最多 ${facts.initiatePerDay} 次。`)
-  }
-  return lines
 }
 
 function toolLines(facts: PlaceFacts): string[] {
@@ -245,10 +208,10 @@ function whereLines(facts: PlaceFacts): string[] {
 
 /**
  * "This place": where she is, who is here, how to speak, what else she can do
- * and look at, who sees what, and the limits she may meet.
+ * and look at, who sees what, and what the outside may stop here.
  */
 export function placeText(facts: PlaceFacts): string {
-  const limits = limitLines(facts)
+  const outside = facts.outside ?? []
   const { channel } = facts
   const sees = facts.kind !== 'conversation' || channel === undefined ? []
     : [channel.kind === 'group' ? '- 谁看得到：群里每个人。在这里记住的事，只会在这个群里再想起来。' : '- 谁看得到：只有对方。在这里记住的事，只会在这个私聊里再想起来。']
@@ -257,7 +220,7 @@ export function placeText(facts: PlaceFacts): string {
     ...whereLines(facts),
     ...toolLines(facts),
     ...sees,
-    ...limits.length === 0 ? [] : ['- 你可能碰到的限制：', ...limits.map(line => `  - ${line}`)],
+    ...outside.length === 0 ? [] : ['- 外面可能拦住你的事（主人定的规矩，不是你的身体）：', ...outside.map(line => `  - ${line}`)],
   ].join('\n')
 }
 

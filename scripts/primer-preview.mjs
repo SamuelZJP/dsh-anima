@@ -20,6 +20,7 @@ const memory = await lib('anima-memory')
 const local = await lib('anima-adapter-local')
 const qq = await lib('anima-adapter-qq')
 const bili = await lib('anima-adapter-bili')
+const guard = await lib('anima-guard')
 
 const delivered = []
 class Host {
@@ -42,6 +43,8 @@ await ctx.plugin(SystemPrompt)
 await ctx.plugin(Tools)
 await ctx.plugin(core, { dataDir, characterId: 'preview', name: '小鲸鱼', clock: { speed: 1, start: '2026-11-12T10:00' } })
 await ctx.plugin(life.AnimaLife, { host: new Host(), config: {} })
+// The guard is outside the persona; loaded, it adds its owner rules to "this place".
+await ctx.plugin(guard, {})
 await ctx.plugin(memory, {})
 await ctx.plugin(local, {})
 await ctx.plugin(qq, {
@@ -95,7 +98,7 @@ labels.push(['Group: @ or reply to her', await route({ type: 'message', channel:
 labels.push(['Group: earlier message as context', await route({ type: 'message', channel: channel(keys.qqGroup), sender: bob, text: '周末火锅', messageId: '200', ts }, false)])
 labels.push(['Group: woken by triage', await route({ type: 'message', channel: channel(keys.qqGroup), sender: bob, text: '有人推荐火锅店吗', messageId: '202', via: { kind: 'triage', reason: '我知道一家很好吃的' }, ts }, true)])
 labels.push(['Group: attention window after she spoke', await route({ type: 'message', channel: channel(keys.qqGroup), sender: bob, text: '哈哈真的吗', messageId: '203', via: { kind: 'attention' }, ts }, true)])
-labels.push(['Intent from Self', await route({ type: 'intent', channel: channel(keys.qqOwner), intentId: 'i7', intent: '问问他今天考试怎么样', context: '他昨天说今天有考试', heldSeconds: L.config.outbox.delaySeconds, ts })])
+labels.push(['Intent from Self', await route({ type: 'intent', channel: channel(keys.qqOwner), intentId: 'i7', intent: '问问他今天考试怎么样', context: '他昨天说今天有考试', heldSeconds: ctx.animaGuard.config.outbox.delaySeconds, ts })])
 labels.push(['Channel event (only into an existing session)', await route({ type: 'channel-event', channel: channel(keys.qqOwner), text: 'Sam recalled a message (msg 99).', ts })])
 labels.push(['Local chat message', await route({ type: 'message', channel: channel(keys.local), sender: { platformUserId: 'owner', displayName: 'Sam', isOwner: true }, text: 'hello', ts })])
 labels.push(['Close reminder (1st of 2, with her unsent text)', life.reminderText('qq_say', '在的在的，怎么了？', 1, 2)])

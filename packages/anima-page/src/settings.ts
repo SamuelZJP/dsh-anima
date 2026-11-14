@@ -7,7 +7,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { AnimaError, stringArg } from '@anima/core'
-import type {} from '@anima/core'
+import type {} from '@anima/guard'
 
 /** The part of a Loader entry the Settings tab reads. */
 export interface EntryLike {
@@ -30,7 +30,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /** Rows the owner may edit from the page. Adapter rows hold secrets and stay read-only. */
-export const editableRows: readonly string[] = ['anima-core', 'anima-life', 'anima-memory']
+export const editableRows: readonly string[] = ['anima-core', 'anima-life', 'anima-memory', 'anima-guard']
 
 /** One Anima row as the Settings tab shows it. */
 export interface SettingsRow {
@@ -97,13 +97,13 @@ export function settingsRows(editor: ConfigEditorLike): SettingsRow[] {
 /**
  * Register the `settings` view and `settings.save` action while DSH's config
  * editor is present; without it the view says Settings are unavailable.
- * @param ctx - root context with `anima`.
+ * @param ctx - root context with `animaGuard`.
  */
 export function registerSettings(ctx: Context): void {
   ctx.inject(['configEditor'], (ctx) => {
     const editor = ctx.configEditor
-    ctx.anima.addOwnerView('settings', () => ({ available: true, path: editor.documentPath, rows: settingsRows(editor) }))
-    ctx.anima.addOwnerAction('settings.save', async (args) => {
+    ctx.animaGuard.addOwnerView('settings', () => ({ available: true, path: editor.documentPath, rows: settingsRows(editor) }))
+    ctx.animaGuard.addOwnerAction('settings.save', async (args) => {
       const id = stringArg(args, 'id')
       if (!editableRows.includes(id)) throw new AnimaError('anima/settings-read-only', `${id} is read-only on the page; edit it in cordis.yml.`)
       const config = args.config

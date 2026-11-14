@@ -38,7 +38,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@anima/core": "workspace:*"
+    "@anima/core": "workspace:*",
+    "@anima/guard": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0"

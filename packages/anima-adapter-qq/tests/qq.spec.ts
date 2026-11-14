@@ -47,16 +47,16 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, approvals: { timeoutSeconds: 5 } })
+  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, outbox: { delaySeconds: 0 }, ...life } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, ...life } })
   const fiber = await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
     allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },
     callTimeoutSeconds: 2, reconnect: { maxSeconds: 1 },
     ...extra,
   })
-  await vi.waitFor(() => expect(ctx.anima.statusText()).toMatch(/QQ: connected .* \(Anima\)/))
+  await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toMatch(/QQ: connected .* \(Anima\)/))
   return { ctx, host, server, fiber }
 }
 
@@ -89,9 +89,10 @@ describe('QQ adapter', () => {
     expect(server.callsOf('get_login_info')).toHaveLength(1)
     expect(ctx.anima.describeSession(ownerSession)).toMatchObject({ kind: 'conversation', channelKey: ownerKey })
     expect(ctx.anima.channelInfo(ownerKey)).toMatchObject({ isOwner: true, display: 'Sam (QQ)' })
-    expect(ctx.anima.channelAllowed(groupKey)).toBe(true)
-    expect(ctx.anima.channelAllowed(`qq:${ACCOUNT}:group:999`)).toBe(false)
-    expect(ctx.anima.statusText()).toContain(`QQ allowlist: owner ${OWNER}; users ${FRIEND}; groups ${GROUP}`)
+    // She has the configured chats only.
+    expect(ctx.anima.channelInfo(groupKey)).toMatchObject({ isOwner: false })
+    expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:999`)).toBeUndefined()
+    expect(ctx.anima.statusLines().join('\n')).toContain(`QQ allowlist: owner ${OWNER}; users ${FRIEND}; groups ${GROUP}`)
     expect(ctx.anima.ownerLine?.name).toContain('QQ private chat with the owner')
   })
 
@@ -105,7 +106,7 @@ describe('QQ adapter', () => {
     server.push(privateMessage('55555', 'spam'))
     server.push(groupMessage('999', '2002', [{ type: 'at', data: { qq: ACCOUNT } }]))
     server.push(privateMessage(ACCOUNT, 'my own echo'))
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('dropped (not allowlisted) 2'))
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('dropped (not allowlisted) 2'))
     expect([...host.sessions.keys()]).toHaveLength(2)
   })
 
@@ -193,37 +194,46 @@ describe('QQ adapter', () => {
     expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: `qq:${ACCOUNT}:group:999`, intent: 'hi' })).text).toContain(`anima/unknown-channel: 没有「qq:${ACCOUNT}:group:999」这个地方。你能去的地方：qq:${ACCOUNT}:private:${OWNER}`)
   })
 
-  it('asks the owner about friend requests and consumes the reply', async () => {
+  it('hands friend requests and owner replies to the outside', async () => {
     const { ctx, server, host } = await setup()
     server.respond('set_friend_add_request', () => null)
+    // A stand-in for the outside: it takes the request, writes on the owner line, and consumes the owner's reply.
+    let request: { summary: string; answer(accept: boolean): Promise<void> } | undefined
+    ctx.on('anima/friend-request', (r) => { request = r; void ctx.anima.ownerLine!.send(`[Anima approval a1] ${r.summary}`); return true })
+    ctx.on('anima/owner-message', text => text === 'yes a1' ? 'Allowed a1.' : undefined)
     server.push({ post_type: 'request', request_type: 'friend', user_id: 77777, comment: 'hi, from the book club', flag: 'f1' })
     await vi.waitFor(() => expect(server.callsOf('send_private_msg')).toHaveLength(1))
     const ask = server.callsOf('send_private_msg')[0]!
     expect(ask.params.user_id).toBe(Number(OWNER))
-    const text = JSON.stringify(ask.params.message)
-    expect(text).toContain('QQ user 77777 (\\"hi, from the book club\\") wants to add her')
-    const id = /approval (a\d+)/.exec(text)![1]!
-    server.push(privateMessage(OWNER, `yes ${id}`))
-    await vi.waitFor(() => expect(server.callsOf('set_friend_add_request')).toHaveLength(1))
-    expect(server.callsOf('set_friend_add_request')[0]!.params).toEqual({ flag: 'f1', approve: true })
-    // The reply never reached her; the owner got a confirmation.
+    expect(JSON.stringify(ask.params.message)).toContain('QQ user 77777 (\\"hi, from the book club\\") wants to add her')
+    server.push(privateMessage(OWNER, 'yes a1'))
+    await vi.waitFor(() => expect(JSON.stringify(server.callsOf('send_private_msg')[1]?.params.message)).toContain('Allowed a1.'))
+    // The reply never reached her.
     expect(host.sessions.has(ownerSession)).toBe(false)
-    await vi.waitFor(() => expect(JSON.stringify(server.callsOf('send_private_msg')[1]?.params.message)).toContain(`Allowed ${id}.`))
-    expect(ctx.anima.approvals.list()).toEqual([])
+    await request!.answer(true)
+    expect(server.callsOf('set_friend_add_request')[0]!.params).toEqual({ flag: 'f1', approve: true })
+  })
+
+  it('leaves a friend request unanswered when nothing outside takes it', async () => {
+    const { ctx, server } = await setup()
+    server.push({ post_type: 'request', request_type: 'friend', user_id: 77777, comment: '', flag: 'f1' })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(server.callsOf('set_friend_add_request')).toHaveLength(0)
+    expect(server.callsOf('send_private_msg')).toHaveLength(0)
   })
 
   it('reconnects after the runtime drops, and reports health', async () => {
     const { ctx, server } = await setup()
     server.push({ post_type: 'notice', notice_type: 'bot_offline', user_id: Number(ACCOUNT), tag: 'kicked', message: 'logged in elsewhere' })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('account OFFLINE'))
-    expect(ctx.anima.statusText()).toContain('QQ last error: bot offline: logged in elsewhere')
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('account OFFLINE'))
+    expect(ctx.anima.statusLines().join('\n')).toContain('QQ last error: bot offline: logged in elsewhere')
     server.push({ post_type: 'meta_event', meta_event_type: 'heartbeat', interval: 5000, status: { online: true, good: true } })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('account online'))
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('account online'))
 
     server.dropAll()
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toMatch(/QQ: closed, retry in/))
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toMatch(/QQ: closed, retry in/))
     expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'x' })).text).toContain('anima/qq-offline')
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('connects 2'), { timeout: 4000 })
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('connects 2'), { timeout: 4000 })
     await vi.waitFor(() => expect(server.callsOf('get_login_info')).toHaveLength(2))
     expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'back' })).isError).toBe(false)
   })
@@ -231,8 +241,8 @@ describe('QQ adapter', () => {
   it('drops a connection whose heartbeats stop', async () => {
     const { ctx, server } = await setup({ heartbeatGrace: 1.5 })
     server.push({ post_type: 'meta_event', meta_event_type: 'heartbeat', interval: 100, status: { online: true } })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('heartbeat lost'), { timeout: 2000 })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('connects 2'), { timeout: 4000 })
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('heartbeat lost'), { timeout: 2000 })
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('connects 2'), { timeout: 4000 })
   })
 
   it('refuses to deliver when logged in as another account', async () => {
@@ -249,7 +259,7 @@ describe('QQ adapter', () => {
     const host = new FakeHost()
     await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     await ctx.plugin(qq, { url, account: ACCOUNT, owner: OWNER })
-    await vi.waitFor(() => expect(ctx.anima.statusText()).toContain('QQ problem: the runtime is logged in as 99999'))
+    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('QQ problem: the runtime is logged in as 99999'))
     server.push({ ...privateMessage(OWNER, 'hi'), self_id: 99999 })
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(host.sessions.size).toBe(0)
@@ -262,7 +272,7 @@ describe('QQ adapter', () => {
     expect(ctx.anima.behavior('qq_say')).toBeUndefined()
     expect(ctx.tools.get('qq_history')).toBeUndefined()
     expect(ctx.anima.ownerLine).toBeUndefined()
-    expect(ctx.anima.channelAllowed(groupKey)).toBeUndefined()
+    expect(ctx.anima.channelInfo(groupKey)).toBeUndefined()
     expect(ctx.anima.describeSession(ownerSession)).toBeUndefined()
     await vi.waitFor(() => expect(server.open).toBe(0))
   })

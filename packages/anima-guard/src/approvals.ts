@@ -2,20 +2,15 @@
  * Owner approvals (DESIGN §10): a request goes to the owner over an owner line
  * (e.g. the owner's QQ private chat) with an id; the owner answers with a plain
  * `yes <id>` or `no <id>`; no answer in time means denied. Platform-independent:
- * an adapter supplies the line and forwards the owner's replies.
- * @module @anima/core/approvals
+ * an adapter supplies the line, and owner replies reach the guard through
+ * `anima/owner-message`.
+ * @module @anima/guard/approvals
  */
+
+import type { OwnerLine } from '@anima/core'
 
 /** How an approval request ended. */
 export type ApprovalAnswer = 'approved' | 'denied' | 'timeout' | 'unavailable'
-
-/** Where approval requests (and other owner notices) are sent; provided by an adapter. */
-export interface OwnerLine {
-  /** Human-readable name, e.g. `QQ private chat with the owner`. */
-  readonly name: string
-  /** Send one plain-text message to the owner. */
-  send(text: string): Promise<void>
-}
 
 /** One owner reply command: `yes a3`, `no a3`, `cancel o2`. */
 export interface OwnerReply {
