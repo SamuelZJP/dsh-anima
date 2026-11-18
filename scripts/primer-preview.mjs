@@ -47,7 +47,7 @@ const L0 = ctx.animaLife
 await ctx.plugin(guard, { allowlist: { qq: { users: ['30003'], groups: ['40004'] } } })
 await ctx.plugin(memory, {})
 await ctx.plugin(qq, {
-  url: 'ws://127.0.0.1:9', accessToken: 'x', account: '10001', owner: '20002', ownerName: 'Sam',
+  backend: { url: 'ws://127.0.0.1:9', accessToken: 'x' }, account: '10001', owner: '20002', ownerName: 'Sam',
 })
 // The QQ adapter publishes every chat once it is logged in; the preview publishes two by hand.
 L0.publish([

@@ -44,6 +44,8 @@ export class FakeOneBot {
   readonly calls: ReceivedCall[] = []
   /** Query strings of accepted connections. */
   readonly connections: string[] = []
+  /** `Authorization` headers of accepted connections. */
+  readonly authorizations: (string | undefined)[] = []
   private readonly server: Server
   private readonly sockets = new Set<Socket>()
   private readonly responders = new Map<string, Responder>()
@@ -59,6 +61,7 @@ export class FakeOneBot {
       const accept = createHash('sha1').update(`${String(key)}${GUID}`).digest('base64')
       socket.write(['HTTP/1.1 101 Switching Protocols', 'Upgrade: websocket', 'Connection: Upgrade', `Sec-WebSocket-Accept: ${accept}`, '', ''].join('\r\n'))
       this.connections.push(new URL(req.url ?? '/', 'http://x').search)
+      this.authorizations.push(req.headers.authorization)
       this.sockets.add(socket)
       socket.on('close', () => this.sockets.delete(socket))
       socket.on('error', () => this.sockets.delete(socket))

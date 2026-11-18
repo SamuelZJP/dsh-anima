@@ -17,15 +17,26 @@ export interface MediaEntry {
   /** Channel key of the chat it was sent in. */
   readonly chat: string
   readonly kind: MediaKind
-  /** Image: the runtime's download URL. */
+  /** Image: its download URL. */
   readonly url?: string | undefined
-  /** Image: the runtime's file name, for `get_image`. */
+  /** Image: the backend's handle for fetching it (`QqBackend.image`). */
   readonly file?: string | undefined
   readonly summary?: string | undefined
-  /** Forward: the id `get_forward_msg` takes. */
+  /** Forward: the backend's id for it (`QqBackend.forward`). */
   readonly forwardId?: string | undefined
   /** Image: the attachment it was stored as, once she looked (the look cache). */
   ref?: Readonly<Record<string, unknown>> | undefined
+}
+
+/** What an image or forward segment gives to open it later. */
+export interface MediaData {
+  readonly url?: string | undefined
+  readonly file?: string | undefined
+  readonly summary?: string | undefined
+  /** Forward id. */
+  readonly id?: string | undefined
+  /** Inline forward content. */
+  readonly content?: readonly unknown[] | undefined
 }
 
 interface MediaFile {
@@ -61,11 +72,11 @@ export class MediaBook {
    * The id of a segment in a chat, reusing the id it already has there.
    * @returns the id, or undefined when the segment gives nothing to open.
    */
-  idFor(chat: string, kind: MediaKind, data: Readonly<Record<string, unknown>>): string | undefined {
+  idFor(chat: string, kind: MediaKind, data: MediaData): string | undefined {
     const url = str(data.url)
-    const file = str(data.file) ?? str(data.file_id)
+    const file = str(data.file)
     const forwardId = str(data.id)
-    const content = Array.isArray(data.content) ? data.content as readonly unknown[] : undefined
+    const content = data.content
     if (kind === 'forward' ? forwardId === undefined && content === undefined : url === undefined && file === undefined) return undefined
     const existing = this.file.entries.find(entry => entry.chat === chat && entry.kind === kind && (kind === 'forward'
       ? forwardId !== undefined && entry.forwardId === forwardId
@@ -154,16 +165,14 @@ export async function fetchCapped(url: string, maxBytes: number, timeoutMs: numb
 }
 
 /**
- * The `emoji_id` of `set_msg_emoji_like` for what she typed: a QQ face id
- * (1–3 digits), or one Unicode emoji as its decimal code point (NapCat reads
- * ids longer than 3 digits as Unicode emoji).
- * @returns the id, or undefined when it is neither.
+ * What she typed as a reaction, when it is one emoji character or a QQ face id
+ * (1–3 digits); the backend turns it into its runtime's form.
+ * @returns the trimmed reaction, or undefined when it is neither.
  */
-export function emojiId(input: string): string | undefined {
+export function reactionOf(input: string): string | undefined {
   const text = input.trim()
   if (/^\d{1,3}$/.test(text)) return text
-  const points = [...text.replace(/[︎️]/g, '')]
+  const points = [...text.replace(/[\uFE0E\uFE0F]/g, '')]
   if (points.length !== 1) return undefined
-  const code = points[0]!.codePointAt(0)!
-  return code > 999 ? String(code) : undefined
+  return points[0]!.codePointAt(0)! > 999 ? text : undefined
 }

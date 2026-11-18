@@ -52,6 +52,10 @@ What Anima relies on in DSH (DeepSeek Harness). How each API behaved when it was
 
 The spike that verified the session rows above (2026-11-15) is `scripts/spikes/r2-spike.mjs` (overlay: `scripts/spikes/r2-overlay.mjs`; every Anima row off, two throwaway sessions on a bare preset).
 
+## Models
+
+- **DeepSeek sees images.** Her usual model, DeepSeek-V4.1-Flash (DSH id `deepseek-flash`), is natively multimodal, and DSH's default DeepSeek catalog declares `inputModalities: ['text', 'image']` for it. Later DeepSeek versions will most likely see too. So `qq_look` and close views work on her own chat model; `anima/no-vision` only comes up on a route whose catalog entry lacks `image`. At the pin, that includes DSH's `deepseek-v4-pro` entry.
+
 ## Traps
 
 - **Compaction config:** `dsh-compaction-basic` rejects a `thresholdRatio` at or below its `retainRatio` at load. Inside a preset that leaves agent creation pending forever. Do not lower `thresholdRatio`.

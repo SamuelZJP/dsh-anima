@@ -21,7 +21,14 @@ Unloading the plugin removes all of it.
 
 ## QQ: `anima-adapter-qq`
 
-- **Transport:** a WebSocket client of a OneBot v11 forward WebSocket server (NotRainMeow, or any OneBot v11 runtime), on Node's built-in `WebSocket`. URL and token in config. Lost heartbeats and `bot_offline` count as offline.
+- **Backend:** the adapter reaches her QQ account only through a `QqBackend` (`src/backend.ts`), an interface in QQ terms with no protocol in it:
+  - connect, reconnect and health;
+  - QQ events: message, poke, recall, friend request (with its answer), group invite, typing;
+  - who is logged in, friends and groups, send;
+  - optional abilities: get one message, history, image bytes, forwarded messages, poke, react, mark read, show typing.
+
+  Behaviors, channels, placeholders and media ids sit above it. A behavior whose ability the backend lacks is not registered (`qq_history`, `qq_poke`, `qq_react`); `qq_look` and `qq_read_forward` fall back to what the message itself carries. Another runtime with another protocol is one new implementation and one `backend.protocol` value. A runtime's dialect stays inside its implementation.
+- **OneBot v11** (`backend.protocol: onebot11`, the only one now): a WebSocket client of a OneBot v11 forward WebSocket server (NotRainMeow, or any OneBot v11 runtime), on Node's built-in `WebSocket`. The `backend` config section has the URL and token; the token goes in the `Authorization: Bearer` header. Lost heartbeats and `bot_offline` count as offline. It uses the NapCat-style extensions NotRainMeow also implements (`notify/input_status`, `*_msg_history`, `mark_*_as_read`, `set_msg_emoji_like` with code points, pokes).
 - **In:** private and group messages, @, replies, pokes, recalls, friend requests, typing notices where the runtime sends them (`notify/input_status`).
 - **Placeholders:** `[image #i3: summary]`, `[sticker #i4: summary]`, `[forwarded messages #f2]`; quoted replies show who wrote the original and a snippet. Ids survive restarts (`<dataDir>/qq/media.json`).
 - **Behaviors:** `qq_say(channel, text, also?, replyTo?, mention?, more?)`, `qq_history(channel)`, `qq_look(id)` (the picture itself, in a tool result, on a vision-capable model), `qq_read_forward(id)`, `qq_poke(channel, userId?)`, `qq_react(messageId, emoji)`.

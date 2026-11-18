@@ -9,8 +9,8 @@
       name: '@anima/life'
     - id: anima-memory
       name: '@anima/memory'
-    # QQ over OneBot v11 (NotRainMeow or any OneBot v11 runtime). Disabled here
-    # because it needs url, account and owner; a profile patch or --patch
+    # QQ through a backend (OneBot v11: NotRainMeow or any OneBot v11 runtime). Disabled here
+    # because it needs backend.url, account and owner; a profile patch or --patch
     # overlay enables it with that config (docs/design/channels.md).
     - id: anima-adapter-qq
       name: '@anima/adapter-qq'

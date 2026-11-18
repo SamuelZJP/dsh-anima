@@ -2,23 +2,6 @@
 
 One phase at a time. A phase is done when its exit check passes and is demonstrated in a DSH dev profile. Sped-up exit demos run on the fake demo platform (`scripts/demo/demo-platform.mjs`, development only); QQ is her only real channel. Each phase starts with a plan: what changes, which files, how it is verified. Finished phases are in git and `history/`.
 
-## R2 — Only will and physiology inside
-
-Clear every restriction out of the persona that is neither her will nor her physiology. No new mechanisms.
-- The Anima bundle installs only the persona packages; `anima-guard` and `anima-page` move to their own `guard-bundle`.
-- The QQ adapter publishes every friend and group; the allowlist moves into the guard.
-- Self-model limits go (`changesPerDay`, `maxEntries`, `maxEntryChars`), and so does the owner-policy hook `BehaviorMeta.constraint`.
-- The heartbeat is hers alone: no `until` on `rest`, no interval clamp, no guard admit, no `/anima heartbeat`. Its rhythm is her resting rate (a gene).
-- Close reminders and the lost-reply record go.
-- Her prompt loses its rules and nudges: the trust rule, the "usually" lines, the owner's ranges.
-- `anima-adapter-local` and `local_say` go: DSH's web UI is not her channel, and a session opened there stays plain DSH. Demos use the fake demo platform.
-
-**Exit:**
-- Every refusal code inside the persona is physiology or plumbing, listed by a test.
-- She runs with the guard bundle not installed. With it installed, the allowlist and quotas act from outside.
-- Nothing she calls and nothing outside changes when her heart beats.
-- A native DSH session gets nothing from Anima (no behavior, prompt, recall, record or stimulus), by a test.
-
 ## R3 — QQ backend
 
 NapCat is gone; her QQ backend is now NotRainMeow (OneBot v11, on another machine, reached through the owner's SSH tunnel). The adapter's protocol calls move behind one `QqBackend` interface, so a later backend is one new implementation.

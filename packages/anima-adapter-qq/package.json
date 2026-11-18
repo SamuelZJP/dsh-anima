@@ -1,6 +1,6 @@
 {
   "name": "@anima/adapter-qq",
-  "description": "Anima QQ adapter: OneBot v11 forward WebSocket (NapCatQQ or any OneBot v11 runtime)",
+  "description": "Anima QQ adapter: her QQ account through a replaceable backend (OneBot v11: NotRainMeow or any OneBot v11 runtime)",
   "version": "0.0.0",
   "private": true,
   "type": "module",

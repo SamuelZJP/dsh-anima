@@ -61,7 +61,7 @@ dsh-anima/
     anima-core/          state and physiology, persona prompt, behavior registry, clock
     anima-life/          waking sessions, stimuli, wait, inbox, heartbeat, sleep and waking
     anima-memory/        long-term memory, recall cues, consolidation in sleep, decay
-    anima-adapter-qq/    QQ over OneBot v11 (NotRainMeow or any OneBot v11 runtime)
+    anima-adapter-qq/    QQ through a replaceable backend (OneBot v11: NotRainMeow or any OneBot v11 runtime)
     anima-adapter-bili/  Bilibili, read-only (skim, watch, look closely)
     anima-guard/         outside the persona: safety gate, approvals, owner commands, management
     anima-page/          the Anima page in DSH's web UI, over anima-guard

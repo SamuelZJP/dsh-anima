@@ -1,31 +1,15 @@
 /**
  * OneBot v11 client over a forward WebSocket, on Node's built-in `WebSocket`
  * (no dependency). One connection carries API calls (`{ action, params, echo }`)
- * and events. It reconnects with backoff and treats lost heartbeats and
+ * and events. The access token goes in the standard `Authorization: Bearer`
+ * header. It reconnects with backoff and treats lost heartbeats and
  * `bot_offline` notices as health signals.
- * @module @anima/adapter-qq/onebot
+ * @module @anima/adapter-qq/onebot/client
  */
 
 import { AnimaError } from '@anima/core'
-import type { OneBotEvent } from './normalize.ts'
-
-/** Connection health, for `/anima status` and her report. */
-export interface Health {
-  /** WebSocket state. */
-  state: 'idle' | 'connecting' | 'open' | 'closed'
-  /** When the state last changed, epoch ms. */
-  since: number
-  /** Last OneBot heartbeat, epoch ms. */
-  lastHeartbeat?: number | undefined
-  /** Whether the QQ account is online per the runtime (heartbeat status, `bot_offline`). */
-  online?: boolean | undefined
-  /** Delay before the next reconnect attempt. */
-  retryInMs?: number | undefined
-  /** Last error or close reason. */
-  lastError?: string | undefined
-  /** Successful connections so far. */
-  connects: number
-}
+import type { Health } from '../backend.ts'
+import type { OneBotEvent } from './types.ts'
 
 /** Client options. */
 export interface ClientOptions {
@@ -41,6 +25,8 @@ export interface ClientOptions {
   readonly onEvent: (event: OneBotEvent) => void
   /** Called after each successful connect. */
   readonly onOpen?: () => void
+  /** Called when health changes on an event (heartbeat, lifecycle, `bot_offline`). */
+  readonly onHealth?: () => void
   /** Called when the connection closes. */
   readonly onClose?: (reason: string) => void
 }
@@ -52,15 +38,12 @@ interface Pending {
 }
 
 /**
- * The URL with the standard OneBot `access_token` query parameter.
- * @param url - runtime URL.
+ * Handshake headers: the standard OneBot `Authorization: Bearer <token>`, so the
+ * token never appears in a URL.
  * @param token - access token, if any.
  */
-export function connectUrl(url: string, token: string | undefined): string {
-  if (token === undefined || token === '') return url
-  const parsed = new URL(url)
-  parsed.searchParams.set('access_token', token)
-  return parsed.toString()
+export function authHeaders(token: string | undefined): Record<string, string> {
+  return token === undefined || token === '' ? {} : { Authorization: `Bearer ${token}` }
 }
 
 /**
@@ -139,7 +122,8 @@ export class OneBotClient {
     this.health.retryInMs = undefined
     let socket: WebSocket
     try {
-      socket = new WebSocket(connectUrl(this.options.url, this.options.accessToken))
+      // Node's WebSocket takes handshake headers in its second argument (undici's WebSocketInit).
+      socket = new WebSocket(this.options.url, { headers: authHeaders(this.options.accessToken) } as unknown as string[])
     } catch (error: unknown) {
       this.health.lastError = error instanceof Error ? error.message : String(error)
       this.scheduleRetry()
@@ -229,6 +213,7 @@ export class OneBotClient {
     }
     if (event.post_type === 'meta_event' && event.meta_event_type === 'lifecycle' && event.sub_type === 'disable') this.health.online = false
     if (event.post_type === 'meta_event' && event.meta_event_type === 'lifecycle' && (event.sub_type === 'enable' || event.sub_type === 'connect')) this.health.online ??= true
+    if (event.post_type === 'meta_event' || (event.post_type === 'notice' && event.notice_type === 'bot_offline')) this.options.onHealth?.()
     try {
       this.options.onEvent(event)
     } catch {

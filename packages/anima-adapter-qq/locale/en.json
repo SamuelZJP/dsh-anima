@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Anima QQ",
-    "description": "Connects Anima to QQ through a OneBot v11 runtime such as NapCatQQ: private chats and groups on an allowlist, group triage, owner approvals."
+    "description": "Connects Anima to QQ through a backend (OneBot v11: NotRainMeow or any OneBot v11 runtime): every private chat and group, group triage, the owner line."
   }
 }

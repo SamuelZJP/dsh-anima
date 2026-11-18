@@ -1,9 +1,10 @@
 /**
- * QQ adapter (DESIGN §11) over OneBot v11. It connects as a WebSocket client
- * to the runtime's forward WebSocket server (NapCatQQ, or any OneBot v11
- * runtime), turns private and group messages, pokes, recalls and friend
- * requests from allowlisted chats into stimuli, and registers `qq_say` and
- * `qq_history`. The owner's private chat is the owner line for approvals.
+ * QQ adapter (docs/design/channels.md). It reaches her QQ account through a
+ * {@link QqBackend} (today OneBot v11: NotRainMeow, or any OneBot v11 runtime),
+ * publishes every friend and group, turns messages, pokes, recalls and friend
+ * requests into stimuli, and registers `qq_say` and the other QQ behaviors; a
+ * behavior the backend cannot do is not registered. The owner's private chat is
+ * the owner line. Nothing here knows the backend's protocol.
  * @module @anima/adapter-qq
  */
 
@@ -18,15 +19,19 @@ import { AnimaError, formatLocal, SAY_META, SAY_PARAMETERS, sayMessages } from '
 import type {} from '@anima/core'
 import { paceMessages, type PublishedChannel } from '@anima/life'
 import type {} from '@anima/life'
-import { Config as ConfigSchema, resolveQqConfig, type Config as QqConfig, type ResolvedQqConfig } from './config.ts'
-import { displayNameOf, normalizeMessage, outgoing, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type Segment } from './normalize.ts'
-import { emojiId, fetchCapped, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
-import { OneBotClient, type Health } from './onebot.ts'
+import type { ChatKind, ForwardNode, Health, OutgoingSegment, QqBackend, QqEvent, QqMessage } from './backend.ts'
+import { Config as ConfigSchema, resolveQqConfig, type BackendConfig, type Config as QqConfig, type ResolvedQqConfig } from './config.ts'
+import { normalizeMessage, outgoing, renderSegments, type NormalizedMessage } from './normalize.ts'
+import { fetchCapped, MediaBook, normalizeMediaId, reactionOf, sniffImage, type MediaEntry } from './media.ts'
+import { OneBotBackend } from './onebot/backend.ts'
 
-export { resolveQqConfig, type ResolvedQqConfig } from './config.ts'
-export { displayNameOf, normalizeMessage, outgoing, parseCQ, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type RenderContext, type Rendered, type Segment } from './normalize.ts'
-export { backoff, connectUrl, OneBotClient, type ClientOptions, type Health } from './onebot.ts'
-export { emojiId, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
+export type { BackendHandlers, ChatKind, ForwardNode, Health, OutgoingSegment, QqBackend, QqEvent, QqMessage, QqSegment } from './backend.ts'
+export { resolveQqConfig, type BackendConfig, type ResolvedQqConfig } from './config.ts'
+export { normalizeMessage, outgoing, renderSegments, type MediaKind, type NormalizedMessage, type RenderContext, type Rendered } from './normalize.ts'
+export { MediaBook, normalizeMediaId, reactionOf, sniffImage, type MediaEntry } from './media.ts'
+export { OneBotBackend, type OneBotOptions } from './onebot/backend.ts'
+export { authHeaders, backoff, OneBotClient, type ClientOptions } from './onebot/client.ts'
+export { emojiId, oneBotSegments, parseCQ, qqMessage, qqSegments, segmentsOf } from './onebot/segments.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-adapter-qq'
@@ -79,12 +84,38 @@ export function qqChannel(config: ResolvedQqConfig, kind: 'private' | 'group', i
 }
 
 /**
+ * The backend for a config's `backend` section: one implementation per protocol.
+ * @param config - the validated `backend` section.
+ */
+export function createBackend(config: BackendConfig): QqBackend {
+  switch (config.protocol) {
+    case 'onebot11': return new OneBotBackend({
+      url: config.url,
+      accessToken: config.accessToken,
+      callTimeoutMs: config.callTimeoutSeconds * 1000,
+      maxBackoffMs: config.reconnect.maxSeconds * 1000,
+      heartbeatGrace: config.heartbeatGrace,
+    })
+  }
+}
+
+/**
  * Register the QQ adapter.
  * @param ctx - root context.
  * @param input - plugin config.
  */
 export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   const config = resolveQqConfig(input)
+  attach(ctx, config, createBackend(config.backend))
+}
+
+/**
+ * Register the QQ adapter over a given backend (tests pass a fake one).
+ * @param ctx - root context.
+ * @param config - validated adapter config.
+ * @param backend - the runtime that holds her account; started and stopped here.
+ */
+export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBackend): void {
   const core = ctx.anima
   const life = ctx.animaLife
   const herName = core.config.name
@@ -114,7 +145,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   /** Rendering for one chat: images, stickers and forwards get ids that belong to it. */
   const renderIn = (chat: string) => ({
     selfId: config.account, herName, name: (id: string) => names.get(id),
-    ref: (kind: Parameters<MediaBook['idFor']>[1], data: Readonly<Record<string, unknown>>) => media.idFor(chat, kind, data),
+    ref: (kind: Parameters<MediaBook['idFor']>[1], source: Parameters<MediaBook['idFor']>[2]) => media.idFor(chat, kind, source),
   })
   /** Recent message texts by id, for quoted replies: who wrote it and what. */
   const recent = new Map<string, { who: string; text: string }>()
@@ -128,35 +159,29 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   const offline = { down: true, since: Date.now(), reason: 'not connected yet' as string }
   let queue: Promise<void> = Promise.resolve()
 
-  const client = new OneBotClient({
-    url: config.url,
-    accessToken: config.accessToken,
-    callTimeoutMs: config.callTimeoutSeconds * 1000,
-    maxBackoffMs: config.reconnect.maxSeconds * 1000,
-    heartbeatGrace: config.heartbeatGrace,
-    onOpen: () => { void verifyLogin().finally(updateHealth) },
-    onClose: () => {
-      login.ready = false
-      updateHealth()
-    },
-    onEvent: (event) => {
-      if (event.post_type === 'meta_event' || event.notice_type === 'bot_offline') updateHealth()
-      // One at a time, so a group's messages reach her in order.
-      queue = queue.then(() => handle(event)).catch((error: unknown) => ctx.logger.warn(`anima qq: ${error instanceof Error ? error.message : String(error)}`))
-    },
-  })
   ctx.effect(() => {
-    client.start()
-    return () => client.stop()
-  }, 'anima-adapter-qq.client')
+    backend.start({
+      open: () => { void verifyLogin().finally(updateHealth) },
+      close: () => {
+        login.ready = false
+        updateHealth()
+      },
+      health: () => updateHealth(),
+      event: (event) => {
+        // One at a time, so a group's messages reach her in order.
+        queue = queue.then(() => handle(event)).catch((error: unknown) => ctx.logger.warn(`anima qq: ${error instanceof Error ? error.message : String(error)}`))
+      },
+    })
+    return () => backend.stop()
+  }, 'anima-adapter-qq.backend')
 
   /** Why QQ is not usable now, or undefined when it is. */
   function downReason(): string | undefined {
-    const { health } = client
+    const { health } = backend
     if (health.state !== 'open') return `${health.lastError ?? 'not connected'} (${health.state}${health.retryInMs === undefined ? '' : `, retry in ${Math.round(health.retryInMs / 1000)} s`})`
     if (login.problem !== undefined) return login.problem
     if (!login.ready) return 'connected, checking the login'
-    if (health.online === false) return health.lastError?.startsWith('bot offline') === true ? `NapCat reports the account offline (${health.lastError})` : 'the runtime reports the QQ account offline'
+    if (health.online === false) return `the runtime reports the QQ account offline${health.lastError === undefined ? '' : ` (${health.lastError})`}`
     return undefined
   }
 
@@ -180,10 +205,10 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
 
   async function verifyLogin(): Promise<void> {
     try {
-      const info = await client.call<{ user_id?: number | string; nickname?: string }>('get_login_info')
-      if (String(info.user_id) !== config.account) {
+      const info = await backend.login()
+      if (info.userId !== config.account) {
         login.ready = false
-        login.problem = `the runtime is logged in as ${String(info.user_id)}, but the config says account ${config.account}; nothing is delivered or sent until they match.`
+        login.problem = `the runtime is logged in as ${info.userId}, but the config says account ${config.account}; nothing is delivered or sent until they match.`
         ctx.logger.error(`anima qq: ${login.problem}`)
         return
       }
@@ -192,16 +217,13 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       login.ready = true
       await publishChats()
     } catch (error: unknown) {
-      login.problem = `get_login_info failed: ${error instanceof Error ? error.message : String(error)}`
+      login.problem = `the login check failed: ${error instanceof Error ? error.message : String(error)}`
     }
   }
 
-  async function send(kind: 'private' | 'group', id: string, message: Segment[]): Promise<string> {
-    if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${login.problem ?? client.health.lastError ?? client.health.state}); the message was not sent.`)
-    const action = kind === 'group' ? 'send_group_msg' : 'send_private_msg'
-    const target = kind === 'group' ? { group_id: Number(id) } : { user_id: Number(id) }
-    const result = await client.call<{ message_id?: number | string }>(action, { ...target, message })
-    const messageId = String(result?.message_id ?? '')
+  async function send(kind: ChatKind, id: string, message: readonly OutgoingSegment[]): Promise<string> {
+    if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${login.problem ?? backend.health.lastError ?? backend.health.state}); the message was not sent.`)
+    const messageId = await backend.send(kind, id, message)
     if (messageId !== '') remember(messageId)
     counts.sent += 1
     return messageId
@@ -209,52 +231,51 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
 
   // A chat that woke her is read, like a person opening it; held inbox messages never reach here (Phase 9).
   ctx.on('anima/read', ({ channel }) => {
-    if (!config.markRead || channel.platform !== PLATFORM || channel.account !== config.account || !login.ready) return
-    const [action, params] = channel.kind === 'group'
-      ? ['mark_group_msg_as_read', { group_id: Number(channel.id) }] as const
-      : ['mark_private_msg_as_read', { user_id: Number(channel.id) }] as const
+    if (backend.markRead === undefined || !config.markRead || channel.platform !== PLATFORM || channel.account !== config.account || !login.ready) return
     counts.read += 1
-    client.call(action, params).catch((error: unknown) => ctx.logger.debug(`anima qq: ${action}: ${error instanceof Error ? error.message : String(error)}`))
+    backend.markRead(channel.kind as ChatKind, channel.id).catch((error: unknown) => ctx.logger.debug(`anima qq: mark read: ${error instanceof Error ? error.message : String(error)}`))
   })
+
+  /** Show typing in a private chat, when the backend can. */
+  function showTyping(userId: string): void {
+    if (backend.typing === undefined || !config.typing.enabled || !login.ready) return
+    backend.typing(userId).catch((error: unknown) => ctx.logger.debug(`anima qq: typing: ${error instanceof Error ? error.message : String(error)}`))
+  }
 
   // While the outside holds a message she started in a private chat, QQ shows typing shortly before it goes out.
   ctx.on('anima/outgoing-held', (held) => {
     const channel = byKey.get(held.channelKey)
-    if (channel === undefined || channel.kind !== 'private' || !config.typing.enabled) return
-    const typing = setTimeout(() => {
-      if (!login.ready) return
-      client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
-        .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
-    }, Math.max(0, held.sendsAt - Date.now() - config.typing.leadSeconds * 1000))
+    if (channel === undefined || channel.kind !== 'private' || !config.typing.enabled || backend.typing === undefined) return
+    const typing = setTimeout(() => showTyping(channel.id), Math.max(0, held.sendsAt - Date.now() - config.typing.leadSeconds * 1000))
     void held.done.finally(() => clearTimeout(typing))
   })
 
   core.provideOwnerLine({
     name: `QQ private chat with the owner (${config.owner})`,
-    send: async (text) => { await send('private', config.owner, [{ type: 'text', data: { text } }]) },
+    send: async (text) => { await send('private', config.owner, [{ type: 'text', text }]) },
   })
 
   /** Who wrote a message, as she knows them. */
-  function whoIs(userId: string, event?: OneBotEvent): string {
+  function whoIs(userId: string, displayName?: string): string {
     if (userId === config.account) return 'you'
     if (userId === config.owner) return config.ownerName
-    return names.get(userId) ?? (event === undefined ? userId : displayNameOf(event))
+    return names.get(userId) ?? displayName ?? userId
   }
 
   /**
    * A replied-to message: whether it is hers, and who wrote what. From the
-   * recent-message cache, else `get_msg` (the reply is always in the same chat).
+   * recent-message cache, else the backend (the reply is always in the same chat).
    */
   async function quoted(messageId: string, chat: string): Promise<{ hers: boolean; who?: string; text?: string }> {
     const known = recent.get(messageId)
     if (known !== undefined) return { hers: known.who === 'you', who: known.who, text: known.text }
     try {
-      const msg = await client.call<OneBotEvent>('get_msg', { message_id: Number(messageId) })
-      const userId = String(msg?.sender?.user_id ?? msg?.user_id ?? '')
-      const who = whoIs(userId, msg)
-      const text = renderSegments(segmentsOf(msg?.message), renderIn(chat)).text
+      const msg = await backend.message?.(messageId)
+      if (msg === undefined) return { hers: sentIds.has(messageId) }
+      const who = whoIs(msg.userId, msg.displayName)
+      const text = renderSegments(msg.segments, renderIn(chat)).text
       keep(messageId, who, text)
-      return { hers: userId === config.account, who, text }
+      return { hers: msg.userId === config.account, who, text }
     } catch {
       return { hers: sentIds.has(messageId) }
     }
@@ -268,19 +289,17 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     return `(replying to ${quote.who}, msg ${messageId}: ${JSON.stringify(snippet)})`
   }
 
-  /** Publish every friend and group of the account (OneBot `get_friend_list`, `get_group_list`). */
+  /** Publish every friend and group of the account. */
   async function publishChats(): Promise<void> {
     try {
-      const friends = await client.call<{ user_id?: number | string; nickname?: string; remark?: string }[]>('get_friend_list')
-      for (const friend of friends ?? []) if (friend.user_id !== undefined) channelOf('private', String(friend.user_id), friend.remark || friend.nickname)
+      for (const friend of await backend.friends()) channelOf('private', friend.userId, friend.name)
     } catch (error: unknown) {
-      ctx.logger.warn(`anima qq: get_friend_list: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`anima qq: friend list: ${error instanceof Error ? error.message : String(error)}`)
     }
     try {
-      const groups = await client.call<{ group_id?: number | string; group_name?: string }[]>('get_group_list')
-      for (const group of groups ?? []) if (group.group_id !== undefined) channelOf('group', String(group.group_id), group.group_name)
+      for (const group of await backend.groups()) channelOf('group', group.groupId, group.name)
     } catch (error: unknown) {
-      ctx.logger.warn(`anima qq: get_group_list: ${error instanceof Error ? error.message : String(error)}`)
+      ctx.logger.warn(`anima qq: group list: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -292,7 +311,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       // The outside consumes owner replies such as "yes a3"; then they never reach her.
       const answer = ctx.bail('anima/owner-message', message.text)
       if (answer !== undefined) {
-        await send('private', config.owner, [{ type: 'text', data: { text: answer } }])
+        await send('private', config.owner, [{ type: 'text', text: answer }])
         return
       }
     }
@@ -315,81 +334,66 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     })
   }
 
-  async function handle(event: OneBotEvent): Promise<void> {
-    if (event.self_id !== undefined && String(event.self_id) !== config.account) return
+  async function handle(event: QqEvent): Promise<void> {
     if (!login.ready) return
-    switch (event.post_type) {
+    switch (event.type) {
       case 'message': {
-        if (String(event.user_id) === config.account) return
-        const chatId = event.message_type === 'group' ? String(event.group_id ?? '') : String(event.user_id ?? event.sender?.user_id ?? '')
-        const kind = event.message_type === 'group' ? 'group' : 'private'
-        const message = normalizeMessage(event, renderIn(qqChannelKey(config.account, kind, chatId)))
-        if (message !== undefined) await deliverMessage(message)
+        const { message } = event
+        if (message.userId === config.account) return
+        const normalized = normalizeMessage(message, renderIn(qqChannelKey(config.account, message.kind, message.chatId)))
+        return deliverMessage(normalized)
+      }
+      case 'typing': {
+        // The other person is typing in a private chat (Phase 9).
+        if (event.userId === config.account) return
+        const typingIn = channelOf('private', event.userId)
+        if (event.typing) life.typing(typingIn)
+        counts.typing += 1
         return
       }
-      case 'notice': return notice(event)
-      case 'request':
-        // Not awaited: the owner's answer arrives as a later event on this same queue.
-        request(event).catch((error: unknown) => ctx.logger.warn(`anima qq: friend request: ${error instanceof Error ? error.message : String(error)}`))
+      case 'poke': {
+        if (event.targetId !== config.account || event.userId === config.account) return
+        const channel = channelOf(event.kind, event.chatId)
+        const isOwner = event.userId === config.owner
+        counts.delivered += 1
+        await life.deliver({
+          type: 'message', channel,
+          sender: { platformUserId: event.userId, displayName: isOwner ? config.ownerName : names.get(event.userId) ?? event.userId, isOwner },
+          text: '[戳了戳你]', ts: core.clock.now(),
+          ...channel.kind === 'group' ? { addressed: true } : {},
+        })
         return
-      default: return // message_sent, meta_event (the client reads heartbeats)
+      }
+      case 'recall': {
+        if (event.operatorId === config.account) return
+        const channel = channelOf(event.kind, event.chatId)
+        const who = event.operatorId === config.owner ? config.ownerName : names.get(event.operatorId) ?? event.operatorId
+        await life.deliver({ type: 'channel-event', channel, text: `${who} recalled a message (msg ${event.messageId}).`, ts: core.clock.now() })
+        return
+      }
+      case 'friend-request':
+        // Not awaited: the owner's answer arrives as a later event on this same queue.
+        friendRequest(event).catch((error: unknown) => ctx.logger.warn(`anima qq: friend request: ${error instanceof Error ? error.message : String(error)}`))
+        return
+      case 'group-invite':
+        life.note(`QQ user ${event.userId} invited you to group ${event.groupId}. You do not join groups yourself; the owner decides.`)
     }
   }
 
-  async function notice(event: OneBotEvent): Promise<void> {
-    const userId = String(event.user_id ?? '')
-    // NapCat's input status (private chats only; group_id is 0): the other person is typing (Phase 9).
-    if (event.notice_type === 'notify' && event.sub_type === 'input_status') {
-      if (userId === config.account) return
-      const typingIn = channelOf('private', userId)
-      if (String(event.status_text ?? '') !== '') life.typing(typingIn)
-      counts.typing += 1
-      return
-    }
-    const groupId = event.group_id === undefined ? undefined : String(event.group_id)
-    const channel = groupId === undefined ? channelOf('private', userId) : channelOf('group', groupId)
-    if (event.notice_type === 'notify' && event.sub_type === 'poke') {
-      if (String(event.target_id) !== config.account || userId === config.account) return
-      const isOwner = userId === config.owner
-      counts.delivered += 1
-      await life.deliver({
-        type: 'message', channel,
-        sender: { platformUserId: userId, displayName: isOwner ? config.ownerName : names.get(userId) ?? userId, isOwner },
-        text: '[戳了戳你]', ts: core.clock.now(),
-        ...channel.kind === 'group' ? { addressed: true } : {},
-      })
-      return
-    }
-    if (event.notice_type === 'friend_recall' || event.notice_type === 'group_recall') {
-      const operator = String(event.operator_id ?? userId)
-      if (operator === config.account || channel === undefined) return
-      const who = operator === config.owner ? config.ownerName : names.get(operator) ?? operator
-      await life.deliver({ type: 'channel-event', channel, text: `${who} recalled a message (msg ${String(event.message_id)}).`, ts: core.clock.now() })
-    }
-    // bot_offline is read by the client as a health signal.
-  }
-
-  async function request(event: OneBotEvent): Promise<void> {
-    const userId = String(event.user_id ?? '')
-    const comment = (event.comment ?? '').trim()
-    if (event.request_type === 'friend') {
-      const who = `QQ user ${userId}${comment === '' ? '' : ` ("${comment}")`}`
-      // Whoever handles friend requests outside the persona answers it; without anyone, it stays unanswered.
-      const taken = ctx.bail('anima/friend-request', {
-        platform: PLATFORM, userId,
-        summary: `${who} wants to add her (${config.account}) as a QQ friend.`,
-        answer: async (accept) => {
-          await client.call('set_friend_add_request', { flag: event.flag, approve: accept })
-          life.note(`The owner ${accept ? 'accepted' : 'declined'} the QQ friend request from ${userId}.`)
-        },
-        leave: why => life.note(`The QQ friend request from ${userId} was left unanswered (${why}).`),
-      }) === true
-      life.note(taken ? `${who} asked to be your friend on QQ; the owner was asked to decide.` : `${who} asked to be your friend on QQ; it stays unanswered.`)
-      return
-    }
-    if (event.request_type === 'group' && event.sub_type === 'invite') {
-      life.note(`QQ user ${userId} invited you to group ${String(event.group_id)}. You do not join groups yourself; the owner decides.`)
-    }
+  async function friendRequest(event: Extract<QqEvent, { type: 'friend-request' }>): Promise<void> {
+    const { userId, comment, answer } = event
+    const who = `QQ user ${userId}${comment === '' ? '' : ` ("${comment}")`}`
+    // Whoever handles friend requests outside the persona answers it; without anyone, or when the backend cannot answer, it stays unanswered.
+    const taken = answer !== undefined && ctx.bail('anima/friend-request', {
+      platform: PLATFORM, userId,
+      summary: `${who} wants to add her (${config.account}) as a QQ friend.`,
+      answer: async (accept) => {
+        await answer(accept)
+        life.note(`The owner ${accept ? 'accepted' : 'declined'} the QQ friend request from ${userId}.`)
+      },
+      leave: why => life.note(`The QQ friend request from ${userId} was left unanswered (${why}).`),
+    }) === true
+    life.note(taken ? `${who} asked to be your friend on QQ; the owner was asked to decide.` : `${who} asked to be your friend on QQ; it stays unanswered.`)
   }
 
   function sessionChannel(sessionId: string | undefined): PublishedChannel {
@@ -432,7 +436,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       // Messages after the first wait a typing time from their length, with typing shown in private chats (Phase 9).
       await paceMessages(messages, config.pacing, async (index, text) => {
         try {
-          const id = await send(channel.kind as 'private' | 'group', channel.id, outgoing(text, index === 0 ? { replyTo: args.replyTo, mention } : { mention: [] }))
+          const id = await send(channel.kind as ChatKind, channel.id, outgoing(text, index === 0 ? { replyTo: args.replyTo, mention } : { mention: [] }))
           keep(id, 'you', text)
           ids.push(id)
         } catch (error: unknown) {
@@ -442,16 +446,14 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
         }
       }, {
         beforeWait: () => {
-          if (channel.kind !== 'private' || !config.typing.enabled || !login.ready) return
-          client.call('set_input_status', { user_id: Number(channel.id), event_type: 1 })
-            .catch((error: unknown) => ctx.logger.debug(`anima qq: set_input_status: ${error instanceof Error ? error.message : String(error)}`))
+          if (channel.kind === 'private') showTyping(channel.id)
         },
       })
       return { sent: true, messageId: ids.at(-1)!, ...ids.length > 1 ? { messageIds: ids } : {} }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
 
-  core.registerBehavior(defineTool({
+  if (backend.history !== undefined) core.registerBehavior(defineTool({
     name: HISTORY_TOOL,
     description: 'Read recent messages of this QQ chat, oldest first, including ones that did not reach you.',
     parameters: {
@@ -465,17 +467,14 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       const channel = sessionChannel(exec.agent?.id)
       const session = { channelKey: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
       const count = Math.max(1, Math.min(HISTORY_MAX, Math.round(args.count ?? 15)))
-      const result = channel.kind === 'group'
-        ? await client.call<{ messages?: OneBotEvent[] }>('get_group_msg_history', { group_id: Number(channel.id), count })
-        : await client.call<{ messages?: OneBotEvent[] }>('get_friend_msg_history', { user_id: Number(channel.id), count })
-      const messages = (result?.messages ?? []).slice(-count)
-      const lines = messages.map((event) => {
-        const userId = String(event.user_id ?? event.sender?.user_id ?? '')
-        const who = userId === config.account ? 'you' : userId === config.owner ? `${config.ownerName} (owner)` : `${displayNameOf(event)} [qq ${userId}]`
-        const { text, replyTo } = renderSegments(segmentsOf(event.message), renderIn(session.channelKey))
-        keep(String(event.message_id ?? ''), userId === config.account ? 'you' : who, text)
-        const when = typeof event.time === 'number' ? formatLocal(event.time * 1000) : '?'
-        return `${when} ${who} [msg ${String(event.message_id)}]: ${replyTo === undefined ? '' : `${replyLabel(replyTo, recent.get(replyTo))} `}${text}`
+      const messages: readonly QqMessage[] = (await backend.history!(channel.kind as ChatKind, channel.id, count)).slice(-count)
+      const lines = messages.map((message) => {
+        const { userId } = message
+        const who = userId === config.account ? 'you' : userId === config.owner ? `${config.ownerName} (owner)` : `${message.displayName} [qq ${userId}]`
+        const { text, replyTo } = renderSegments(message.segments, renderIn(session.channelKey))
+        keep(message.messageId, userId === config.account ? 'you' : who, text)
+        const when = message.time === undefined ? '?' : formatLocal(message.time)
+        return `${when} ${who} [msg ${message.messageId}]: ${replyTo === undefined ? '' : `${replyLabel(replyTo, recent.get(replyTo))} `}${text}`
       })
       return { lines }
     },
@@ -503,7 +502,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     }
   }
 
-  /** The bytes of an image: its URL first, then `get_image` through the runtime. */
+  /** The bytes of an image: its URL first, then the backend by its file handle. */
   async function imageBytes(entry: MediaEntry, signal: AbortSignal | undefined): Promise<Uint8Array> {
     const { maxBytes, fetchTimeoutSeconds } = config.look
     const timeout = fetchTimeoutSeconds * 1000
@@ -515,19 +514,18 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
         problems.push(`url: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    if (entry.file !== undefined) {
+    if (entry.file !== undefined && backend.image !== undefined) {
       try {
-        const info = await client.call<{ base64?: string; url?: string }>('get_image', { file: entry.file })
-        if (typeof info?.base64 === 'string' && info.base64 !== '') {
-          const data = Buffer.from(info.base64, 'base64')
-          if (data.byteLength > maxBytes) throw new Error(`the image is more than the ${maxBytes} bytes allowed`)
-          return new Uint8Array(data)
+        const info = await backend.image(entry.file)
+        if (info.bytes !== undefined) {
+          if (info.bytes.byteLength > maxBytes) throw new Error(`the image is more than the ${maxBytes} bytes allowed`)
+          return info.bytes
         }
-        if (typeof info?.url === 'string' && /^https?:\/\//.test(info.url)) return await fetchCapped(info.url, maxBytes, timeout, signal)
-        problems.push('get_image gave no bytes or http URL')
+        if (info.url !== undefined) return await fetchCapped(info.url, maxBytes, timeout, signal)
+        problems.push('the runtime gave no bytes or http URL')
       } catch (error: unknown) {
         if (error instanceof Error && /bytes allowed/.test(error.message)) throw new AnimaError('anima/look-too-large', error.message)
-        problems.push(`get_image: ${error instanceof Error ? error.message : String(error)}`)
+        problems.push(`runtime: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     const tooLarge = problems.find(p => /bytes allowed/.test(p))
@@ -596,24 +594,20 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
 
   /** Lines of forwarded messages, capped; nested forwards are shown inline. */
-  function forwardLines(messages: readonly unknown[], chat: string, depth: number, out: string[], budget: { messages: number; chars: number; hidden: number }): void {
-    for (const raw of messages) {
-      const node = raw as OneBotEvent & { data?: { nickname?: string; user_id?: number | string; content?: unknown; message?: unknown } }
-      const isNode = node.type === 'node' && node.data !== undefined
-      const name = isNode ? String(node.data!.nickname ?? node.data!.user_id ?? '?') : (displayNameOf(node) || '?')
-      const segments = segmentsOf(isNode ? node.data!.content ?? node.data!.message : node.message)
+  function forwardLines(nodes: readonly ForwardNode[], chat: string, depth: number, out: string[], budget: { messages: number; chars: number; hidden: number }): void {
+    for (const node of nodes) {
       if (budget.messages <= 0 || budget.chars <= 0) {
         budget.hidden += 1
         continue
       }
-      const inner = depth < 2 ? segments.filter(seg => seg.type === 'forward' && Array.isArray(seg.data.content)) : []
-      const text = renderSegments(segments.filter(seg => !inner.includes(seg)), renderIn(chat)).text
-      const line = `${'  '.repeat(depth)}${name}: ${inner.length > 0 && text === '[empty message]' ? '[forwarded messages]' : text}`
+      const inner = depth < 2 ? node.segments.filter(seg => seg.type === 'forward' && seg.content !== undefined) : []
+      const text = renderSegments(node.segments.filter(seg => !inner.includes(seg)), renderIn(chat)).text
+      const line = `${'  '.repeat(depth)}${node.name}: ${inner.length > 0 && text === '[empty message]' ? '[forwarded messages]' : text}`
       const fits = [...line].slice(0, budget.chars).join('')
       out.push(fits.length < line.length ? `${fits}…` : line)
       budget.messages -= 1
       budget.chars -= fits.length
-      for (const seg of inner) forwardLines(seg.data.content as unknown[], chat, depth + 1, out, budget)
+      for (const seg of inner) if (seg.type === 'forward') forwardLines(seg.content!, chat, depth + 1, out, budget)
     }
   }
 
@@ -633,12 +627,11 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       if (entry === undefined || entry.kind !== 'forward') {
         throw new AnimaError('anima/no-forward', `there is no forward "${normalizeMediaId(args.id)}" in this chat. Use the id shown in a forward placeholder here, e.g. #f2.`)
       }
-      let messages = media.content(entry.id)
+      let messages = media.content(entry.id) as readonly ForwardNode[] | undefined
       if (messages === undefined) {
-        if (entry.forwardId === undefined) throw new AnimaError('anima/forward-failed', 'this forward can no longer be fetched.')
+        if (entry.forwardId === undefined || backend.forward === undefined) throw new AnimaError('anima/forward-failed', 'this forward can no longer be fetched.')
         try {
-          const result = await client.call<{ messages?: unknown[]; message?: unknown[] }>('get_forward_msg', { id: entry.forwardId, message_id: entry.forwardId })
-          messages = result?.messages ?? result?.message ?? []
+          messages = await backend.forward(entry.forwardId)
         } catch (error: unknown) {
           if (error instanceof AnimaError && error.code === 'anima/qq-offline') throw error
           throw new AnimaError('anima/forward-failed', `the forward could not be fetched (${error instanceof Error ? error.message.replace(/^[a-z]+\/[a-z-]+:\s*/, '') : String(error)}). It may have expired on QQ.`)
@@ -652,7 +645,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     },
   }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
 
-  core.registerBehavior(defineTool({
+  if (backend.poke !== undefined) core.registerBehavior(defineTool({
     name: POKE_TOOL,
     description: 'Poke someone in this QQ chat (a light nudge, no text). In a private chat it pokes the other person; in a group give their user id.',
     parameters: {
@@ -669,13 +662,12 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       if (channel.kind === 'private' && userId !== channel.id) throw new AnimaError('anima/bad-args', 'in a private chat you can only poke the person you are talking with.')
       if (userId === config.account) throw new AnimaError('anima/bad-args', 'you cannot poke yourself.')
       if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${offline.reason}); nobody was poked.`)
-      if (channel.kind === 'group') await client.call('group_poke', { group_id: Number(channel.id), user_id: Number(userId) })
-      else await client.call('friend_poke', { user_id: Number(userId) })
+      await backend.poke!(channel.kind as ChatKind, channel.id, userId)
       return { poked: whoIs(userId) }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
 
-  core.registerBehavior(defineTool({
+  if (backend.react !== undefined) core.registerBehavior(defineTool({
     name: REACT_TOOL,
     description: 'React to a message in this QQ chat with one emoji (e.g. "👍", "😂", "❤️"), by its msg id. Lighter than a reply.',
     parameters: {
@@ -689,31 +681,31 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     async execute(args, exec) {
       sessionChat(exec)
       if (!/^-?\d{1,20}$/.test(args.messageId.trim())) throw new AnimaError('anima/bad-args', 'messageId is the "msg" number shown with a message.')
-      const id = emojiId(args.emoji)
-      if (id === undefined) throw new AnimaError('anima/bad-args', 'emoji must be exactly one emoji character (like 👍) or a QQ face id of 1–3 digits.')
+      const reaction = reactionOf(args.emoji)
+      if (reaction === undefined) throw new AnimaError('anima/bad-args', 'emoji must be exactly one emoji character (like 👍) or a QQ face id of 1–3 digits.')
       if (!login.ready) throw new AnimaError('anima/qq-offline', `QQ is not ready (${offline.reason}); no reaction was sent.`)
-      await client.call('set_msg_emoji_like', { message_id: Number(args.messageId.trim()), emoji_id: id, set: true })
-      return { reacted: args.emoji.trim() }
+      await backend.react!(args.messageId.trim(), reaction)
+      return { reacted: reaction }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
 
   core.addStatus(() => [
     ...offline.down ? [`QQ OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}`] : [],
-    ...statusLines(config, client.health, login, counts),
+    ...statusLines(config, backend, login, counts),
   ])
   // Owner surface shared with the Anima page (DESIGN §12); the access token is never shown.
   core.providePlatform({
     platform: PLATFORM,
     title: 'QQ',
     view: () => {
-      const { health } = client
+      const { health } = backend
       const ok = login.ready && health.state === 'open' && health.online !== false
       return {
         health: ok ? 'ok' : health.state === 'open' ? 'warn' : 'down',
-        summary: `${offline.down ? `OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}. ` : ''}${statusLines(config, health, login, counts)[0]!.replace(/^QQ: /, '')}`,
+        summary: `${offline.down ? `OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}. ` : ''}${statusLines(config, backend, login, counts)[0]!.replace(/^QQ: /, '')}`,
         details: {
           offline: offline.down ? { since: offline.since, reason: offline.reason } : null,
-          url: config.url,
+          backend: backend.name,
           account: config.account,
           nickname: login.nickname ?? null,
           state: health.state,
@@ -729,7 +721,6 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     },
   })
   life.addReportLine(() => {
-    const { health } = client
     if (!offline.down) return []
     return [`QQ is offline since ${formatLocal(offline.since)} (${offline.reason}); messages there cannot be sent or received now.`]
   })
@@ -740,9 +731,10 @@ function ago(at: number | undefined): string {
 }
 
 /** `/anima status` lines of the QQ adapter. */
-export function statusLines(config: ResolvedQqConfig, health: Health, login: { ready: boolean; nickname?: string | undefined; problem?: string | undefined }, counts: { delivered: number; sent: number }): string[] {
+export function statusLines(config: ResolvedQqConfig, backend: { readonly name: string; readonly health: Health }, login: { ready: boolean; nickname?: string | undefined; problem?: string | undefined }, counts: { delivered: number; sent: number }): string[] {
+  const { health } = backend
   const state = health.state === 'open'
-    ? `connected to ${config.url} as ${config.account}${login.nickname === undefined ? '' : ` (${login.nickname})`}${login.ready ? '' : ', not ready'}`
+    ? `connected to ${backend.name} as ${config.account}${login.nickname === undefined ? '' : ` (${login.nickname})`}${login.ready ? '' : ', not ready'}`
     : `${health.state}${health.retryInMs === undefined ? '' : `, retry in ${Math.round(health.retryInMs / 1000)} s`}`
   return [
     `QQ: ${state}; account ${health.state !== 'open' ? 'status unknown while disconnected' : health.online === false ? 'OFFLINE' : health.online === true ? 'online' : 'status unknown'}; last heartbeat ${ago(health.lastHeartbeat)}; connects ${health.connects}`,

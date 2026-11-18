@@ -48,8 +48,7 @@ ${quotas.map(rule => `      - ${JSON.stringify(rule)}`).join('\n')}
 - id: anima-adapter-qq
   disabled: false
   config:
-    url: ws://127.0.0.1:${PORT}
-    accessToken: check-p8
+    backend: { url: 'ws://127.0.0.1:${PORT}', accessToken: check-p8 }
     account: '${ACCOUNT}'
     owner: '${OWNER.id}'
     ownerName: ${OWNER.name}
