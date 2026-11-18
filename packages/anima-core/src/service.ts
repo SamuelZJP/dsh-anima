@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-session'
 import { defineTool, type PreToolDecision, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { alarmLine, alarmsIn, alarmTitle, planAlarm, type ScheduleLike } from './alarms.ts'
 import { AnimaClock, formatLocal, parseWhen } from './clock.ts'
 import type { ModeConfig, ResolvedConfig } from './config.ts'
 import { bodyCheck, visibleIn, type BodyMoment, type BodyVerdict } from './gate.ts'
@@ -20,7 +21,7 @@ import { describeGoal, GoalStore } from './goals.ts'
 import type { PlatformProvider } from './owner.ts'
 import type { NewActivity } from './records.ts'
 import { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfSection } from './selfmodel.ts'
-import { Ledger, readJson, writeJson, type DayLedger } from './ledger.ts'
+import { readJson, writeJson } from './ledger.ts'
 import { asleepAt, dayKey, dayStart, earliestBedtime, latestBedtime, modeAt, phaseAt, wokenUntil, type Mode, type Phase, type SleepRecord } from './rhythm.ts'
 import { advance, describeNeeds, feel, initialState, satisfy, spendTurn, type SelfState, type StateModel } from './state.ts'
 import type { PlaceFacts } from './primer.ts'
@@ -136,7 +137,6 @@ export function defaultConstitution(name: string): string {
 
 interface StateFile {
   self: SelfState
-  days: Record<string, DayLedger>
   /** When she went to sleep and when the owner woke her (Phase 9). */
   sleep?: SleepRecord
 }
@@ -167,7 +167,6 @@ export class AnimaCore extends Service {
   private readonly platformTable = new Map<string, PlatformProvider>()
   private readonly statusPartTable = new Map<string, () => unknown>()
   private self: SelfState
-  private readonly ledger: Ledger
   /** When she went to sleep and when the owner woke her (Phase 9). */
   private sleepRecord: SleepRecord = {}
   /** Whether the last bedtime check saw her asleep, so falling asleep is noticed once. */
@@ -192,8 +191,6 @@ export class AnimaCore extends Service {
       ctx.logger.warn(`state.json is from ${formatLocal(saved.self.updatedAt)}, after her clock (${formatLocal(now)}); starting fresh self state.`)
     }
     this.self = saved === undefined || saved.self.updatedAt > now ? initialState(this.model, now) : saved.self
-    // Two weeks of day counters: enough for the formal test's whole week.
-    this.ledger = new Ledger(saved?.days ?? {}, 14)
     this.sleepRecord = saved?.sleep ?? {}
     // The body check: what her body cannot do here, now (physiology and plumbing). Safety is outside.
     ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
@@ -212,16 +209,8 @@ export class AnimaCore extends Service {
       return next()
     }, { prepend: true })
 
-    // Schedule tools are DSH's; Anima governs them like her own behaviors.
-    const thisSessionOnly = (args: Readonly<Record<string, unknown>>) => args.target === undefined || args.target === 'this_session'
-      ? undefined
-      : 'your alarms must use target "this_session", so they wake you in this session.'
-    this.governTool('schedule_create', { effect: 'internal', sessions: ['self'], constraint: thisSessionOnly })
-    this.governTool('schedule_edit', { effect: 'internal', sessions: ['self'], constraint: thisSessionOnly })
-    this.governTool('schedule_list', { effect: 'observe', sessions: ['self'] })
-    this.governTool('schedule_view', { effect: 'observe', sessions: ['self'] })
-
     this.registerOwnBehaviors()
+    this.registerAlarms()
 
     // The latest bedtime, and the end of a deliberate wake, pass on her clock (Phase 9).
     this.sleptSeen = this.asleep()
@@ -380,26 +369,6 @@ export class AnimaCore extends Service {
     return dayKey(t, this.config.day)
   }
 
-  /** Today's counters (read-only copy). */
-  todayLedger(t = this.clock.now()): Readonly<DayLedger> {
-    return this.ledger.peek(this.dayKey(t))
-  }
-
-  private today(t: number): DayLedger {
-    return this.ledger.day(this.dayKey(t))
-  }
-
-  /** Night wake-ups left tonight. */
-  nightWakesLeft(t = this.clock.now()): number {
-    return Math.max(0, this.config.modes.night.maxWakes - this.todayLedger(t).nightWakes)
-  }
-
-  /** Count one night wake-up. */
-  useNightWake(t = this.clock.now()): void {
-    this.today(t).nightWakes += 1
-    this.save()
-  }
-
   /**
    * Ask the outside whether something may happen now (`anima/admit`). The
    * persona never decides this itself: without a listener, it is admitted.
@@ -464,7 +433,7 @@ export class AnimaCore extends Service {
   }
 
   private save(): void {
-    writeJson(this.statePath, { self: this.self, days: this.ledger.toJSON(), sleep: this.sleepRecord } satisfies StateFile)
+    writeJson(this.statePath, { self: this.self, sleep: this.sleepRecord } satisfies StateFile)
   }
 
   private onBehaviorSuccess(name: string): void {
@@ -488,7 +457,7 @@ export class AnimaCore extends Service {
   registerBehavior(definition: ToolDefinition, meta: BehaviorMeta): () => void {
     const name = definition.name
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(name)) {
-      throw new AnimaError('anima/behavior-name', `"${name}" must match [A-Za-z0-9_-]{1,64}; use snake_case with a platform prefix such as local_say.`)
+      throw new AnimaError('anima/behavior-name', `"${name}" must match [A-Za-z0-9_-]{1,64}; use snake_case with a platform prefix such as qq_say.`)
     }
     if (meta.platform !== undefined && !name.startsWith(`${meta.platform}_`)) {
       throw new AnimaError('anima/behavior-name', `platform behavior "${name}" must start with "${meta.platform}_".`)
@@ -577,6 +546,71 @@ export class AnimaCore extends Service {
   /** Names of every registered or governed behavior, sorted. */
   behaviorNames(): string[] {
     return [...this.behaviorTable.keys()].sort()
+  }
+
+  /**
+   * Her alarms over DSH's schedule service (docs/design/body.md, Time). An alarm
+   * rings in the session she sets it from: plumbing, so nothing refuses a target.
+   */
+  private registerAlarms(): void {
+    const schedule = (): ScheduleLike => {
+      const service = this.ctx.get('schedule' as never) as ScheduleLike | undefined
+      if (service === undefined) throw new AnimaError('anima/no-schedule', 'DSH has no schedule service in this profile, so alarms cannot ring.')
+      return service
+    }
+    const here = (sessionId: string | undefined): string => {
+      if (sessionId === undefined) throw new AnimaError('anima/no-session', 'an alarm needs a session to ring in.')
+      return sessionId
+    }
+    const lines = {
+      schema: { type: 'object' as const, additionalProperties: false as const, properties: { lines: { type: 'array' as const, items: { type: 'string' as const }, required: true as const, description: 'One line per alarm.' } } },
+      render: (_args: unknown, value: { lines: string[] }) => [{ type: 'text' as const, text: value.lines.length === 0 ? '没有闹钟。' : value.lines.join('\n') }],
+    }
+    const meta = { effect: 'internal', sessions: ['self'] } as const
+
+    this.registerBehavior(defineTool({
+      name: 'alarm_set',
+      description: 'Set an alarm for yourself. It rings here, in this session, at the time on your clock, with your note.',
+      parameters: {
+        at: { type: 'string', required: true, description: 'When, local "HH:mm" or "YYYY-MM-DD HH:mm" on your clock.' },
+        note: { type: 'string', required: true, description: 'What the alarm is for; it is what you see when it rings.' },
+      },
+      output: lines,
+      execute: async (args, exec) => {
+        const sessionId = here(exec.agent?.id)
+        const plan = planAlarm(args.at, this.clock.now(), ms => this.clock.realDelay(ms))
+        const note = args.note.trim() === '' ? 'alarm' : args.note.trim()
+        const created = await schedule().create({ title: alarmTitle(plan.at), prompt: note, timing: { kind: 'after', after_seconds: plan.afterSeconds }, target: { kind: 'session', sessionId } }, sessionId)
+        return { lines: [`${created.id}: ${formatLocal(plan.at)} — ${note}`] }
+      },
+    }), meta)
+
+    this.registerBehavior(defineTool({
+      name: 'alarm_list',
+      description: 'List the alarms you set here that have not rung yet.',
+      parameters: {},
+      output: lines,
+      execute: async (_args, exec) => {
+        const sessionId = here(exec.agent?.id)
+        const { items } = await schedule().list({ active: true, limit: 500 })
+        return { lines: alarmsIn(items, sessionId).map(alarmLine) }
+      },
+    }), { ...meta, effect: 'observe' })
+
+    this.registerBehavior(defineTool({
+      name: 'alarm_cancel',
+      description: 'Cancel an alarm you set here, by its id from alarm_list.',
+      parameters: { id: { type: 'string', required: true, description: 'Alarm id.' } },
+      output: lines,
+      execute: async (args, exec) => {
+        const sessionId = here(exec.agent?.id)
+        const { items } = await schedule().list({ active: true, limit: 500 })
+        const alarm = alarmsIn(items, sessionId).find(item => item.id === args.id.trim())
+        if (alarm === undefined) throw new AnimaError('anima/unknown-alarm', `there is no alarm "${args.id}" here; alarm_list shows yours.`)
+        await schedule().edit({ id: alarm.id, action: 'delete' }, sessionId)
+        return { lines: [`cancelled ${alarmLine(alarm)}`] }
+      },
+    }), meta)
   }
 
   private registerOwnBehaviors(): void {
@@ -794,7 +828,6 @@ export class AnimaCore extends Service {
       energy: state.energy,
       mood: state.mood,
       needs: this.model.needs.map(need => ({ name: need.name, description: need.description, value: state.needs[need.name] ?? 0 })),
-      nightWakesLeft: this.nightWakesLeft(now),
       goals: this.goals.open().length,
       selfModel: { notes: this.selfModel.entries().length },
     }
@@ -875,7 +908,6 @@ export class AnimaCore extends Service {
       this.sleepLine(now),
       `Clock: ${formatLocal(now)} (${speed}); phase ${this.phase(now)}, mode ${this.mode(now)}, day ${this.dayKey(now)}`,
       ...this.stateText(),
-      `Night wake-ups left: ${this.nightWakesLeft(now)}`,
       `Open goals: ${goals.length === 0 ? 'none' : ''}`,
       ...goals.map(goal => `  ${describeGoal(goal)}`),
       `Behaviors: ${this.behaviorNames().join(', ') || '(none)'}`,

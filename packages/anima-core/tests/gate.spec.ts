@@ -3,17 +3,17 @@ import { bodyCheck, GateCode, visibleIn } from '../src/gate.ts'
 import type { BodyCall, BodyMoment } from '../src/gate.ts'
 import type { BehaviorMeta, SessionInfo } from '../src/types.ts'
 
-const local = { platform: 'local', account: 'owner', kind: 'private', id: 'owner' }
+const local = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' }
 const qq = { platform: 'qq', account: '1', kind: 'private', id: '2' }
-const localChat: SessionInfo = { kind: 'conversation', channel: local, channelKey: 'local:owner:private:owner' }
+const localChat: SessionInfo = { kind: 'conversation', channel: local, channelKey: 'demo:owner:private:owner' }
 const qqChat: SessionInfo = { kind: 'conversation', channel: qq, channelKey: 'qq:1:private:2' }
 const self: SessionInfo = { kind: 'self' }
 const triage: SessionInfo = { kind: 'triage' }
 
-const say: BehaviorMeta = { platform: 'local', effect: 'express', sessions: ['conversation'] }
-const browse: BehaviorMeta = { platform: 'local', effect: 'observe', sessions: ['conversation', 'self'] }
+const say: BehaviorMeta = { platform: 'demo', effect: 'express', sessions: ['conversation'] }
+const browse: BehaviorMeta = { platform: 'demo', effect: 'observe', sessions: ['conversation', 'self'] }
 const remember: BehaviorMeta = { effect: 'internal', sessions: ['conversation', 'self'] }
-const post: BehaviorMeta = { platform: 'local', effect: 'public', sessions: ['self'] }
+const post: BehaviorMeta = { platform: 'demo', effect: 'public', sessions: ['self'] }
 const open: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
 
 const day: BodyMoment = { mode: 'day', allowedEffects: { day: ['observe', 'internal', 'express', 'initiate', 'public'], night: ['observe', 'internal'] } }
@@ -44,12 +44,12 @@ describe('visibleIn', () => {
 
 describe('bodyCheck', () => {
   const cases: [string, BodyCall, string | undefined][] = [
-    ['allows a fitting call', call('local_say', say, localChat), undefined],
-    ['refuses outside Anima sessions', call('local_say', say, undefined), GateCode.notAnimaSession],
-    ['refuses the wrong session kind', call('local_say', say, self), GateCode.wrongSession],
+    ['allows a fitting call', call('demo_say', say, localChat), undefined],
+    ['refuses outside Anima sessions', call('demo_say', say, undefined), GateCode.notAnimaSession],
+    ['refuses the wrong session kind', call('demo_say', say, self), GateCode.wrongSession],
     ['refuses initiate from a conversation', call('open_conversation', open, localChat), GateCode.wrongSession],
-    ['refuses another platform', call('local_say', say, qqChat), GateCode.wrongPlatform],
-    ['refuses a platform public behavior from Self', call('local_post', post, self), GateCode.wrongPlatform],
+    ['refuses another platform', call('demo_say', say, qqChat), GateCode.wrongPlatform],
+    ['refuses a platform public behavior from Self', call('demo_post', post, self), GateCode.wrongPlatform],
     ['has no safety rule: a public behavior is the outside\'s business', call('core_post', { effect: 'public', sessions: ['self'] }, self), undefined],
   ]
   for (const [title, input, code] of cases) {
@@ -61,7 +61,7 @@ describe('bodyCheck', () => {
   }
 
   it('gives a hint she can act on', () => {
-    const verdict = bodyCheck(call('local_say', say, self), day)
+    const verdict = bodyCheck(call('demo_say', say, self), day)
     expect(verdict.allowed).toBe(false)
     if (!verdict.allowed) expect(verdict.hint).toContain('聊天')
   })
@@ -84,9 +84,9 @@ describe('bodyCheck', () => {
     expect(bodyCheck(call('open_conversation', open, self, { channel: 'qq:1:private:2' }), moment).allowed).toBe(true)
   })
 
-  it('applies argument constraints', () => {
-    const schedule: BehaviorMeta = { effect: 'internal', sessions: ['self'], constraint: args => args.target === 'this_session' ? undefined : 'use this_session' }
-    expect(bodyCheck(call('schedule_create', schedule, self, { target: 'new' }), day)).toMatchObject({ allowed: false, code: GateCode.notAllowed, hint: 'use this_session' })
-    expect(bodyCheck(call('schedule_create', schedule, self, { target: 'this_session' }), day).allowed).toBe(true)
+  it('has no policy on arguments: only her body refuses', () => {
+    expect(Object.values(GateCode)).not.toContain('anima/not-allowed')
+    const alarm: BehaviorMeta = { effect: 'internal', sessions: ['self'] }
+    expect(bodyCheck(call('alarm_set', alarm, self, { at: '21:00', note: 'anything' }), day).allowed).toBe(true)
   })
 })

@@ -49,7 +49,7 @@ describe('bedtime (DESIGN §7, Phase 9)', () => {
 
 describe('sleep, the latest bedtime and the owner wake (Phase 9)', () => {
   const self = { kind: 'self' } as const
-  const chat = { kind: 'conversation', channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' }, channelKey: 'local:owner:private:owner' } as const
+  const chat = { kind: 'conversation', channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' }, channelKey: 'demo:owner:private:owner' } as const
 
   async function core(start: string) {
     const ctx = await setupCore({ clock: { speed: 1, start } })
@@ -73,8 +73,8 @@ describe('sleep, the latest bedtime and the owner wake (Phase 9)', () => {
     expect(ctx.anima.bedtimeInfo()).toMatchObject({ asleep: true, since: at('2026-11-10T22:50'), by: 'her' })
     expect(records.filter(r => r.type === 'sleep')).toEqual([expect.objectContaining({ by: 'her', note: '今天好累', sessionId: 'c', day: '2026-11-10' })])
     // Asleep, a day behavior meets the night backstop in her words.
-    registerEcho(ctx, 'local_say', { platform: 'local', effect: 'express', sessions: ['conversation'] })
-    const said = await callAs(ctx, 'c', 'local_say', {})
+    registerEcho(ctx, 'demo_say', { platform: 'demo', effect: 'express', sessions: ['conversation'] })
+    const said = await callAs(ctx, 'c', 'demo_say', {})
     expect(textOf(said)).toMatch(/^Error: anima\/night: 你现在睡着了/)
     expect(records.filter(r => r.type === 'gate')).toEqual([expect.objectContaining({ code: 'anima/not-bedtime' }), expect.objectContaining({ code: 'anima/night' })])
   })

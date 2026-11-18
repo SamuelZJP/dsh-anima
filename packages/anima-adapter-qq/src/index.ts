@@ -23,7 +23,7 @@ import { displayNameOf, normalizeMessage, outgoing, renderSegments, segmentsOf, 
 import { emojiId, fetchCapped, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
 import { OneBotClient, type Health } from './onebot.ts'
 
-export { resolveQqConfig, type AllowEntry, type ResolvedQqConfig } from './config.ts'
+export { resolveQqConfig, type ResolvedQqConfig } from './config.ts'
 export { displayNameOf, normalizeMessage, outgoing, parseCQ, renderSegments, segmentsOf, type NormalizedMessage, type OneBotEvent, type RenderContext, type Rendered, type Segment } from './normalize.ts'
 export { backoff, connectUrl, OneBotClient, type ClientOptions, type Health } from './onebot.ts'
 export { emojiId, MediaBook, normalizeMediaId, sniffImage, type MediaEntry } from './media.ts'
@@ -65,14 +65,17 @@ export function qqChannelKey(account: string, kind: 'private' | 'group', id: str
   return `${PLATFORM}:${account}:${kind}:${id}`
 }
 
-/** The channels the config allows: the owner's private chat first. */
-export function allowedChannels(config: ResolvedQqConfig): PublishedChannel[] {
-  const base = { platform: PLATFORM, account: config.account }
-  return [
-    { ...base, kind: 'private', id: config.owner, display: `${config.ownerName} (QQ)`, isOwner: true },
-    ...config.allow.users.filter(user => user.id !== config.owner).map(user => ({ ...base, kind: 'private', id: user.id, display: `${user.name ?? `QQ ${user.id}`} (QQ)` })),
-    ...config.allow.groups.map(group => ({ ...base, kind: 'group', id: group.id, display: `${group.name ?? `group ${group.id}`} (QQ)` })),
-  ]
+/**
+ * A QQ chat as a published channel; the owner's private chat is marked as hers.
+ * @param config - adapter config.
+ * @param kind - private or group.
+ * @param id - the other person's user id, or the group id.
+ * @param name - display name, when known.
+ */
+export function qqChannel(config: ResolvedQqConfig, kind: 'private' | 'group', id: string, name?: string): PublishedChannel {
+  const base = { platform: PLATFORM, account: config.account, kind, id }
+  if (kind === 'private' && id === config.owner) return { ...base, display: `${config.ownerName} (QQ)`, isOwner: true }
+  return { ...base, display: `${name === undefined || name === '' ? kind === 'group' ? `group ${id}` : `QQ ${id}` : name} (QQ)` }
 }
 
 /**
@@ -86,11 +89,18 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
   const life = ctx.animaLife
   const herName = core.config.name
 
-  const channels = allowedChannels(config)
-  const byKey = new Map(channels.map(channel => [qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id), channel]))
-  const channelOf = (kind: 'private' | 'group', id: string) => byKey.get(qqChannelKey(config.account, kind, id))
-  // She has the chats this adapter is configured with; events from any other chat are dropped.
-  life.publish(channels)
+  // Every chat of the account is published; which ones may reach her is the guard's allowlist, outside.
+  const byKey = new Map<string, PublishedChannel>()
+  const channelOf = (kind: 'private' | 'group', id: string, name?: string): PublishedChannel => {
+    const key = qqChannelKey(config.account, kind, id)
+    const known = byKey.get(key)
+    if (known !== undefined) return known
+    const channel = qqChannel(config, kind, id, name)
+    byKey.set(key, channel)
+    life.publish([channel])
+    return channel
+  }
+  channelOf('private', config.owner)
 
   const names = new Map<string, string>()
   const sentIds = new Set<string>()
@@ -99,7 +109,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     if (sentIds.size > SENT_IDS) sentIds.delete(sentIds.values().next().value!)
   }
   const login = { ready: false, nickname: undefined as string | undefined, problem: undefined as string | undefined }
-  const counts = { delivered: 0, dropped: 0, sent: 0, typing: 0, read: 0 }
+  const counts = { delivered: 0, sent: 0, typing: 0, read: 0 }
   const media = new MediaBook(join(core.config.dataDir, 'qq', 'media.json'), config.look.cacheEntries)
   /** Rendering for one chat: images, stickers and forwards get ids that belong to it. */
   const renderIn = (chat: string) => ({
@@ -180,6 +190,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       login.nickname = info.nickname
       login.problem = undefined
       login.ready = true
+      await publishChats()
     } catch (error: unknown) {
       login.problem = `get_login_info failed: ${error instanceof Error ? error.message : String(error)}`
     }
@@ -257,11 +268,24 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     return `(replying to ${quote.who}, msg ${messageId}: ${JSON.stringify(snippet)})`
   }
 
-  const drop = () => { counts.dropped += 1 }
+  /** Publish every friend and group of the account (OneBot `get_friend_list`, `get_group_list`). */
+  async function publishChats(): Promise<void> {
+    try {
+      const friends = await client.call<{ user_id?: number | string; nickname?: string; remark?: string }[]>('get_friend_list')
+      for (const friend of friends ?? []) if (friend.user_id !== undefined) channelOf('private', String(friend.user_id), friend.remark || friend.nickname)
+    } catch (error: unknown) {
+      ctx.logger.warn(`anima qq: get_friend_list: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    try {
+      const groups = await client.call<{ group_id?: number | string; group_name?: string }[]>('get_group_list')
+      for (const group of groups ?? []) if (group.group_id !== undefined) channelOf('group', String(group.group_id), group.group_name)
+    } catch (error: unknown) {
+      ctx.logger.warn(`anima qq: get_group_list: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   async function deliverMessage(message: NormalizedMessage): Promise<void> {
-    const channel = channelOf(message.kind, message.chatId)
-    if (channel === undefined) return drop()
+    const channel = channelOf(message.kind, message.chatId, message.kind === 'private' ? message.displayName : undefined)
     names.set(message.userId, message.displayName)
     const isOwner = message.userId === config.owner
     if (isOwner && message.kind === 'private') {
@@ -318,7 +342,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     if (event.notice_type === 'notify' && event.sub_type === 'input_status') {
       if (userId === config.account) return
       const typingIn = channelOf('private', userId)
-      if (typingIn !== undefined && String(event.status_text ?? '') !== '') life.typing(typingIn)
+      if (String(event.status_text ?? '') !== '') life.typing(typingIn)
       counts.typing += 1
       return
     }
@@ -326,7 +350,6 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
     const channel = groupId === undefined ? channelOf('private', userId) : channelOf('group', groupId)
     if (event.notice_type === 'notify' && event.sub_type === 'poke') {
       if (String(event.target_id) !== config.account || userId === config.account) return
-      if (channel === undefined) return drop()
       const isOwner = userId === config.owner
       counts.delivered += 1
       await life.deliver({
@@ -375,7 +398,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
       throw new AnimaError('anima/no-channel', 'this session is not bound to a QQ chat.')
     }
     const channel = byKey.get(session.channelKey)
-    if (channel === undefined) throw new AnimaError('anima/not-allowlisted', 'this QQ chat is not on the owner\'s allowlist.')
+    if (channel === undefined) throw new AnimaError('anima/no-channel', 'this QQ chat is not known to the adapter.')
     return channel
   }
 
@@ -699,7 +722,7 @@ export function apply(ctx: Context, input: Partial<Config> | undefined): void {
           connects: health.connects,
           lastError: health.lastError ?? null,
           problem: login.problem ?? null,
-          allowlist: { owner: config.owner, users: config.allow.users, groups: config.allow.groups },
+          chats: { owner: config.owner, friends: [...byKey.values()].filter(c => c.kind === 'private').length, groups: [...byKey.values()].filter(c => c.kind === 'group').length },
           traffic: { ...counts },
         },
       }
@@ -717,7 +740,7 @@ function ago(at: number | undefined): string {
 }
 
 /** `/anima status` lines of the QQ adapter. */
-export function statusLines(config: ResolvedQqConfig, health: Health, login: { ready: boolean; nickname?: string | undefined; problem?: string | undefined }, counts: { delivered: number; dropped: number; sent: number }): string[] {
+export function statusLines(config: ResolvedQqConfig, health: Health, login: { ready: boolean; nickname?: string | undefined; problem?: string | undefined }, counts: { delivered: number; sent: number }): string[] {
   const state = health.state === 'open'
     ? `connected to ${config.url} as ${config.account}${login.nickname === undefined ? '' : ` (${login.nickname})`}${login.ready ? '' : ', not ready'}`
     : `${health.state}${health.retryInMs === undefined ? '' : `, retry in ${Math.round(health.retryInMs / 1000)} s`}`
@@ -725,7 +748,6 @@ export function statusLines(config: ResolvedQqConfig, health: Health, login: { r
     `QQ: ${state}; account ${health.state !== 'open' ? 'status unknown while disconnected' : health.online === false ? 'OFFLINE' : health.online === true ? 'online' : 'status unknown'}; last heartbeat ${ago(health.lastHeartbeat)}; connects ${health.connects}`,
     ...login.problem === undefined ? [] : [`QQ problem: ${login.problem}`],
     ...health.lastError === undefined ? [] : [`QQ last error: ${health.lastError}`],
-    `QQ allowlist: owner ${config.owner}; users ${config.allow.users.map(u => u.id).join(', ') || 'none'}; groups ${config.allow.groups.map(g => g.id).join(', ') || 'none'}`,
-    `QQ traffic: delivered ${counts.delivered}, dropped (not allowlisted) ${counts.dropped}, sent ${counts.sent}`,
+    `QQ traffic: delivered ${counts.delivered}, sent ${counts.sent}`,
   ]
 }

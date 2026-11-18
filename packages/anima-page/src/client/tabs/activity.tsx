@@ -1,4 +1,4 @@
-/** Activity tab: gate decisions, wakes, tokens, owner actions and speech reliability per her day. The formal test's monitoring view. */
+/** Activity tab: gate decisions, wakes, tokens and owner actions per her day. */
 import { useState } from 'react'
 import { view } from '../api.ts'
 import { clockTime, count, rankedCounts, stamp } from '../format.ts'
@@ -6,9 +6,8 @@ import { usePoll } from '../hooks.ts'
 import type { ActivityRecord, ActivityView } from '../types.ts'
 import { Card, Pill, Problem } from '../ui.tsx'
 
-type Filter = 'all' | 'refused' | 'gate' | 'wake' | 'owner' | 'platform' | 'speech'
+type Filter = 'all' | 'refused' | 'gate' | 'wake' | 'owner' | 'platform'
 
-const isSpeech = (r: ActivityRecord) => r.type === 'reminder' || r.type === 'lost-reply'
 
 function describe(r: ActivityRecord): { what: string; detail: string; tone?: string | undefined } {
   switch (r.type) {
@@ -19,8 +18,6 @@ function describe(r: ActivityRecord): { what: string; detail: string; tone?: str
     }
     case 'wake': return { what: r.stimulus, detail: `${r.session}${r.channel === undefined ? '' : ` · ${r.channel}`}` }
     case 'platform': return { what: `${r.platform} ${r.online ? 'online' : 'offline'}`, detail: r.reason ?? '', tone: r.online ? 'ok' : 'bad' }
-    case 'reminder': return { what: `close reminder ${r.count ?? ''}`.trim(), detail: `${r.channel}${r.text === '' ? '' : ` · her text: ${r.text.slice(0, 160)}`}`, tone: 'warn' }
-    case 'lost-reply': return { what: 'lost reply', detail: `${r.channel} · the turn ended without a say or end_turn${r.text === '' ? '' : `; her text (nobody saw it): ${r.text.slice(0, 200)}`}`, tone: 'bad' }
     default: return { what: r.action, detail: `${r.source} · ${JSON.stringify(r.args).slice(0, 160)}${r.ok ? '' : ` · failed: ${r.error ?? ''}`}`, tone: r.ok ? undefined : 'bad' }
   }
 }
@@ -32,8 +29,7 @@ export function ActivityTab() {
   const a = activity.data
   if (a === undefined) return <Problem error={activity.error} />
   const s = a.summary
-  const records = a.records.filter(r => filter === 'all' || (filter === 'refused' ? r.type === 'gate' && (r.decision === 'refused' || r.decision === 'denied') : filter === 'speech' ? isSpeech(r) : r.type === filter)).slice().reverse()
-  const speech = s.speech ?? { reminders: 0, lostReplies: 0 }
+  const records = a.records.filter(r => filter === 'all' || (filter === 'refused' ? r.type === 'gate' && (r.decision === 'refused' || r.decision === 'denied') : r.type === filter)).slice().reverse()
   const pick = (d: string) => setDay(d)
   return (
     <>
@@ -57,13 +53,9 @@ export function ActivityTab() {
           <div className="anima-big">{count(s.tokens.day + s.tokens.night)}</div>
           <div className="anima-muted">day {count(s.tokens.day)} · night {count(s.tokens.night)}</div>
         </Card>
-        <Card title="Lost replies · reminders">
-          <div className="anima-big">{speech.lostReplies === 0 ? '0' : <Pill tone="bad">{speech.lostReplies}</Pill>} · {speech.reminders}</div>
-          <div className="anima-muted">conversation turns that ended without a say or end_turn · close reminders steered in</div>
-        </Card>
-        <Card title="Initiated · night wakes · owner">
-          <div className="anima-big">{s.initiates} · {s.nightWakes} · {s.ownerActions}</div>
-          <div className="anima-muted">conversations she started · night wake-ups · owner actions</div>
+        <Card title="Initiated · owner">
+          <div className="anima-big">{s.initiates} · {s.ownerActions}</div>
+          <div className="anima-muted">conversations she started · owner actions</div>
         </Card>
       </div>
       <div className="anima-grid">
@@ -80,7 +72,7 @@ export function ActivityTab() {
       <div className="anima-section">
         <h2>Log</h2>
         <div className="anima-row" role="radiogroup" aria-label="Filter">
-          {(['all', 'refused', 'gate', 'wake', 'owner', 'platform', 'speech'] as Filter[]).map(f => (
+          {(['all', 'refused', 'gate', 'wake', 'owner', 'platform'] as Filter[]).map(f => (
             <button key={f} type="button" className={`anima-btn small${filter === f ? ' primary' : ''}`} aria-pressed={filter === f} onClick={() => setFilter(f)}>{f}</button>
           ))}
         </div>

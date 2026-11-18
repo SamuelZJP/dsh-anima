@@ -41,6 +41,8 @@ export interface GateMoment {
   readonly ownerLine?: boolean
   /** Whether a channel is one of the owner's own (for `approve` rules with `targets: others`). */
   readonly ownerChannel?: (channelKey: string) => boolean
+  /** Whether a channel is on the allowlist; every channel is when omitted. */
+  readonly allowedChannel?: (channelKey: string) => boolean
 }
 
 /** Moment used when the caller gives none: nothing spent, consent everywhere. */
@@ -69,6 +71,7 @@ export const GuardCode = {
   noConsent: 'anima/no-consent',
   overLimit: 'anima/over-limit',
   denied: 'anima/denied',
+  notAllowlisted: 'anima/not-allowlisted',
 } as const
 
 /** Every refusal of the guard starts with this, so she knows it came from outside her. */
@@ -203,7 +206,7 @@ export class QuotaBook {
 }
 
 /**
- * Decide one behavior call. Checks, in order: fact limits, token budget,
+ * Decide one behavior call. Checks, in order: the allowlist, fact limits, token budget,
  * conversations she starts (daily count, quiet hours, consent), quotas, and
  * last whether owner approval is needed. Does not record usage.
  */
@@ -211,6 +214,11 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   const { meta, name } = call
   const args = call.args ?? {}
   const target = meta.target?.(args)
+  // The allowlist is about contact with a chat; what stays inside her (ending a turn, a memory) is never refused by it.
+  const channel = target ?? (call.session?.kind === 'conversation' ? call.session.channelKey : undefined)
+  if (channel !== undefined && meta.effect !== 'internal' && moment.allowedChannel?.(channel) === false) {
+    return deny(GuardCode.notAllowlisted, `${OUTSIDE}主人没有让你接触 ${channel}。`)
+  }
   for (const rule of policy.limits ?? []) {
     if (rule.behavior !== name) continue
     const value = call.facts?.[rule.fact]

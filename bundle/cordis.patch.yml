@@ -1,5 +1,7 @@
-# Anima bundle layer. Root-level rows register into DSH's global layer; Anima
-# behaviors hide themselves outside Anima sessions (tool `when` conditions).
+# The Anima plugin: the persona itself (docs/CONSTITUTION.md). Only persona rows
+# live here; anima-guard and anima-page are outside her and ship in guard-bundle.
+# Root-level rows register into DSH's global layer; Anima behaviors hide
+# themselves outside Anima sessions (tool `when` conditions).
 - insert:
     - id: anima-core
       name: '@anima/core'
@@ -7,9 +9,7 @@
       name: '@anima/life'
     - id: anima-memory
       name: '@anima/memory'
-    - id: anima-adapter-local
-      name: '@anima/adapter-local'
-    # QQ over OneBot v11 (NapCatQQ or any OneBot v11 runtime). Disabled here
+    # QQ over OneBot v11 (NotRainMeow or any OneBot v11 runtime). Disabled here
     # because it needs url, account and owner; a profile patch or --patch
     # overlay enables it with that config (docs/design/channels.md).
     - id: anima-adapter-qq
@@ -21,12 +21,3 @@
     - id: anima-adapter-bili
       name: '@anima/adapter-bili'
       disabled: true
-    # Outside the persona: the safety gate, approvals, outbox hold, budgets,
-    # pause, activity log and the /anima owner command (docs/design/outside.md).
-    # Disable this row and she runs with no restriction but her physiology.
-    - id: anima-guard
-      name: '@anima/guard'
-    # The Anima page in DSH's web UI (sidebar entry, tabs); owner routes under
-    # /api/anima, over anima-guard's owner surface.
-    - id: anima-page
-      name: '@anima/page'

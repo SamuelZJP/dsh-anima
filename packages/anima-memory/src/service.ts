@@ -276,7 +276,7 @@ export class AnimaMemory extends Service {
     }
     this.decayIfDue(now)
     const oldest = this.store.oldestPending()
-    if (this.run === undefined && oldest !== undefined && core.admit({ kind: 'turn', purpose: 'consolidation' }) === undefined
+    if (this.run === undefined && oldest !== undefined
       && now - oldest > this.config.consolidation.fallbackHours * HOUR) {
       this.consolidate('fallback').catch((error: unknown) => this.ctx.logger.warn(`anima-memory: fallback consolidation failed: ${error instanceof Error ? error.message : String(error)}`))
     }

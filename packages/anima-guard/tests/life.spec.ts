@@ -33,8 +33,8 @@ class FakeHost implements SessionHost<FakeAgent> {
 const group: PublishedChannel = { platform: 'qq', account: '10', kind: 'group', id: '42', display: 'Test group' }
 const groupKey = 'qq:10:group:42'
 const groupSession = conversationSessionId('anima', groupKey)
-const owner: PublishedChannel = { platform: 'local', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)', isOwner: true }
-const ownerKey = 'local:owner:private:owner'
+const owner: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)', isOwner: true }
+const ownerKey = 'demo:owner:private:owner'
 const ownerSession = conversationSessionId('anima', ownerKey)
 const bob = { platformUserId: '2001', displayName: 'Bob', isOwner: false }
 const triageSession = groupTriageSessionId('anima', '2026-11-10')
@@ -51,14 +51,15 @@ async function setup(guard: Partial<animaGuard.Config> = {}, start = '2026-11-10
   ctx.anima.setClock(() => clock.now)
   const host = new FakeHost()
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05, maxBatch: 3, timeoutSeconds: 0.3 } } })
-  await ctx.plugin(animaGuard, { outbox: { delaySeconds: 0.2, notifyOwner: false, offlineHoldMinutes: 30 }, ...guard })
+  // The QQ test chats are on the allowlist; the allowlist itself is tested in allowlist.spec.ts.
+  await ctx.plugin(animaGuard, { outbox: { delaySeconds: 0.2, notifyOwner: false, offlineHoldMinutes: 30 }, allowlist: { qq: { open: true, users: [], groups: [] } }, ...guard })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
   const sent: string[] = []
   ctx.anima.registerBehavior(defineTool({
-    name: 'local_say', description: 'say', parameters: { text: { type: 'string', required: true } },
+    name: 'demo_say', description: 'say', parameters: { text: { type: 'string', required: true } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
     async execute(args) { sent.push(args.text); return { ok: true } },
-  }), { platform: 'local', effect: 'express', sessions: ['conversation'] })
+  }), { platform: 'demo', effect: 'express', sessions: ['conversation'] })
   return { ctx, host, clock, sent }
 }
 
@@ -74,21 +75,21 @@ describe('outbox: a message she started waits outside the persona', () => {
   it('holds only messages that answer an intent, and the owner can cancel them', async () => {
     const { ctx, sent } = await setup()
     // An ordinary reply goes out at once.
-    expect((await callAs(ctx, ownerSession, 'local_say', { text: 'reply' })).isError).toBe(false)
+    expect((await callAs(ctx, ownerSession, 'demo_say', { text: 'reply' })).isError).toBe(false)
     expect(sent).toEqual(['reply'])
 
     expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: ownerKey, intent: 'say hi' })).isError).toBe(false)
     event(ctx, ownerSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i1' } })
-    const held = callAs(ctx, ownerSession, 'local_say', { text: 'good morning!' })
+    const held = callAs(ctx, ownerSession, 'demo_say', { text: 'good morning!' })
     await vi.waitFor(() => expect(ctx.animaGuard.outbox.list()).toHaveLength(1))
-    expect((await invoke(ctx, 'outbox')).text).toContain('o1 → Owner (local)')
+    expect((await invoke(ctx, 'outbox')).text).toContain('o1 → Owner (demo)')
     expect(sent).toEqual(['reply'])
     expect((await held).isError).toBe(false)
     expect(sent).toEqual(['reply', 'good morning!'])
 
     await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: ownerKey, intent: 'again' })
     event(ctx, ownerSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i2' } })
-    const cancelled = callAs(ctx, ownerSession, 'local_say', { text: 'second' })
+    const cancelled = callAs(ctx, ownerSession, 'demo_say', { text: 'second' })
     await vi.waitFor(() => expect(ctx.animaGuard.outbox.list()).toHaveLength(1))
     expect(ctx.bail('anima/owner-message', 'cancel o2')).toBe('Cancelled o2; it will not be sent.')
     const result = await cancelled
@@ -134,11 +135,11 @@ describe('outbox through a disconnect', () => {
     const { ctx, sent } = await setup({ outbox: { delaySeconds: 0.05, notifyOwner: false, offlineHoldMinutes: 1 } })
     await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: ownerKey, intent: 'hi' })
     event(ctx, ownerSession, 'user/message', { source: { kind: 'anima-stimulus', ref: 'i1' } })
-    ctx.animaLife.platformStatus('local', false, 'test drop')
-    const said = callAs(ctx, ownerSession, 'local_say', { text: 'still here' })
+    ctx.animaLife.platformStatus('demo', false, 'test drop')
+    const said = callAs(ctx, ownerSession, 'demo_say', { text: 'still here' })
     await vi.waitFor(() => expect(ctx.animaGuard.outbox.list()[0]?.offlineSince).toBeDefined())
     expect(sent).toEqual([])
-    ctx.animaLife.platformStatus('local', true)
+    ctx.animaLife.platformStatus('demo', true)
     expect((await said).isError).toBe(false)
     expect(sent).toEqual(['still here'])
   })
@@ -156,7 +157,7 @@ describe('outbox unit', () => {
     const held = outbox.hold({ sessionId: 's', channelKey: 'qq:1:private:2', display: 'd', text: 't', intentId: 'i1' }, { online: () => online })
     await new Promise(resolve => setTimeout(resolve, 40))
     expect(outbox.list()[0]?.offlineSince).toBeDefined()
-    expect(outbox.release('local')).toBe(0)
+    expect(outbox.release('demo')).toBe(0)
     online = true
     expect(outbox.release('qq')).toBe(1)
     expect(await held).toBe('send')
@@ -207,7 +208,7 @@ describe('/anima self', () => {
   it('delivers owner text to the Self session, naming the channels she can reach', async () => {
     const { ctx, host } = await setup()
     expect(await invoke(ctx, 'self how are you?')).toMatchObject({ kind: 'success' })
-    expect(host.sessions.get(selfSessionId('anima'))!.inbox[0]).toContain('The owner says: how are you?\nChannels you can reach: Owner (local): "local:owner:private:owner"; Test group: "qq:10:group:42".')
+    expect(host.sessions.get(selfSessionId('anima'))!.inbox[0]).toContain('The owner says: how are you?\nChannels you can reach: Owner (demo): "demo:owner:private:owner"; Test group: "qq:10:group:42".')
   })
 })
 

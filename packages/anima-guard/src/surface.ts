@@ -119,8 +119,8 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
   const action = (name: string, args: Readonly<Record<string, unknown>> = {}) => guard.ownerAction(name, args, 'command')
   guard.addSubcommand({ name: 'status', usage: 'status — state, budgets, sessions and quota usage', run: () => ({ kind: 'success', text: guard.statusText() }) })
   guard.addSubcommand({
-    name: 'pause', usage: 'pause — refuse every Anima behavior and stop heartbeats until resumed',
-    run: async () => { await action('pause'); return { kind: 'success', text: 'Anima paused. Every behavior is refused and heartbeats stop until /anima resume.' } },
+    name: 'pause', usage: 'pause — nothing reaches her and every behavior is refused until resumed; her body runs on',
+    run: async () => { await action('pause'); return { kind: 'success', text: 'Anima paused. Nothing reaches her and every behavior is refused until /anima resume; her heart keeps beating.' } },
   })
   guard.addSubcommand({ name: 'resume', usage: 'resume — lift a pause', run: async () => { await action('resume'); return { kind: 'success', text: 'Anima resumed.' } } })
   guard.addSubcommand({
@@ -219,11 +219,6 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
       })),
     }), ctx)
 
-    guard.addOwnerAction('heartbeat', async () => {
-      await life.beat()
-      return { day: core.dayKey() }
-    }, ctx)
-
     guard.addSubcommand({
       name: 'self', usage: 'self [text] — open her Self session; with text, deliver it there as an owner notice',
       run: async (args) => {
@@ -236,13 +231,6 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
         const text = `The owner says: ${args}\nChannels you can reach: ${reachable.join('; ') || 'none'}.`
         const id = await life.deliver({ type: 'notice', text, ts: core.clock.now() })
         return { kind: 'success', text: `Delivered to the Self session ${id}.` }
-      },
-    }, ctx)
-    guard.addSubcommand({
-      name: 'heartbeat', usage: 'heartbeat — run a heartbeat now instead of at the scheduled time',
-      run: async () => {
-        await action('heartbeat')
-        return { kind: 'success', text: `Heartbeat delivered to the triage session of ${core.dayKey()}.` }
       },
     }, ctx)
     guard.addSubcommand({

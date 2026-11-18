@@ -69,18 +69,18 @@ describe('environment primer (DESIGN §9)', () => {
     const channels: Record<string, { isOwner: boolean; display: string; note?: string }> = {
       'qq:1:private:2': { isOwner: true, display: 'Sam' },
       'qq:1:group:9': { isOwner: false, display: 'Book club' },
-      'local:owner:private:owner': { isOwner: true, display: 'Owner (local)', note: '主人在网页里读这个聊天。' },
+      'demo:owner:private:owner': { isOwner: true, display: 'Owner (demo)', note: '主人在网页里读这个聊天。' },
     }
     ctx.anima.provideChannels(key => channels[key], () => Object.keys(channels))
     const qqPrivate = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } as const
     const qqGroup = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'group', id: '9' }, channelKey: 'qq:1:group:9' } as const
-    const local = { kind: 'conversation', channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' }, channelKey: 'local:owner:private:owner' } as const
+    const local = { kind: 'conversation', channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' }, channelKey: 'demo:owner:private:owner' } as const
     provideSessions(ctx, { p: qqPrivate, g: qqGroup, l: local, s: { kind: 'self' } })
     const conv = { sessions: ['conversation'] } as const
     registerEcho(ctx, 'qq_say', { platform: 'qq', effect: 'express', ...conv, ...SAY_META })
     registerEcho(ctx, 'qq_poke', { platform: 'qq', effect: 'express', ...conv })
     registerEcho(ctx, 'qq_look', { platform: 'qq', effect: 'observe', ...conv })
-    registerEcho(ctx, 'local_say', { platform: 'local', effect: 'express', ...conv, ...SAY_META })
+    registerEcho(ctx, 'demo_say', { platform: 'demo', effect: 'express', ...conv, ...SAY_META })
     registerEcho(ctx, 'end_turn', { effect: 'internal', ...conv, closes: true })
     registerEcho(ctx, 'memory_recall', { effect: 'observe', sessions: ['conversation', 'self'] })
     registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'] })
@@ -101,11 +101,11 @@ describe('environment primer (DESIGN §9)', () => {
     expect(t).toContain('- 能看的：`qq_look`、`memory_recall`。')
     // No limits of her own: what may stop her here is told only from outside.
     expect(t).not.toContain('外面可能拦住你的事')
-    expect(t).not.toContain('local_say')
+    expect(t).not.toContain('demo_say')
     expect(t).not.toContain('open_conversation')
   })
 
-  it('says everyone in a group reads her, and gives the local chat its adapter note', async () => {
+  it('says everyone in a group reads her, and gives a chat its adapter note', async () => {
     const ctx = await world()
     const group = text(ctx, 'g', 'conversation')
     expect(group).toContain('- 这里是 QQ 群「Book club」')
@@ -113,7 +113,7 @@ describe('environment primer (DESIGN §9)', () => {
     expect(group).toContain('只会在这个群里再想起来')
     const local = text(ctx, 'l', 'conversation')
     expect(local).toContain('- 主人在网页里读这个聊天。')
-    expect(local).toContain('- 怎么说话：`local_say`。')
+    expect(local).toContain('- 怎么说话：`demo_say`。')
     expect(local).not.toContain('qq_')
   })
 
@@ -122,7 +122,7 @@ describe('environment primer (DESIGN §9)', () => {
     const t = text(ctx, 's', 'self')
     expect(t).toContain('- 这里是你的 Self：你的内心。')
     expect(t).toContain('- QQ：你能联系 2 个频道，用 `open_conversation` 去那里说话。')
-    expect(t).toContain('- 本地：你能联系 1 个频道')
+    expect(t).toContain('- demo：你能联系 1 个频道')
     expect(t).toContain('- B站：你只能看，那里没有人看得到你，你也不能在那里说话。')
     expect(t).toContain('- 去和人说话：`open_conversation`。')
     expect(t).toContain('- 结束：`rest`。')

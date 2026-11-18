@@ -77,8 +77,6 @@ export interface BehaviorMeta {
    * quotas when the calling session is not that channel's conversation.
    */
   readonly target?: (args: Readonly<Record<string, unknown>>) => string | undefined
-  /** Owner policy on arguments: a hint when these arguments are not allowed. */
-  readonly constraint?: (args: Readonly<Record<string, unknown>>) => string | undefined
   /**
    * Numeric facts about a call (e.g. a video's `durationSeconds`), checked
    * against the owner's `limits` rules before it runs. Failing to find the
@@ -142,16 +140,16 @@ export interface OwnerLine {
 }
 
 /**
- * Something the persona is about to do that the outside may stop
- * (`anima/admit`, docs/design/outside.md). Without a listener, everything is admitted.
- * - `reach`: whether anything may reach her now (a message, a notice).
- * - `turn`: whether code may start a model turn for her (`heartbeat`, `group-triage`, `consolidation`).
- * - `wake`: a wake that is not a tool call, counted outside (`group_attention` in a channel).
+ * Something from the world that the outside may stop before it reaches her, or a
+ * fact the outside gives her report (`anima/admit`, docs/design/outside.md).
+ * Without a listener, everything is admitted. The outside never reaches into her
+ * physiology: there is no request for her heartbeat, her sleep or her consolidation.
+ * - `reach`: whether a stimulus may reach her now; `channelKey` when it comes from a chat (the allowlist).
+ * - `wake`: a stimulus that is not a tool call, counted outside (`group_attention` in a channel).
  * - `initiate`: whether she may start a conversation in a channel (for her report).
  */
 export type AdmitRequest =
-  | { readonly kind: 'reach' }
-  | { readonly kind: 'turn'; readonly purpose: 'heartbeat' | 'group-triage' | 'consolidation' }
+  | { readonly kind: 'reach'; readonly channelKey?: string | undefined }
   | { readonly kind: 'wake'; readonly name: string; readonly channelKey: string }
   | { readonly kind: 'initiate'; readonly channelKey: string }
 
@@ -161,8 +159,11 @@ export interface AdmitRefusal {
   readonly code: string
   /** Short reason word for records and her inbox (`paused`, `over-budget`). */
   readonly reason: string
-  /** Try again at her next waking rather than soon (a spent daily budget). */
-  readonly untilWake?: boolean
+  /**
+   * The stimulus never reaches her and is not kept for later (a chat not on the
+   * allowlist). Without it, a refused stimulus waits in her inbox (a pause).
+   */
+  readonly drop?: boolean
 }
 
 /** A friend request an adapter received; whoever handles it outside answers it (`anima/friend-request`). */

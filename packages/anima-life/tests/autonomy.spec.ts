@@ -9,74 +9,23 @@ import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import type { AdmitRefusal, AdmitRequest } from '@anima/core'
 import * as animaCore from '@anima/core'
-import { formatLocal, resolveRhythm } from '@anima/core'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { alarmPrompts, AnimaLife, buildReport, conversationSessionId, IntentTracker, nextHeartbeat, selfSessionId, triageSessionId } from '../src/index.ts'
+import { alarmPrompts, AnimaLife, buildReport, conversationSessionId, IntentTracker, nextBeat, selfSessionId, triageSessionId } from '../src/index.ts'
 import type { ModelChoice, PublishedChannel, SessionHost } from '../src/index.ts'
 
 const at = (text: string) => new Date(text).getTime()
-const rhythm = resolveRhythm({ wake: '07:30', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
-const bounds = { rhythm, minMinutes: 20, maxMinutes: 240, defaultMinutes: 60 }
 
-describe('nextHeartbeat', () => {
-  const noon = at('2026-11-10T12:00')
-
-  it('takes her time when it is within bounds', () => {
-    expect(nextHeartbeat({ ...bounds, now: noon, requested: at('2026-11-10T13:30'), nightWakesLeft: 1 })).toEqual({ at: at('2026-11-10T13:30'), nightWake: false })
-  })
-
-  it('clamps to the minimum and maximum interval', () => {
-    const early = nextHeartbeat({ ...bounds, now: noon, requested: noon + 5 * 60_000, nightWakesLeft: 1 })
-    expect(early.at).toBe(noon + 20 * 60_000)
-    expect(early.adjusted).toContain('earliest')
-    const late = nextHeartbeat({ ...bounds, now: noon, requested: at('2026-11-10T20:00'), nightWakesLeft: 1 })
-    expect(late.at).toBe(noon + 240 * 60_000)
-    expect(late.adjusted).toContain('latest')
-  })
-
-  it('uses the default interval when she gives none', () => {
-    expect(nextHeartbeat({ ...bounds, now: noon, nightWakesLeft: 1 }).at).toBe(noon + 60 * 60_000)
-  })
-
-  it('moves a heartbeat that falls into the night to the next wake', () => {
-    const next = nextHeartbeat({ ...bounds, now: at('2026-11-10T23:00'), nightWakesLeft: 1 })
-    expect(formatLocal(next.at)).toBe('2026-11-11 07:30')
-    expect(next.nightWake).toBe(false)
-    const asked = nextHeartbeat({ ...bounds, now: at('2026-11-10T22:00'), requested: at('2026-11-11T08:00'), nightWakesLeft: 1 })
-    expect(formatLocal(asked.at)).toBe('2026-11-11 07:30')
-  })
-
-  it('never skips a night shorter than the maximum interval (Phase 9 supervised session)', () => {
-    // Bedtime 22:30–23:00, wake 23:20: a 4 h rest at 22:26 lands at 02:26 of her next day.
-    const short = resolveRhythm({ wake: '23:20', bedtime: { earliest: '22:30', latest: '23:00', wokenMinutes: 20 }, wakingMinutes: 20, evening: '18:00', windDownMinutes: 30 })
-    const next = nextHeartbeat({ ...bounds, rhythm: short, now: at('2026-11-13T22:26'), requested: at('2026-11-14T02:26'), nightWakesLeft: 1 })
-    expect(formatLocal(next.at)).toBe('2026-11-13 23:20')
-    expect(next.nightWake).toBe(false)
-  })
-
-  it('allows one night wake-up she asks for, then sleeps until wake', () => {
-    const night = nextHeartbeat({ ...bounds, now: at('2026-11-10T23:00'), requested: at('2026-11-11T03:00'), nightWakesLeft: 1 })
-    expect(night).toEqual({ at: at('2026-11-11T03:00'), nightWake: true })
-    const none = nextHeartbeat({ ...bounds, now: at('2026-11-11T03:00'), requested: at('2026-11-11T05:00'), nightWakesLeft: 0 })
-    expect(formatLocal(none.at)).toBe('2026-11-11 07:30')
-    expect(none.adjusted).toContain('no night wake-up is left')
-  })
-
-  it('keeps every daytime heartbeat within bounds', () => {
-    for (let minute = 8 * 60 + 30; minute < 19 * 60; minute += 37) {
-      const now = at('2026-11-10T00:00') + minute * 60_000
-      for (const offset of [-30, 0, 1, 19, 20, 100, 240, 241, 900]) {
-        const next = nextHeartbeat({ ...bounds, now, requested: now + offset * 60_000, nightWakesLeft: 1 })
-        expect(next.at - now).toBeGreaterThanOrEqual(20 * 60_000)
-        expect(next.at - now).toBeLessThanOrEqual(240 * 60_000)
-      }
-    }
+describe('nextBeat', () => {
+  it('is her resting rhythm and nothing else', () => {
+    const noon = at('2026-11-10T12:00')
+    expect(nextBeat(noon, 60)).toBe(at('2026-11-10T13:00'))
+    expect(nextBeat(at('2026-11-11T02:00'), 45)).toBe(at('2026-11-11T02:45'))
   })
 })
 
 describe('IntentTracker', () => {
-  const intent = { id: 'i1', sessionId: 'c1', channelKey: 'local:owner:private:owner', display: 'Owner (local)', intent: 'say hi', at: 0 }
-  const isSay = (name: string) => name === 'local_say'
+  const intent = { id: 'i1', sessionId: 'c1', channelKey: 'demo:owner:private:owner', display: 'Owner (demo)', intent: 'say hi', at: 0 }
+  const isSay = (name: string) => name === 'demo_say'
 
   function claimed() {
     const tracker = new IntentTracker({ pending: [], active: [], awaitingReply: [] }, isSay)
@@ -87,11 +36,11 @@ describe('IntentTracker', () => {
 
   it('reports sent, then replied on the next owner message', () => {
     const tracker = claimed()
-    tracker.onToolCall('c1', 'a', 'local_say')
+    tracker.onToolCall('c1', 'a', 'demo_say')
     expect(tracker.onToolResult('c1', 'a', false)).toMatchObject({ kind: 'sent' })
     expect(tracker.onTurnEnd('c1')).toBeUndefined()
-    expect(tracker.onOwnerMessage('local:owner:private:owner')).toMatchObject({ kind: 'replied' })
-    expect(tracker.onOwnerMessage('local:owner:private:owner')).toBeUndefined()
+    expect(tracker.onOwnerMessage('demo:owner:private:owner')).toMatchObject({ kind: 'replied' })
+    expect(tracker.onOwnerMessage('demo:owner:private:owner')).toBeUndefined()
   })
 
   it('reports a decline with the end_turn reason', () => {
@@ -109,7 +58,7 @@ describe('IntentTracker', () => {
 
   it('reports a failed say', () => {
     const tracker = claimed()
-    tracker.onToolCall('c1', 'a', 'local_say')
+    tracker.onToolCall('c1', 'a', 'demo_say')
     expect(tracker.onToolResult('c1', 'a', true, 'Error: anima/over-quota: …')).toMatchObject({ kind: 'failed', detail: 'Error: anima/over-quota: …' })
   })
 
@@ -131,13 +80,13 @@ describe('situation report', () => {
       time: 'Tue 2026-11-10 12:00', phase: 'day', mode: 'day',
       state: ['energy 0.80'], goals: ['g1 [owner] ask about the exam'], events: [],
       budgets: ['conversations you may still start today: 3 of 3'],
-      channels: [{ key: 'local:owner:private:owner', display: 'Owner (local)', mayInitiate: true, lastContact: now - 3 * 3_600_000 }],
+      channels: [{ key: 'demo:owner:private:owner', display: 'Owner (demo)', mayInitiate: true, lastContact: now - 3 * 3_600_000 }],
       now,
     })
     expect(text).toContain('Time Tue 2026-11-10 12:00; phase day.')
     expect(text).toContain('Since your last heartbeat: nothing new')
     expect(text).toContain('  g1 [owner] ask about the exam')
-    expect(text).toContain('Owner (local) — channel "local:owner:private:owner"; you may start a conversation; last message 3 h ago')
+    expect(text).toContain('Owner (demo) — channel "demo:owner:private:owner"; you may start a conversation; last message 3 h ago')
   })
 })
 
@@ -162,8 +111,8 @@ class FakeHost implements SessionHost<FakeAgent> {
   isBusy(agent: FakeAgent) { return this.busy.has(agent.id) }
 }
 
-const owner: PublishedChannel = { platform: 'local', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)', isOwner: true }
-const ownerKey = 'local:owner:private:owner'
+const owner: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)', isOwner: true }
+const ownerKey = 'demo:owner:private:owner'
 
 async function setup(start: string, config: Record<string, unknown> = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), 'anima-auto-'))
@@ -185,10 +134,10 @@ async function setup(start: string, config: Record<string, unknown> = {}) {
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner]) } })
   // A stand-in say behavior for the local platform.
   ctx.anima.registerBehavior((await import('@deepseek-ai/dsh-tools')).defineTool({
-    name: 'local_say', description: 'say', parameters: { text: { type: 'string' } },
+    name: 'demo_say', description: 'say', parameters: { text: { type: 'string' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
     async execute() { return { ok: true } },
-  }), { platform: 'local', effect: 'express', sessions: ['conversation'], closes: args => args.more !== true })
+  }), { platform: 'demo', effect: 'express', sessions: ['conversation'], closes: args => args.more !== true })
   return { ctx, host, clock, outside, recorded }
 }
 
@@ -218,19 +167,21 @@ describe('heartbeat loop', () => {
     expect(triage.preset).toBe('anima-triage')
     expect(triage.models).toEqual([{ provider: 'deepseek-official', model: 'deepseek-flash' }])
     expect(triage.inbox[0]).toMatch(/^\[Tue 2026-11-10 10:00\] \[心跳\]\nTime Tue 2026-11-10 10:00; phase day\./)
-    expect(triage.inbox[0]).toContain('channel "local:owner:private:owner"; you may start a conversation')
+    expect(triage.inbox[0]).toContain('channel "demo:owner:private:owner"; you may start a conversation')
     expect(triage.inbox[0]).toContain('heartbeat_act(reason)')
     expect(ctx.anima.describeSession(triage.id)).toEqual({ kind: 'triage' })
   })
 
-  it('rest schedules the next heartbeat within bounds and ends the turn', async () => {
+  it('rest only ends the turn: her heart keeps its own rhythm', async () => {
     const { ctx } = await setup('2026-11-10T10:00')
     await ctx.animaLife.beat()
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T11:00'))
     const triageId = triageSessionId('anima', '2026-11-10')
-    const result = await callAs(ctx, triageId, 'rest', { until: '10:05' })
-    expect(result.text).toBe('Resting. Next heartbeat 2026-11-10 10:20 (moved to the earliest allowed, 20 min from now).')
-    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:20'))
-    expect((await callAs(ctx, triageId, 'rest', { until: 'later' })).text).toMatch(/anima\/bad-time/)
+    expect(await callAs(ctx, triageId, 'rest')).toEqual({ isError: false, text: 'Resting.' })
+    // Whatever she passes, rest moves nothing in her body.
+    await callAs(ctx, triageId, 'rest', { until: '10:05' })
+    await callAs(ctx, triageId, 'rest', { note: 'tired' })
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T11:00'))
   })
 
   it('escalates to Self on the action model, then hands an intent to the owner conversation', async () => {
@@ -245,11 +196,11 @@ describe('heartbeat loop', () => {
     expect(self.inbox[0]).toContain('You woke up wanting to: say good morning to Sam')
 
     // Self may not call platform say directly, but can open a conversation.
-    expect((await callAs(ctx, selfId, 'local_say', { text: 'hi' })).isError).toBe(true)
+    expect((await callAs(ctx, selfId, 'demo_say', { text: 'hi' })).isError).toBe(true)
     const opened = await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'wish him a good morning' })
     expect(opened).toEqual({ isError: false, text: 'Intent i1 handed to the conversation. Its outcome will arrive here as a notice.' })
     const chatId = conversationSessionId('anima', ownerKey)
-    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[来自 Self 的意图\]（i1）你在自己的内心决定来 本地 私聊「Owner」 开口。对方没有发消息给你。\n你想要的：wish him a good morning\nSelf 会知道结果。\n在这里回应：用 local_say 说话/)
+    expect(host.sessions.get(chatId)!.inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[来自 Self 的意图\]（i1）你在自己的内心决定来 demo 私聊「Owner」 开口。对方没有发消息给你。\n你想要的：wish him a good morning\nSelf 会知道结果。\n在这里回应：用 demo_say 说话/)
 
     // The conversation declines; Self hears about it without waking.
     event(ctx, chatId, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'intent', ref: 'i1' }, content: [] })
@@ -257,10 +208,10 @@ describe('heartbeat loop', () => {
     expect((await callAs(ctx, chatId, 'end_turn', { reason: 'too early' })).isError).toBe(false)
     event(ctx, chatId, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
     await vi.waitFor(() => expect(self.inbox).toHaveLength(2))
-    expect(self.inbox[1]).toBe('(inject) [Tue 2026-11-10 08:00] [notice] Your intent i1 for Owner (local) ("wish him a good morning"): declined — you chose not to speak there: too early.')
+    expect(self.inbox[1]).toBe('(inject) [Tue 2026-11-10 08:00] [notice] Your intent i1 for Owner (demo) ("wish him a good morning"): declined — you chose not to speak there: too early.')
 
     // The next heartbeat report shows it.
-    expect((await callAs(ctx, selfId, 'rest', { until: '09:30' })).text).toBe('Resting. Next heartbeat 2026-11-10 09:30.')
+    expect((await callAs(ctx, selfId, 'rest')).text).toBe('Resting.')
     await ctx.animaLife.beat()
     expect(host.sessions.get(triageId)!.inbox[1]).toContain('declined — you chose not to speak there: too early.')
   })
@@ -275,42 +226,36 @@ describe('heartbeat loop', () => {
     expect((await callAs(ctx, selfId, 'open_conversation', { channel: ownerKey, intent: 'c' })).text).toMatch(/^Error: anima\/night: /)
   })
 
-  it('wakes at most once a night, and only to rest', async () => {
+  it('beats on while she sleeps, without waking her', async () => {
     const { ctx, host, clock } = await setup('2026-11-11T02:00')
     await ctx.animaLife.beat()
-    const triageId = triageSessionId('anima', '2026-11-10')
-    const triage = host.sessions.get(triageId)!
-    expect(triage.inbox[0]).toContain('You are asleep. Call rest(until?)')
-    expect((await callAs(ctx, triageId, 'heartbeat_act', { reason: 'x' })).text).toMatch(/^Error: anima\/night: /)
-    expect((await callAs(ctx, triageId, 'rest', { until: '04:00' })).text).toBe('Resting. Next heartbeat 2026-11-11 07:30 (no night wake-up is left; you sleep until your wake time).')
-    clock.now = at('2026-11-11T04:00')
-    await ctx.animaLife.beat()
-    expect(triage.inbox).toHaveLength(1)
-    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-11T07:30'))
-  })
-
-  it('skips heartbeats while the outside holds her, while busy, or until waking when it says so', async () => {
-    const { ctx, host, clock, outside } = await setup('2026-11-10T10:00')
-    outside.refuse = request => request.kind === 'turn' ? { code: 'anima/paused', reason: 'paused' } : undefined
+    expect(host.sessions.size).toBe(0)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-11T03:00'))
+    clock.now = at('2026-11-11T03:00')
     await ctx.animaLife.beat()
     expect(host.sessions.size).toBe(0)
-    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:20'))
-    outside.refuse = () => undefined
-
-    await ctx.animaLife.router.ensureSelf()
-    host.busy.add(selfSessionId('anima'))
-    await ctx.animaLife.beat()
-    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:01'))
-    host.busy.clear()
-
-    outside.refuse = request => request.kind === 'turn' ? { code: 'anima/over-budget', reason: 'over-budget', untilWake: true } : undefined
-    clock.now = at('2026-11-10T11:00')
-    await ctx.animaLife.beat()
-    expect(host.sessions.has(triageSessionId('anima', '2026-11-10'))).toBe(false)
-    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-11T07:30'))
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-11T04:00'))
   })
 
-  it('schedules the default interval when an escalated Self turn ends without rest', async () => {
+  it('beats at her resting rhythm whatever the outside says; a beat while she is in a turn starts no second one', async () => {
+    const { ctx, host, clock, outside } = await setup('2026-11-10T10:00')
+    const asked: AdmitRequest[] = []
+    // The outside refuses everything it is asked; her heart is never among the things it is asked about.
+    outside.refuse = (request) => { asked.push(request); return { code: 'anima/paused', reason: 'paused' } }
+    await ctx.animaLife.beat()
+    expect(host.sessions.get(triageSessionId('anima', '2026-11-10'))!.inbox).toHaveLength(1)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T11:00'))
+    expect(asked.map(request => request.kind as string)).not.toContain('turn')
+
+    outside.refuse = () => undefined
+    host.busy.add(triageSessionId('anima', '2026-11-10'))
+    clock.now = at('2026-11-10T11:00')
+    await ctx.animaLife.beat()
+    expect(host.sessions.get(triageSessionId('anima', '2026-11-10'))!.inbox).toHaveLength(1)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T12:00'))
+  })
+
+  it('keeps her rhythm when an escalated Self turn ends without rest', async () => {
     const { ctx, host } = await setup('2026-11-10T10:00')
     await ctx.animaLife.beat()
     await callAs(ctx, triageSessionId('anima', '2026-11-10'), 'heartbeat_act', { reason: 'look around' })
@@ -336,100 +281,46 @@ describe('alarmPrompts', () => {
   })
 })
 
-describe('turn closing (DESIGN §6, Turn shape)', () => {
-  const said = (text: string) => ({ message: { content: [{ type: 'text', text }] } })
-  const woke = { source: { kind: 'anima-stimulus', stimulus: 'message', wake: true }, content: [] }
-
-  async function chat() {
+describe('plain text is her thinking', () => {
+  it('a turn that ends with only text has nothing steered into it and nothing recorded', async () => {
     const env = await setup('2026-11-10T12:00')
     const id = await env.ctx.animaLife.deliver({ type: 'message', channel: owner, sender: { platformUserId: 'owner', displayName: 'Sam', isOwner: true }, text: '在吗', ts: env.clock.now })
     const agent = env.host.sessions.get(id)!
-    const stopping = () => env.ctx.emit('agent/turn-stopping' as never, { agent, turn: 1, signal: new AbortController().signal } as never)
-    const records = () => env.recorded.filter(r => r.type === 'reminder' || r.type === 'lost-reply')
-    return { ...env, id, agent, stopping, records }
-  }
-
-  it('says nothing when a say closed the turn', async () => {
-    const { ctx, id, agent, stopping, records } = await chat()
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"在的"}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
     const before = agent.inbox.length
-    stopping()
+    event(env.ctx, id, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'message', wake: true }, content: [] })
+    event(env.ctx, id, 'assistant/message', { message: { content: [{ type: 'text', text: '嗯……先不回了' }] } })
+    env.ctx.emit('agent/turn-stopping' as never, { agent, turn: 1, signal: new AbortController().signal } as never)
+    event(env.ctx, id, 'turn/end', { turn: 1, reason: { kind: 'completed' } })
     expect(agent.inbox.length).toBe(before)
-    expect(records()).toEqual([])
+    expect(env.recorded.filter(r => r.type === 'reminder' || r.type === 'lost-reply')).toEqual([])
+  })
+})
+
+describe('reach from outside', () => {
+  const bob: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'bob', display: 'Bob (demo)' }
+  const fromBob = (ts: number) => ({ type: 'message' as const, channel: bob, sender: { platformUserId: 'bob', displayName: 'Bob', isOwner: false }, text: 'hi', ts })
+
+  it('a chat the outside drops never reaches her, is not held and leaves no record', async () => {
+    const { ctx, host, clock, outside } = await setup('2026-11-10T12:00')
+    outside.refuse = request => request.kind === 'reach' && request.channelKey === 'demo:owner:private:bob'
+      ? { code: 'anima/not-allowlisted', reason: 'not-allowlisted', drop: true }
+      : undefined
+    const seen: unknown[] = []
+    ctx.on('anima/stimulus', event => { seen.push(event) })
+    await ctx.animaLife.deliver(fromBob(clock.now))
+    expect(host.sessions.size).toBe(0)
+    expect(ctx.animaLife.inbox.size()).toBe(0)
+    expect(seen).toEqual([])
+    // The owner's chat still reaches her.
+    await ctx.animaLife.deliver({ type: 'message', channel: owner, sender: { platformUserId: 'owner', displayName: 'Sam', isOwner: true }, text: '在吗', ts: clock.now })
+    expect(host.sessions.size).toBe(1)
   })
 
-  it('steers reminders into the same turn, then records a lost reply and forwards nothing', async () => {
-    const { ctx, id, agent, stopping, records } = await chat()
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'assistant/message', said('在的在的，怎么了？'))
-    const before = agent.inbox.length
-    stopping()
-    expect(agent.inbox.at(-1)).toMatch(/^\(steer\) \[Tue 2026-11-10 12:00\] \[提醒 1\/2\] 这一轮还没有用行动结束。你刚才写的「在的在的，怎么了？」/)
-    expect(agent.inbox.at(-1)).toContain('调用 local_say')
-    expect(agent.inbox.at(-1)).toContain('end_turn')
-    stopping()
-    expect(agent.inbox.length).toBe(before + 2)
-    stopping()
-    expect(agent.inbox.length).toBe(before + 2)
-    event(ctx, id, 'turn/end', {})
-    expect(records()).toEqual([
-      expect.objectContaining({ type: 'reminder', count: 1, channel: ownerKey, sessionId: id, text: '在的在的，怎么了？' }),
-      expect.objectContaining({ type: 'reminder', count: 2 }),
-      expect.objectContaining({ type: 'lost-reply', channel: ownerKey, sessionId: id, text: '在的在的，怎么了？' }),
-    ])
-    expect(records().map(r => r.type)).toEqual(['reminder', 'reminder', 'lost-reply'])
-  })
-
-  it('accepts end_turn and a say after a reminder; a failed say does not close', async () => {
-    const { ctx, id, agent, stopping, records } = await chat()
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"hi"}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: true, content: [] } })
-    stopping()
-    expect(records()).toHaveLength(1)
-    event(ctx, id, 'tool/call', { callId: 'x2', name: 'end_turn', arguments: '{}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'x2', isError: false, content: [] } })
-    const before = agent.inbox.length
-    stopping()
-    expect(agent.inbox.length).toBe(before)
-    expect(records()).toHaveLength(1)
-  })
-
-  it('records a lost reply when an open turn ends in an error, not when it was aborted or closed', async () => {
-    const { ctx, id, records } = await chat()
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'turn/end', { reason: { kind: 'error', error: { code: 'MALFORMED_RESPONSE', message: 'tool input is invalid JSON' } } })
-    expect(records()).toEqual([expect.objectContaining({ type: 'lost-reply', channel: ownerKey, reason: 'error: MALFORMED_RESPONSE' })])
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'turn/end', { reason: { kind: 'aborted' } })
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'tool/call', { callId: 'z1', name: 'end_turn', arguments: '{}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'z1', isError: false, content: [] } })
-    event(ctx, id, 'turn/end', { reason: { kind: 'error', error: { code: 'X' } } })
-    expect(records()).toHaveLength(1)
-  })
-
-  it('keeps the turn open after a say with more: true or a gesture, and reopens on a new arrival', async () => {
-    const { ctx, id, stopping, records } = await chat()
-    event(ctx, id, 'user/message', woke)
-    event(ctx, id, 'tool/call', { callId: 'x1', name: 'local_say', arguments: '{"text":"wait","more":true}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'x1', isError: false, content: [] } })
-    stopping()
-    expect(records()).toHaveLength(1)
-    event(ctx, id, 'tool/call', { callId: 'x2', name: 'local_say', arguments: '{"text":"ok"}' })
-    event(ctx, id, 'tool/result', { message: { toolCallId: 'x2', isError: false, content: [] } })
-    stopping()
-    expect(records()).toHaveLength(1)
-    // A message that joins the turn after she closed it needs closing again.
-    event(ctx, id, 'user/message', woke)
-    stopping()
-    expect(records()).toHaveLength(2)
-    // Context that does not wake never opens a turn.
-    event(ctx, id, 'turn/end', {})
-    event(ctx, id, 'user/message', { source: { kind: 'anima-stimulus', stimulus: 'channel-event' }, content: [] })
-    stopping()
-    expect(records()).toHaveLength(2)
+  it('a refusal without drop (a pause) holds the message in her inbox', async () => {
+    const { ctx, host, clock, outside } = await setup('2026-11-10T12:00')
+    outside.refuse = request => request.kind === 'reach' && request.channelKey === undefined ? { code: 'anima/paused', reason: 'paused' } : undefined
+    await ctx.animaLife.deliver(fromBob(clock.now))
+    expect(host.sessions.size).toBe(0)
+    expect(ctx.animaLife.inbox.size()).toBe(1)
   })
 })

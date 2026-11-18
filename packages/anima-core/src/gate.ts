@@ -44,7 +44,6 @@ export const GateCode = {
   wrongSession: 'anima/wrong-session',
   wrongPlatform: 'anima/wrong-platform',
   night: 'anima/night',
-  notAllowed: 'anima/not-allowed',
   unknownChannel: 'anima/unknown-channel',
   notBedtime: 'anima/not-bedtime',
 } as const
@@ -89,7 +88,7 @@ const KIND_ZH: Record<string, string> = {
 
 /**
  * Check one call against her body. Checks, in order: Anima session, session
- * kind, platform, mode (asleep), target exists, bedtime, argument shape.
+ * kind, platform, mode (asleep), target exists, bedtime.
  */
 export function bodyCheck(call: BodyCall, moment: BodyMoment): BodyVerdict {
   const { meta, session, name } = call
@@ -113,8 +112,6 @@ export function bodyCheck(call: BodyCall, moment: BodyMoment): BodyVerdict {
   if (meta.bedtime === true && moment.beforeBedtime !== undefined) {
     return deny(GateCode.notBedtime, `还不到睡觉的时候：你今天 ${moment.beforeBedtime.woke} 才起床，最早也要到今晚 ${moment.beforeBedtime.earliest} 才睡得着。`)
   }
-  const constraint = meta.constraint?.(args)
-  if (constraint !== undefined) return deny(GateCode.notAllowed, constraint)
   return { allowed: true }
 }
 

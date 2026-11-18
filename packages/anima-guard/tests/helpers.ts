@@ -28,7 +28,8 @@ export async function setupGuardedFiber(guard: Partial<animaGuard.Config> = {}, 
   await ctx.plugin(Tools)
   // A fixed daytime clock, so tests do not depend on the hour they run at.
   await ctx.plugin(animaCore, { dataDir: tempDataDir(), clock: { speed: 1, start: '2026-11-10T10:00' }, ...core })
-  const fiber = await ctx.plugin(animaGuard, guard)
+  // Test chats are on the fake platform `demo`, open unless a test sets its own allowlist.
+  const fiber = await ctx.plugin(animaGuard, { allowlist: { demo: { open: true, users: [], groups: [] } }, ...guard })
   return { ctx, fiber }
 }
 

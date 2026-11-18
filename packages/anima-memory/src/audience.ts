@@ -104,7 +104,7 @@ export function narrow(learned: Scope, keep: Keep | undefined): Scope {
   return keep === 'self' ? SELF : learned
 }
 
-/** Human-readable label of a scope for her context, e.g. `private chat with local:alice`. */
+/** Human-readable label of a scope for her context, e.g. `private chat with qq:67890`. */
 export function describeScope(scope: Scope): string {
   if (scope === SELF) return 'only you'
   if (scope === PUBLIC) return 'public'

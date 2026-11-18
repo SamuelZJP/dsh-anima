@@ -23,29 +23,33 @@ A behavior is a DSH tool registered through `ctx.tools`, plus metadata. Nothing 
 - Speech: `<platform>_say`, `end_turn(reason?)`, `wait(seconds, channel?)`.
 - Attention: `groups_glance`, `group_read`, `inbox_read`, `channels_find`, platform `observe` behaviors.
 - Memory: `memory_recall`, `memory_remember`; in sleep only, `memory_write`.
-- Self: `self_feel(adjustments)`, `self_note(...)`, `goals_add`, `goals_update`, `goals_close`.
-- Time: `schedule_create`, `schedule_edit` (DSH built-ins, her own alarms), `rest(until?)`, `sleep(note?)`.
+- Self: `self_feel(...)`, `self_note(...)`, `goals_add`, `goals_update`, `goals_close`.
+- Time: `alarm_set(at, note)`, `alarm_list`, `alarm_cancel(id)` (her own alarms, over DSH's schedule service: `at` is on her clock, and an alarm rings in the session she sets it from), `rest(note?)`, `sleep(note?)`. `rest` only ends the turn: she stops and idles. It sets nothing in her body; to come back to something at a time she sets an alarm.
 - Workspace tools (`design/life.md`).
 
 Adapters add platform behaviors (`design/channels.md`).
 
+**Cognition is hers.** What an event means to her, and so what she feels about it and whether it fed a need, is her appraisal: only the model can make it. She registers it with `self_feel`. Code never judges meaning.
+
 ## Physiology
 
-Code keeps these numbers and changes them only by time and by behaviors' declared effects. It never reads message words.
+Code keeps these numbers and changes them only by time, by sleep and by behaviors' declared `energy`. It never reads message words and never judges what an event means.
+
+**Genes are not rules.** Every parameter below (a rate, a threshold, a half-life) is part of her body, set when she is made, like a human's genes. It restricts no choice, and neither she nor the owner adjusts around it.
 
 | Mechanism | What happens |
 |---|---|
-| **Clock** | One injectable clock. `clock.speed` and `clock.start` run a test day fast |
-| **Day rhythm** | Phases `asleep`, `waking`, `day`, `evening`, `winding down` from `day.wake` and when she went to sleep. Her day runs from one waking to the next |
-| **Sleep pressure** | Rises while awake. `sleep` works from `bedtime.earliest`; at `bedtime.latest` she falls asleep anyway |
+| **Clock** | One injectable clock. `clock.speed` and `clock.start` run a test day fast. Her day (for counters, decay and logs) is the local date on her clock |
+| **Sleep pressure** | 0–1. Rises while she is awake (`sleep.risePerHour`, faster with the energy she spends) and falls while she sleeps (`sleep.fallPerHour`). Her phase is `awake` or `asleep`; no clock time decides either |
+| **Falling asleep** | Going to bed is her will: she calls `sleep(note?)` whenever she wants. Sleep comes if her pressure is above `sleep.fallAsleepAbove`; otherwise she lies awake and the result says sleep does not come. She can also stay up. If the pressure passes `sleep.overwhelmAbove`, sleep takes her once the running turn ends |
+| **Waking** | Asleep, she wakes when her pressure falls below `sleep.wakeBelow`, or when an alarm she set rings, or when the owner wakes her from outside. Once awake, her pressure alone decides when sleep can come again |
 | **Energy and tiredness** | 0–1. Spent by time awake and by behaviors' `energy`; restored by sleep and rest. Below `energy.exhausted` only behaviors with no energy cost run, and the refusal says she is too tired |
-| **Needs** | Defined in settings: name, description shown to her, baseline, drift per hour, which behaviors satisfy them. Default: `connect`, `curiosity`, `expression`, `rest`, `order` |
-| **Mood** | Valence and arousal drifting back to a baseline (3-hour half-life). She moves them with `self_feel` |
-| **Heartbeat** | A stimulus from her body. It comes at the time she chose with `rest(until)`, within `heartbeat` bounds, or sooner when a need passes `heartbeat.urgeAbove`. It carries her state: phase, energy, needs, due goals, events since last time |
+| **Needs** | Defined in settings: name, description shown to her, baseline, drift per hour. Default: `connect`, `curiosity`, `expression`, `rest`, `order`. They drift by themselves; what satisfied one is her appraisal, registered with `self_feel` |
+| **Mood** | Valence and arousal drifting back to a baseline (`mood.halfLifeHours`, 3). How she feels after something happens is her appraisal, registered with `self_feel`; code only lets it fade |
+| **Heartbeat** | Her self-drive: it beats because she is alive, like a human heart, not because anything outside drives it. Nobody controls when it beats or how fast: no behavior of hers sets, delays or skips it, and nothing outside (the guard, the owner, a pause, a budget) starts, stops, skips or paces it. Its rhythm comes only from her own state (arousal, mood, energy, needs, asleep or awake) through her genes' parameters in `heartbeat` (a resting rate and how far her state moves it); those are her body, not limits. Awake, a beat stirs her: it starts a turn carrying her state (phase, sleep pressure, energy, needs, due goals, what happened since). Asleep, it keeps beating and does not wake her. It is not an external stimulus: it is where her autonomy comes from |
 | **Typing time** | Between messages of one `say`, `pacing.baseSeconds` + `pacing.perCharSeconds` per character, capped |
-| **Self-model pace** | The self-model changes slowly: `self_note` at most `selfModel.changesPerDay` times a day |
 | **Memory** | Coming to mind, consolidation in sleep, forgetting (`design/memory.md`) |
 
-**How she meets physiology.** Her state is in every heartbeat and in the day session's state context, and the prompt explains her body before she meets its limits. A refusal says what is true of her body ("you are exhausted", "it is not bedtime yet"), not which rule fired.
+**How she meets physiology.** Her state is in every heartbeat and in the waking session's state context, and the prompt explains her body before she meets it. A refusal or result says what is true of her body ("you are exhausted", "sleep does not come"), not which rule fired.
 
 State lives in `<dataDir>/state.json`.

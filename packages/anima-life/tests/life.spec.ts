@@ -10,7 +10,7 @@ import { describe, expect, it, onTestFinished } from 'vitest'
 import { AnimaLife, consolidationSessionId, conversationSessionId, route, selfSessionId, SessionRouter, stimulusText, wakes } from '../src/index.ts'
 import type { PublishedChannel, SessionHost, Stimulus } from '../src/index.ts'
 
-const owner: PublishedChannel = { platform: 'local', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)' }
+const owner: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)' }
 const group: PublishedChannel = { platform: 'qq', account: '10', kind: 'group', id: '42', display: 'Book club' }
 
 function message(channel: PublishedChannel, text = 'hello'): Stimulus {
@@ -52,10 +52,10 @@ class FakeHost implements SessionHost<FakeAgent> {
 
 describe('session identity', () => {
   it('is deterministic per character and channel', () => {
-    const key = 'local:owner:private:owner'
+    const key = 'demo:owner:private:owner'
     expect(conversationSessionId('anima', key)).toBe(conversationSessionId('anima', key))
     expect(conversationSessionId('anima', key)).toMatch(/^anima-c-[0-9a-f]{24}$/)
-    expect(conversationSessionId('anima', key)).not.toBe(conversationSessionId('anima', 'local:owner:private:other'))
+    expect(conversationSessionId('anima', key)).not.toBe(conversationSessionId('anima', 'demo:owner:private:other'))
     expect(conversationSessionId('anima', key)).not.toBe(conversationSessionId('mio', key))
   })
 
@@ -70,7 +70,7 @@ describe('session identity', () => {
   })
 
   it('starts fresh conversation sessions with a new generation (Phase 8)', () => {
-    const key = 'local:owner:private:owner'
+    const key = 'demo:owner:private:owner'
     expect(conversationSessionId('anima', key, 1)).toBe(conversationSessionId('anima', key))
     expect(conversationSessionId('anima', key, 2)).toMatch(/^anima-c-[0-9a-f]{24}$/)
     expect(conversationSessionId('anima', key, 2)).not.toBe(conversationSessionId('anima', key))
@@ -94,7 +94,7 @@ describe('route', () => {
   })
 
   it('formats messages with channel and sender', () => {
-    expect(stimulusText(message(owner))).toBe('[本地 私聊「Owner」] Sam（主人） 对你说: hello')
+    expect(stimulusText(message(owner))).toBe('[demo 私聊「Owner」] Sam（主人） 对你说: hello')
     expect(stimulusText({ ...message(group), addressed: true } as Stimulus)).toBe('[QQ 群「Book club」] Sam（主人） [qq u1] 叫你（群里所有人都会看到你的回答）: hello')
   })
 })
@@ -110,8 +110,8 @@ describe('SessionRouter', () => {
     const { host, router, dataDir } = setup()
     const id = await router.deliver(message(owner))
     const session = host.sessions.get(id)!
-    expect(session).toMatchObject({ preset: 'anima-conversation', cwd: join(dataDir, 'conversations'), title: 'Anima · Owner (local)' })
-    expect(session.inbox).toEqual(['[本地 私聊「Owner」] Sam（主人） 对你说: hello'])
+    expect(session).toMatchObject({ preset: 'anima-conversation', cwd: join(dataDir, 'conversations'), title: 'Anima · Owner (demo)' })
+    expect(session.inbox).toEqual(['[demo 私聊「Owner」] Sam（主人） 对你说: hello'])
     expect(existsSync(join(dataDir, 'conversations'))).toBe(true)
   })
 
@@ -142,14 +142,14 @@ describe('SessionRouter', () => {
 
   it('refuses archived sessions', async () => {
     const { host, router } = setup()
-    host.archived.add(conversationSessionId('anima', 'local:owner:private:owner'))
+    host.archived.add(conversationSessionId('anima', 'demo:owner:private:owner'))
     await expect(router.deliver(message(owner))).rejects.toThrow(/anima\/session-archived/)
     expect(host.creates).toBe(0)
   })
 
   it('fails loud when DSH would mint another id', async () => {
     const { host, router } = setup()
-    const id = conversationSessionId('anima', 'local:owner:private:owner')
+    const id = conversationSessionId('anima', 'demo:owner:private:owner')
     host.resolve = async () => undefined
     host.sessions.set(id, { id, inbox: [], preset: 'x', cwd: 'x' })
     await expect(router.deliver(message(owner))).rejects.toThrow(/anima\/session-id-mismatch/)
@@ -158,8 +158,8 @@ describe('SessionRouter', () => {
   it('maps session ids back to channels and Self', async () => {
     const { router } = setup()
     const forget = router.know(owner)
-    const id = conversationSessionId('anima', 'local:owner:private:owner')
-    expect(router.describe(id)).toEqual({ kind: 'conversation', channel: owner, channelKey: 'local:owner:private:owner' })
+    const id = conversationSessionId('anima', 'demo:owner:private:owner')
+    expect(router.describe(id)).toEqual({ kind: 'conversation', channel: owner, channelKey: 'demo:owner:private:owner' })
     expect(router.describe(selfSessionId('anima'))).toEqual({ kind: 'self' })
     expect(router.describe('session-123')).toBeUndefined()
     forget()
@@ -182,10 +182,10 @@ describe('AnimaLife service', () => {
 
   it('provides the core session resolver for published channels', async () => {
     const { ctx } = await setup()
-    const id = conversationSessionId('anima', 'local:owner:private:owner')
+    const id = conversationSessionId('anima', 'demo:owner:private:owner')
     expect(ctx.anima.describeSession(id)).toBeUndefined()
     const fiber = await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner]) } })
-    expect(ctx.anima.describeSession(id)).toMatchObject({ kind: 'conversation', channelKey: 'local:owner:private:owner' })
+    expect(ctx.anima.describeSession(id)).toMatchObject({ kind: 'conversation', channelKey: 'demo:owner:private:owner' })
     expect(ctx.anima.describeSession(selfSessionId('anima'))).toEqual({ kind: 'self' })
     await fiber.dispose()
     expect(ctx.anima.describeSession(id)).toBeUndefined()

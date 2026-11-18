@@ -71,6 +71,8 @@ async function imageServer() {
 async function setup(extra: Record<string, unknown> = {}, life: Record<string, unknown> = {}, core: Record<string, unknown> = {}) {
   const server = new FakeOneBot(ACCOUNT)
   const url = await server.listen()
+  server.respond('get_friend_list', () => [{ user_id: Number(OWNER), nickname: 'sam' }, { user_id: Number(FRIEND), nickname: 'cat', remark: 'Cat' }])
+  server.respond('get_group_list', () => [{ group_id: Number(GROUP), group_name: 'Test group' }])
   onTestFinished(() => server.close())
   const dataDir = mkdtempSync(join(tmpdir(), 'anima-qq7-'))
   onTestFinished(() => rmSync(dataDir, { recursive: true, force: true }))
@@ -91,11 +93,12 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, platforms: { noticeAfterSeconds: 0 }, ...life } })
   await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
-    allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },
     callTimeoutSeconds: 2, reconnect: { maxSeconds: 1 },
     ...extra,
   })
   await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toMatch(/QQ: connected .* \(Anima\)/))
+  // The adapter publishes every friend and group the account has once it is logged in.
+  await vi.waitFor(() => expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:${GROUP}`)).toBeDefined())
   // What she reports for the log kept outside the persona.
   const recorded: { type: string; online?: boolean; reason?: string }[] = []
   ctx.on('anima/record', (record) => { recorded.push(record as never) })

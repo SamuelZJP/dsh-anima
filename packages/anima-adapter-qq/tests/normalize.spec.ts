@@ -59,9 +59,10 @@ describe('normalizeMessage', () => {
 
 describe('config and transport helpers', () => {
   it('validates config and normalizes ids', () => {
-    const config = resolveQqConfig({ url: 'ws://127.0.0.1:3001', account: 10001, owner: '20002', allow: { users: [30003], groups: [{ id: 40004, name: 'Test' }] } })
+    const config = resolveQqConfig({ url: 'ws://127.0.0.1:3001', account: 10001, owner: '20002' })
     expect(config.account).toBe('10001')
-    expect(config.allow).toEqual({ users: [{ id: '30003' }], groups: [{ id: '40004', name: 'Test' }] })
+    expect(config.owner).toBe('20002')
+    expect(() => resolveQqConfig({ url: 'ws://127.0.0.1:3001', account: 10001, owner: '20002', allow: { users: [30003] } })).toThrow(/anima\/config-moved: allow moved to the anima-guard row/)
     expect(() => resolveQqConfig({ account: 1, owner: 2 })).toThrow('anima/config-invalid')
     expect(() => resolveQqConfig({ url: 'http://x', account: 10001, owner: 20002 })).toThrow('anima/config-invalid')
     expect(() => resolveQqConfig({ url: 'ws://x', account: 10001, owner: 10001 })).toThrow('same QQ number')

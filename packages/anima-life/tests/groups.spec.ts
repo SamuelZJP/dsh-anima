@@ -32,7 +32,7 @@ class FakeHost implements SessionHost<FakeAgent> {
 const group: PublishedChannel = { platform: 'qq', account: '10', kind: 'group', id: '42', display: 'Test group' }
 const groupKey = 'qq:10:group:42'
 const groupSession = conversationSessionId('anima', groupKey)
-const owner: PublishedChannel = { platform: 'local', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (local)', isOwner: true }
+const owner: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)', isOwner: true }
 const bob = { platformUserId: '2001', displayName: 'Bob', isOwner: false }
 const day = '2026-11-10'
 const triageSession = groupTriageSessionId('anima', day)
@@ -55,13 +55,13 @@ async function setup(life: Record<string, unknown> = {}, core: Record<string, un
   ctx.on('anima/admit', (request) => { admits.push(request); return outside.refuse(request) })
   await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner, group]) } })
   ctx.anima.registerBehavior(defineTool({
-    name: 'local_say', description: 'say', parameters: { text: { type: 'string', required: true } },
+    name: 'demo_say', description: 'say', parameters: { text: { type: 'string', required: true } },
     output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'sent' }] },
     async execute(args) {
       sent.push(args.text)
       return { ok: true }
     },
-  }), { platform: 'local', effect: 'express', sessions: ['conversation'] })
+  }), { platform: 'demo', effect: 'express', sessions: ['conversation'] })
   const sent: string[] = []
   const stimuli: StimulusEvent[] = []
   ctx.on('anima/stimulus', event => { stimuli.push(event) })
@@ -182,10 +182,10 @@ describe('group triage', () => {
 
 describe('intent outcomes of a held say', () => {
   it('reports a cancelled say as a cancelled intent', () => {
-    const tracker = new IntentTracker({ pending: [], active: [], awaitingReply: [] }, name => name === 'local_say')
+    const tracker = new IntentTracker({ pending: [], active: [], awaitingReply: [] }, name => name === 'demo_say')
     tracker.open({ id: 'i1', sessionId: 'c', channelKey: 'k', display: 'Owner', intent: 'hi', at: 0 })
     tracker.onUserMessage('c', 'i1')
-    tracker.onToolCall('c', 'x', 'local_say')
+    tracker.onToolCall('c', 'x', 'demo_say')
     expect(tracker.onToolResult('c', 'x', true, 'Error: anima/outbox-cancelled: …')).toMatchObject({ kind: 'cancelled' })
   })
 
@@ -202,7 +202,7 @@ describe('intent outcomes of a held say', () => {
 
 describe('message timing (DESIGN §6, Phase 8)', () => {
   const sam = { platformUserId: 'owner', displayName: 'Sam', isOwner: true }
-  const ownerSession = conversationSessionId('anima', 'local:owner:private:owner')
+  const ownerSession = conversationSessionId('anima', 'demo:owner:private:owner')
   const dm = (ctx: Context, text: string) => ctx.animaLife.deliver({ type: 'message', channel: owner, sender: sam, text, ts: ctx.anima.clock.now() })
 
   async function withQqSay(life: Record<string, unknown> = {}, core: Record<string, unknown> = {}) {
@@ -230,14 +230,14 @@ describe('message timing (DESIGN §6, Phase 8)', () => {
     expect(host.sessions.has(ownerSession)).toBe(false)
     await vi.waitFor(() => expect(host.sessions.get(ownerSession)?.inbox.length).toBe(1))
     const inbox = host.sessions.get(ownerSession)!.inbox
-    expect(inbox[0]).toMatch(/^\[.*\] \[.*\] Sam（主人）发来 3 条：\n  \d\d:\d\d 在吗\n  \d\d:\d\d 问你个事\n  \d\d:\d\d 明天有空吗\n在这里回应：用 local_say 说话/)
+    expect(inbox[0]).toMatch(/^\[.*\] \[.*\] Sam（主人）发来 3 条：\n  \d\d:\d\d 在吗\n  \d\d:\d\d 问你个事\n  \d\d:\d\d 明天有空吗\n在这里回应：用 demo_say 说话/)
     // The transcript still gets each message on its own.
     expect(stimuli.map(s => [s.stimulus.type, s.delivery])).toEqual([['message', 'context'], ['message', 'context'], ['message', 'wake']])
   })
 
   it('never delays an intent', async () => {
     const { ctx, host } = await setup({ conversation: { settleSeconds: 30 } })
-    const { intentId, sessionId } = await ctx.animaLife.openIntent('local:owner:private:owner', 'say good morning')
+    const { intentId, sessionId } = await ctx.animaLife.openIntent('demo:owner:private:owner', 'say good morning')
     expect(intentId).toBe('i1')
     expect(host.sessions.get(sessionId)!.inbox[0]).toContain('i1')
   })

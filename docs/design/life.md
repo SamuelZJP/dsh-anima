@@ -1,28 +1,30 @@
-# Life: the day session
+# Life: waking sessions
 
-She has one stream of attention, like a person. Each waking day is one DSH session; everything she perceives and does that day happens in it. Package: `anima-life`.
+She has one stream of attention, like a person, and it breaks only when she sleeps. Each period of wakefulness is one DSH session, her waking session; everything she perceives and does while awake happens in it. A day can hold several: a nap, a night waking and the morning each start a new one. Package: `anima-life`.
 
-## The day session
+## The waking session
 
-- **Opened at waking.** The first heartbeat after she wakes creates a new session (id from `characterId` and her day). It starts with what `design/memory.md` lists for waking, and her inbox.
+- **Prepared when she falls asleep.** The moment sleep comes, life creates the session of her next waking (id from `characterId` and the time she fell asleep) and moves her pending alarms into it (DSH `schedule.edit` with a new `target`), so an alarm that rings while she sleeps wakes her there.
+- **Opened by whatever wakes her:** her pressure falling, an alarm, or the owner. Its first step starts with the time, why she woke, her sleep note, what `design/memory.md` lists for waking, and her inbox summarised per channel. Life adds these at step 1 (`agent/pre-step`, logged with source `anima-life/waking`), so they come first however the session started.
 - **One session for everything.** Private chats, groups, heartbeats, alarms, browsing, her workspace. There are no per-chat, Self, triage or consolidation sessions.
-- **Her context is her working memory.** What she saw and did today is already in it, from every channel. DSH compaction trims it on long days; that is working memory fading.
-- **Archived at sleep.** When she falls asleep the session ends and is archived. Sleep reads its log (`design/memory.md`).
-- **Model.** One action model for the day session, set in config.
+- **Her context is her working memory.** What she saw and did since she woke is already in it, from every channel. DSH compaction trims it on long wakings; that is working memory fading.
+- **Archived when she falls asleep,** after its last turn ends (DSH refuses to archive a running session). Sleep reads its log (`design/memory.md`). Nothing is ever delivered into an archived session: DSH would drop it.
+- **Model.** One action model for waking sessions, set in config.
 
 ## Stimuli
 
 | Stimulus | From | Effect |
 |---|---|---|
-| Private message | Adapter | Wakes a turn, as a burst once the chat settles |
-| Group message that addresses her (@, reply to her, poke) | Adapter | Wakes a turn, like a private message |
-| Other group message | Adapter | Wakes nothing. Kept in the group's unread buffer until she looks |
-| Heartbeat | Physiology (`design/body.md`) | Wakes a turn with her state |
-| Alarm she set | DSH `schedule` | Wakes a turn |
-| Platform event (follower, friend request, offline) | Adapter | Joins her next turn as context; wakes nothing |
+| Private message | Adapter | Starts a turn, as a burst once the chat settles |
+| Group message that addresses her (@, reply to her, poke) | Adapter | Starts a turn, like a private message |
+| Other group message | Adapter | Starts nothing. Kept in the group's unread buffer until she looks |
+| Alarm she set | DSH `schedule` | Starts a turn; asleep, it wakes her |
+| Platform event (follower, friend request, offline) | Adapter | Joins her next turn as context; starts nothing |
 | Owner waking her | Outside | Wakes her from sleep (`design/outside.md`) |
 
-**Delivery.** A waking stimulus uses DSH `agent.steer`: it joins the running turn at the next step, or starts a turn when idle. Context that wakes nothing uses `agent.inject`. Each delivered stimulus starts with the time on her clock.
+**Her heartbeat is not a stimulus.** It is her own self-drive (`design/body.md`): awake, a beat starts a turn with her state; asleep, it beats without waking her. Nothing outside gates it and no behavior of hers sets it.
+
+**Delivery.** A stimulus that starts a turn uses DSH `agent.steer`: it joins the running turn at the next step, or starts a turn when idle. Context that starts nothing uses `agent.inject`; it joins her next turn ahead of the message that starts it. Each delivered stimulus starts with the time on her clock.
 
 **Bursts.** Messages that arrive together are delivered as one block: who sent how many, then each message with its time and id. A private chat's burst is delivered once the chat has been quiet for `conversation.settleSeconds` (and at most `settleMaxSeconds` after the first message). Where the platform reports typing, typing keeps the window open.
 
@@ -30,8 +32,8 @@ She has one stream of attention, like a person. Each waking day is one DSH sessi
 
 ## Turns
 
-- **A turn closes by an action:** `say` (unless `more: true`), `wait` timing out, `end_turn`, `rest` or `sleep`. Plain text reaches nobody and never closes a turn.
-- **If a turn is about to stop without a closing action,** code steers a reminder into the same turn, up to `closeReminders` times. Then the turn ends and an unclosed turn is recorded. Nothing is forwarded.
+- **A turn closes by an action:** `say` (unless `more: true`), `wait` timing out, `end_turn`, `rest` or `sleep`.
+- **Plain text reaches nobody.** It is her thinking. A turn that ends with only text is a thought she did not say; nothing is forwarded, and nothing reminds her.
 
 ## Speaking and waiting
 
@@ -51,11 +53,10 @@ People do not read every unread message in every group. She doesn't either.
 
 ## Sleep and waking
 
-- **Going to sleep is her will, inside her physiology.** She calls `sleep(note?)` from `bedtime.earliest`. At `bedtime.latest` sleep takes her anyway; a running turn finishes first.
-- **Asleep, nothing reaches her.** Messages that would wake a turn go to her inbox (`<dataDir>/inbox.json`), per channel. Unaddressed group messages stay in their buffers. The adapter does not mark held messages as read.
-- **What runs during sleep:** consolidation, decay, energy recovery (physiology). Alarms she set herself still wake her. The owner can wake her from outside.
-- **Waking** happens at `day.wake` (or when an alarm or the owner wakes her). The first heartbeat opens the new day session, with the inbox summarised per channel.
-- **`inbox_read(channel?)`** shows what waited. She answers with `say` on that channel; whatever she doesn't answer stays unanswered.
+- **Falling asleep and waking are her body** (`design/body.md`): she goes to bed when she wants, sleep comes when her pressure lets it, and it takes her when the pressure is overwhelming. No clock time decides either.
+- **Asleep, nothing reaches her** but an alarm she set and the owner waking her. Messages that would start a turn go to her inbox (`<dataDir>/inbox.json`), per channel. Unaddressed group messages stay in their buffers. The adapter does not mark held messages as read.
+- **What runs during sleep:** consolidation, decay, energy recovery, her heartbeat (physiology).
+- **`inbox_read(channel?)`** shows what waited. She answers with `say` on that channel. A chat's held messages leave the inbox when she says something there or when that chat writes again (they then arrive with the new messages as one burst); whatever she doesn't answer stays unanswered.
 
 ## Her workspace
 

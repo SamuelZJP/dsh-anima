@@ -1,0 +1,12 @@
+# Outside the Anima persona (docs/CONSTITUTION.md, docs/design/outside.md):
+# the safety gate, the allowlist, approvals, outbox hold, budgets, pause, the
+# activity log, the /anima owner command and the Anima page. Installed next to
+# the Anima plugin, never inside it; uninstall it and she runs with no
+# restriction but her physiology.
+- insert:
+    - id: anima-guard
+      name: '@anima/guard'
+    # The Anima page in DSH's web UI (sidebar entry, tabs); owner routes under
+    # /api/anima, over anima-guard's owner surface.
+    - id: anima-page
+      name: '@anima/page'

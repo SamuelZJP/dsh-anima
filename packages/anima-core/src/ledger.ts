@@ -1,6 +1,6 @@
 /**
- * Day counters of her body, per her day (wake to wake): night wake-ups. Plus
- * the small JSON file helpers Anima's stores share.
+ * Day ledgers (counters per her day, used outside by the guard), plus the
+ * small JSON file helpers Anima's stores share.
  * @module @anima/core/ledger
  */
 
@@ -8,19 +8,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 import { AnimaError } from './types.ts'
 
-/** Counters of one day. */
-export interface DayLedger {
-  nightWakes: number
-}
-
-/** Fresh counters. */
-export function emptyDay(): DayLedger {
-  return { nightWakes: 0 }
-}
-
 /** Day ledgers keyed by day; keeps the last few days only. */
-export class Ledger<T extends object = DayLedger> {
-  constructor(private readonly days: Record<string, T> = {}, private readonly keep = 7, private readonly empty: () => T = emptyDay as unknown as () => T) {}
+export class Ledger<T extends object> {
+  constructor(private readonly days: Record<string, T>, private readonly keep: number, private readonly empty: () => T) {}
 
   /** Counters of a day (created on first use). */
   day(key: string): T {

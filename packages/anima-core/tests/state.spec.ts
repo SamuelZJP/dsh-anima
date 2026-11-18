@@ -126,7 +126,7 @@ describe('self state', () => {
 
   it('lowers satisfied needs, by exact name or prefix', () => {
     const state = { ...initialState(model, morning), needs: { connect: 0.8, curiosity: 0.3, expression: 0.3, rest: 0.2, order: 0.05 } }
-    expect(satisfy(state, 'local_say', model).needs.connect).toBeCloseTo(0.5)
+    expect(satisfy(state, 'qq_say', model).needs.connect).toBeCloseTo(0.5)
     expect(satisfy(state, 'goals_add', model).needs.order).toBe(0)
     expect(satisfy(state, 'anima_ping', model)).toBe(state)
   })
@@ -145,10 +145,10 @@ describe('self state', () => {
 
 describe('ledger', () => {
   it('keeps only the last days', () => {
-    const ledger = new Ledger({}, 2)
-    for (const key of ['2026-11-08', '2026-11-09', '2026-11-10']) ledger.day(key).nightWakes = 1
+    const ledger = new Ledger<{ count: number }>({}, 2, () => ({ count: 0 }))
+    for (const key of ['2026-11-08', '2026-11-09', '2026-11-10']) ledger.day(key).count = 1
     expect(Object.keys(ledger.toJSON())).toEqual(['2026-11-09', '2026-11-10'])
-    expect(ledger.peek('2026-11-01').nightWakes).toBe(0)
+    expect(ledger.peek('2026-11-01').count).toBe(0)
   })
 })
 
@@ -156,15 +156,18 @@ describe('config defaults', () => {
   it('fills Phase 2 defaults', () => {
     const config = resolveConfig({})
     expect(config.rhythm).toMatchObject({ wake: '07:30', bedtime: { earliest: '22:30', latest: '00:30', wokenMinutes: 30 }, evening: '18:00' })
-    expect(config.modes.day).toMatchObject({ minIntervalMinutes: 20, maxIntervalMinutes: 240, triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
-    expect(config.modes.night).toMatchObject({ maxWakes: 1, allowedEffects: ['observe', 'internal'] })
-    expect(config.selfModel.changesPerDay).toBe(3)
+    expect(config.modes.day).toMatchObject({ triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
+    expect(config.modes.night).toMatchObject({ allowedEffects: ['observe', 'internal'] })
+    expect(config.heartbeat.restingMinutes).toBe(60)
+    expect(config.selfModel).toEqual({ digestChars: 600 })
     expect(config.clock.speed).toBe(1)
     expect(config.needs.map(need => need.name)).toEqual(['connect', 'curiosity', 'expression', 'rest', 'order'])
   })
 
-  it('fails loud on inverted interval bounds and duplicate needs', () => {
-    expect(() => resolveConfig({ modes: { day: { minIntervalMinutes: 300, maxIntervalMinutes: 60 } } } as never)).toThrow(/minIntervalMinutes/)
+  it('fails loud on removed rules and duplicate needs', () => {
+    expect(() => resolveConfig({ modes: { day: { minIntervalMinutes: 20 } } } as never)).toThrow(/anima\/config-removed: modes\.day\.minIntervalMinutes is gone: her heartbeat is her self-drive/)
+    expect(() => resolveConfig({ modes: { night: { maxWakes: 1 } } } as never)).toThrow(/anima\/config-removed/)
+    expect(() => resolveConfig({ selfModel: { changesPerDay: 3 } } as never)).toThrow(/anima\/config-removed: selfModel\.changesPerDay/)
     expect(() => resolveConfig({ needs: [DEFAULT_NEEDS[0]!, DEFAULT_NEEDS[0]!] })).toThrow(/defined twice/)
   })
 })

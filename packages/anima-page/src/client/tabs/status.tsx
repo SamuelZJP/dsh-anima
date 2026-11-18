@@ -22,7 +22,7 @@ export function StatusTab() {
       <Problem error={status.error} />
       <div className="anima-row">
         {s.paused ? <Pill tone="bad">paused</Pill> : <Pill tone="ok">running</Pill>}
-        <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run(s.paused ? 'resume' : 'pause', {}, () => s.paused ? 'Resumed.' : 'Paused: every behavior is refused and heartbeats stop.')}>
+        <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run(s.paused ? 'resume' : 'pause', {}, () => s.paused ? 'Resumed.' : 'Paused: nothing reaches her and every behavior is refused; her heart keeps beating.')}>
           {s.paused ? 'Resume' : 'Pause'}
         </button>
         {s.sleep === undefined ? null : s.sleep.asleep
@@ -31,7 +31,6 @@ export function StatusTab() {
         {s.sleep?.asleep === true
           ? <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run('wake', {}, () => 'She is awake now; her Self sees the inbox.')}>Wake her</button>
           : null}
-        {(s.speech?.lostReplies ?? 0) > 0 ? <Pill tone="bad">{s.speech!.lostReplies} lost {s.speech!.lostReplies === 1 ? 'reply' : 'replies'} today</Pill> : null}
         <span className="anima-muted">Updates every 5 s.</span>
       </div>
       {act.outcome}
@@ -47,9 +46,6 @@ export function StatusTab() {
             <dt>Last</dt><dd>{life?.lastHeartbeat ?? '—'}</dd>
             <dt>Total</dt><dd>{life === undefined ? '—' : `${life.counts.heartbeats} beats, ${life.counts.acts} acted, ${life.counts.rests} rests`}</dd>
           </dl>
-          <div style={{ marginTop: 8 }}>
-            <button type="button" className="anima-btn small" disabled={act.busy} onClick={() => void act.run('heartbeat', {}, () => 'Heartbeat delivered.')}>Run a heartbeat now</button>
-          </div>
         </Card>
         <Card title="Energy and mood">
           <div className="anima-row"><span style={{ width: 60 }}>energy</span><Bar value={s.energy} /><span>{s.energy.toFixed(2)}</span></div>
@@ -62,7 +58,7 @@ export function StatusTab() {
           <div className="anima-row"><Bar value={share(used, budget)} tone={tone(share(used, budget))} /></div>
           <div>{count(used)} of {count(budget)} billable tokens</div>
           <div className="anima-muted">day {count(tokens.day)} · night {count(tokens.night)}</div>
-          <div style={{ marginTop: 6 }}>Conversations started {s.budgets.initiates.used} of {s.budgets.initiates.perDay} · night wakes left {s.budgets.nightWakesLeft}</div>
+          <div style={{ marginTop: 6 }}>Conversations started {s.budgets.initiates.used} of {s.budgets.initiates.perDay}</div>
         </Card>
       </div>
       <div className="anima-section">

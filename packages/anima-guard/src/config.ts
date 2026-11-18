@@ -57,7 +57,19 @@ export interface TimeWindow {
 }
 
 /** Plugin config of `@anima/guard`. */
+/** Which chats of one platform may reach her and be reached (the owner's always may). */
+export interface AllowlistEntry {
+  /** Every chat of the platform. */
+  open: boolean
+  /** Private chats: the other person's platform user id. */
+  users: string[]
+  /** Groups: the platform group id. */
+  groups: string[]
+}
+
 export interface Config {
+  /** Per platform; a platform not listed lets only the owner's own channels through. */
+  allowlist: Record<string, AllowlistEntry>
   quotas: QuotaRule[]
   limits: LimitRule[]
   allow: AllowRule[]
@@ -94,7 +106,7 @@ export interface Config {
 export const DEFAULT_QUOTAS: QuotaRule[] = [
   { effect: 'express', per: 'channel', limit: 30, windowMinutes: 60 },
   { per: 'global', limit: 200, windowMinutes: 24 * 60 },
-  { behavior: 'schedule_create', per: 'global', limit: 20, windowMinutes: 24 * 60 },
+  { behavior: 'alarm_set', per: 'global', limit: 20, windowMinutes: 24 * 60 },
   { behavior: 'group_wake', per: 'channel', limit: 6, windowMinutes: 60 },
   { behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 },
   { platform: 'bili', per: 'platform', limit: 60, windowMinutes: 60 },
@@ -111,7 +123,6 @@ export const DEFAULT_LIMITS: LimitRule[] = [
   { behavior: 'bili_view_closely', fact: 'frames', max: 12 },
   { behavior: 'bili_view_closely', fact: 'durationSeconds', max: 20 * 60 },
   { behavior: 'qq_say', fact: 'messages', max: 5 },
-  { behavior: 'local_say', fact: 'messages', max: 5 },
 ]
 
 const effect = z.union(EFFECT_CLASSES.map(value => z.const(value))) as z<EffectClass>
@@ -119,6 +130,11 @@ const hhmm = z.string().pattern(/^\d{1,2}:\d{2}$/)
 
 /** Schemastery schema for {@link Config}. */
 export const Config: z<Config> = z.object({
+  allowlist: z.dict(z.object({
+    open: z.boolean().default(false).description('Every chat of this platform.'),
+    users: z.array(z.string()).default([]).description('Private chats: user ids.'),
+    groups: z.array(z.string()).default([]).description('Groups: group ids.'),
+  })).default({}).description('Chats that may reach her and that she may reach, per platform; a platform not listed lets only the owner\'s own channels through.'),
   quotas: z.array(z.object({
     effect,
     behavior: z.string(),
@@ -187,4 +203,21 @@ function minutes(text: string): number {
   const [h, m] = text.split(':').map(Number) as [number, number]
   if (h > 23 || m > 59) throw new AnimaError('anima/config-invalid', `"${text}" is not a valid HH:mm time.`)
   return h * 60 + m
+}
+
+/**
+ * Whether a channel is on the allowlist: the owner's own channels always are; a
+ * listed platform lets through every chat (`open`) or the listed users and groups.
+ * @param allowlist - per platform.
+ * @param key - channel key `platform:account:kind:id`.
+ * @param isOwner - whether the channel is the owner's own (from the adapter).
+ */
+export function onAllowlist(allowlist: Readonly<Record<string, AllowlistEntry>>, key: string, isOwner: boolean): boolean {
+  if (isOwner) return true
+  const [platform, , kind, ...rest] = key.split(':')
+  const entry = platform === undefined ? undefined : allowlist[platform]
+  if (entry === undefined) return false
+  if (entry.open) return true
+  const id = rest.join(':')
+  return kind === 'group' ? entry.groups.includes(id) : entry.users.includes(id)
 }

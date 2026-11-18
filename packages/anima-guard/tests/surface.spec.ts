@@ -7,24 +7,24 @@ import { callAs, invoke, provideSessions, registerEcho, setupGuarded, tempDataDi
 const self = { kind: 'self' as const }
 const localChat = {
   kind: 'conversation' as const,
-  channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'local:owner:private:owner',
+  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
+  channelKey: 'demo:owner:private:owner',
 }
 
 describe('owner surface and activity log', () => {
   it('records gate decisions with codes, keeps her records, and summarizes the day', async () => {
     const ctx = await setupGuarded({ quotas: [{ effect: 'express', per: 'channel', limit: 1, windowMinutes: 10 }] })
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', { platform: 'local', effect: 'express', sessions: ['conversation'] })
-    await callAs(ctx, 'chat-1', 'local_say')
-    await callAs(ctx, 'chat-1', 'local_say')
+    registerEcho(ctx, 'demo_say', { platform: 'demo', effect: 'express', sessions: ['conversation'] })
+    await callAs(ctx, 'chat-1', 'demo_say')
+    await callAs(ctx, 'chat-1', 'demo_say')
     // What the persona reports reaches the log through anima/record.
     ctx.anima.recordActivity({ type: 'wake', stimulus: 'message', session: 'conversation', sessionId: 'chat-1' })
     const day = ctx.anima.dayKey()
     const gates = ctx.animaGuard.activity.read(day).filter(r => r.type === 'gate')
     expect(gates).toEqual([
-      expect.objectContaining({ behavior: 'local_say', decision: 'allowed', session: 'conversation', sessionId: 'chat-1' }),
-      expect.objectContaining({ behavior: 'local_say', decision: 'refused', code: 'anima/over-quota' }),
+      expect.objectContaining({ behavior: 'demo_say', decision: 'allowed', session: 'conversation', sessionId: 'chat-1' }),
+      expect.objectContaining({ behavior: 'demo_say', decision: 'refused', code: 'anima/over-quota' }),
     ])
     const summary = ctx.animaGuard.daySummary(day)
     expect(summary).toMatchObject({ calls: { allowed: 1, refused: 1 }, refusals: [{ code: 'anima/over-quota', count: 1 }], wakes: { total: 1, bySession: { conversation: 1 } } })

@@ -12,16 +12,16 @@ import { SelfModelStore } from '../src/index.ts'
 import * as persona from '../src/persona.ts'
 import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
-const limits = { maxEntries: 3, maxEntryChars: 40, digestChars: 60 }
+const options = { digestChars: 60 }
 const self = { kind: 'self' as const }
 const localChat = {
   kind: 'conversation' as const,
-  channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'local:owner:private:owner',
+  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
+  channelKey: 'demo:owner:private:owner',
 }
 
 function store(dir = tempDataDir()) {
-  return new SelfModelStore(join(dir, 'self-model.json'), join(dir, 'self-model-log.jsonl'), limits)
+  return new SelfModelStore(join(dir, 'self-model.json'), join(dir, 'self-model-log.jsonl'), options)
 }
 
 
@@ -41,12 +41,13 @@ describe('self-model store', () => {
     expect(readFileSync(join(dir, 'self-model-log.jsonl'), 'utf8').trim().split('\n')).toHaveLength(3)
   })
 
-  it('refuses long text, a full model and unknown ids', () => {
+  it('keeps any number of notes of any length; refuses only an empty add and an unknown id', () => {
     const s = store()
-    expect(() => s.note({ section: 'other', text: 'x'.repeat(41), reason: 'r', at: 1, real: 1 })).toThrow(/anima\/self-model-text/)
-    for (let i = 0; i < 3; i++) s.note({ section: 'other', text: `note ${i}`, reason: 'r', at: i, real: i })
-    expect(() => s.note({ section: 'other', text: 'one more', reason: 'r', at: 9, real: 9 })).toThrow(/anima\/self-model-full/)
-    expect(() => s.note({ section: 'other', replaces: 'n99', reason: 'r', at: 9, real: 9 })).toThrow(/anima\/self-model-unknown/)
+    s.note({ section: 'other', text: 'x'.repeat(500), reason: 'r', at: 1, real: 1 })
+    for (let i = 0; i < 60; i++) s.note({ section: 'other', text: `note ${i}`, reason: 'r', at: i, real: i })
+    expect(s.entries()).toHaveLength(61)
+    expect(() => s.note({ section: 'other', text: ' ', reason: 'r', at: 9, real: 9 })).toThrow(/anima\/self-model-text/)
+    expect(() => s.note({ section: 'other', replaces: 'n999', reason: 'r', at: 9, real: 9 })).toThrow(/anima\/self-model-unknown/)
   })
 
   it('reverts an add, a change and a remove, and refuses a stale revert', () => {
@@ -84,19 +85,16 @@ describe('self-model store', () => {
   })
 })
 
-describe('self_note behavior and its slow pace (physiology)', () => {
-  it('changes the self-model, and takes no more than 3 changes in a day', async () => {
+describe('self_note behavior', () => {
+  it('takes every change she makes: nothing inside limits how often', async () => {
     const ctx = await setupCore()
     provideSessions(ctx, { 'self-1': self })
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 5; i++) {
       const result = await callAs(ctx, 'self-1', 'self_note', { section: 'tastes', text: `taste ${i}`, reason: 'noticed' })
       expect(result.isError).toBe(false)
       expect(textOf(result)).toMatch(new RegExp(`d${i}: added n${i}`))
     }
-    const fourth = await callAs(ctx, 'self-1', 'self_note', { section: 'tastes', text: 'taste 4', reason: 'noticed' })
-    expect(fourth.isError).toBe(true)
-    expect(textOf(fourth)).toMatch(/^Error: anima\/self-model-slow: 你对自己的看法一天里变不了这么多次/)
-    expect(ctx.anima.selfModel.entries()).toHaveLength(3)
+    expect(ctx.anima.selfModel.entries()).toHaveLength(5)
     expect(ctx.anima.selfModel.diffs()[0]).toMatchObject({ sessionId: 'self-1', by: 'her' })
   })
 

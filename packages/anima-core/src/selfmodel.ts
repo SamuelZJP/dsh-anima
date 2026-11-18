@@ -56,16 +56,11 @@ interface ModelFile {
   entries: SelfEntry[]
 }
 
-/** Limits on her self-model, from config. */
-export interface SelfModelLimits {
-  readonly maxEntries: number
-  readonly maxEntryChars: number
+/** Self-model settings, from config. Nothing here limits what she keeps or how often she changes it. */
+export interface SelfModelOptions {
+  /** Characters of the short digest in prompts. */
   readonly digestChars: number
-  /** Changes her self-model takes in 24 hours of her clock (physiology: it changes slowly); unlimited when omitted. */
-  readonly changesPerDay?: number
 }
-
-const DAY_MS = 24 * 60 * 60_000
 
 /** Store of `<dataDir>/self-model.json` and its diff log `self-model-log.jsonl`. */
 export class SelfModelStore {
@@ -74,9 +69,9 @@ export class SelfModelStore {
   /**
    * @param path - `self-model.json`.
    * @param logPath - `self-model-log.jsonl`.
-   * @param limits - entry limits.
+   * @param options - digest size.
    */
-  constructor(private readonly path: string, private readonly logPath: string, private readonly limits: SelfModelLimits) {
+  constructor(private readonly path: string, private readonly logPath: string, private readonly options: SelfModelOptions) {
     this.file = readJson<ModelFile>(path) ?? { nextEntry: 1, nextDiff: 1, entries: [] }
   }
 
@@ -104,27 +99,12 @@ export class SelfModelStore {
    * Apply one change from her `self_note`.
    * @param input - section; text to add or change to; `replaces` an entry id; reason.
    * @returns the diff.
-   * @throws {AnimaError} `anima/self-model-slow`, `anima/self-model-text`, `anima/self-model-full`, `anima/self-model-unknown`.
+   * @throws {AnimaError} `anima/self-model-text` (no text to add), `anima/self-model-unknown` (no such note).
    */
   note(input: { section: SelfSection; text?: string | undefined; replaces?: string | undefined; reason: string; at: number; real: number; sessionId?: string | undefined }): SelfDiff {
-    const pace = this.limits.changesPerDay
-    if (pace !== undefined) {
-      const recent = this.diffs().filter(d => d.by === 'her' && d.at > input.at - DAY_MS && d.at <= input.at)
-      if (recent.length >= pace) {
-        const freeAt = recent[recent.length - pace]!.at + DAY_MS
-        const hours = Math.max(1, Math.ceil((freeAt - input.at) / 3_600_000))
-        throw new AnimaError('anima/self-model-slow', `你对自己的看法一天里变不了这么多次（已经变了 ${recent.length} 次）。大约 ${hours} 小时后再看看这一点是不是还成立。`)
-      }
-    }
     const text = input.text?.trim()
-    if (text !== undefined && text !== '' && text.length > this.limits.maxEntryChars) {
-      throw new AnimaError('anima/self-model-text', `keep each note under ${this.limits.maxEntryChars} characters (this one has ${text.length}). Say it shorter.`)
-    }
     if (input.replaces === undefined) {
       if (text === undefined || text === '') throw new AnimaError('anima/self-model-text', 'give the text of the new note, or `replaces` with an entry id to change or remove one.')
-      if (this.file.entries.length >= this.limits.maxEntries) {
-        throw new AnimaError('anima/self-model-full', `your self-model already has ${this.file.entries.length} notes, the most allowed. Change or remove one with \`replaces\` instead.`)
-      }
       const entry: SelfEntry = { id: `n${this.file.nextEntry++}`, section: input.section, text, since: input.at }
       this.file.entries.push(entry)
       return this.commit({ by: 'her', op: 'add', entryId: entry.id, section: entry.section, after: text, reason: input.reason, at: input.at, real: input.real, sessionId: input.sessionId })
@@ -192,7 +172,7 @@ export class SelfModelStore {
     if (this.file.entries.length === 0) {
       return full ? [...lines, '(No notes yet. Use `self_note` when you notice something lasting about your tastes, habits or opinions.)'].join('\n') : ''
     }
-    let budget = this.limits.digestChars
+    let budget = this.options.digestChars
     for (const section of SELF_SECTIONS) {
       const entries = this.file.entries.filter(e => e.section === section).sort((a, b) => b.since - a.since)
       if (entries.length === 0) continue

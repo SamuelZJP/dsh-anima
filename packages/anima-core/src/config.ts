@@ -26,14 +26,6 @@ export interface ModeConfig {
   triageModel: ModelRoute
   /** Model of action turns in the Self session. */
   actionModel: ModelRoute
-  /** Shortest heartbeat interval she may choose (day). */
-  minIntervalMinutes: number
-  /** Longest heartbeat interval she may choose (day). */
-  maxIntervalMinutes: number
-  /** Interval when she does not choose one. */
-  defaultIntervalMinutes: number
-  /** Wake-ups per night (night). */
-  maxWakes: number
   /** Effect classes her body can do in this mode (asleep: only inner things). */
   allowedEffects: EffectClass[]
 }
@@ -67,23 +59,46 @@ export interface Config {
   energy: EnergyConfig
   /** Mood tuning. */
   mood: MoodConfig
-  /** Per-mode models and intervals. */
+  /** Per-mode models. */
   modes: Record<Mode, ModeConfig>
+  /** Her heart (genes): the rhythm of her self-drive. */
+  heartbeat: {
+    /** Her resting rhythm: minutes on her clock between beats. */
+    restingMinutes: number
+  }
   /** Her self-model. */
   selfModel: {
-    /** Most notes she may keep. */
-    maxEntries: number
-    /** Longest note, in characters. */
-    maxEntryChars: number
     /** Characters of the short digest in conversation prompts. */
     digestChars: number
-    /** Changes her self-model takes in 24 hours: it changes slowly (physiology). */
-    changesPerDay: number
   }
 }
 
 /** Keys that moved to the `anima-guard` row (R1): set on core, they fail the load. */
 const MOVED_TO_GUARD = ['quotas', 'limits', 'allow', 'approve', 'approvals', 'initiate'] as const
+
+/**
+ * Keys removed in R2 because they were rules inside the persona, not her body
+ * (docs/CONSTITUTION.md): set, they fail the load with the reason.
+ */
+const REMOVED: readonly { path: readonly string[]; why: string }[] = [
+  ...(['day', 'night'] as const).flatMap(mode => (['minIntervalMinutes', 'maxIntervalMinutes', 'defaultIntervalMinutes', 'maxWakes'] as const).map(key => ({
+    path: ['modes', mode, key],
+    why: 'her heartbeat is her self-drive, not something she or anyone chooses or bounds; its rhythm is heartbeat.restingMinutes (a gene)',
+  }))),
+  ...(['maxEntries', 'maxEntryChars', 'changesPerDay'] as const).map(key => ({
+    path: ['selfModel', key],
+    why: 'nothing inside the persona limits her self-model; the owner can revert changes from outside',
+  })),
+]
+
+function valueAt(raw: Record<string, unknown>, path: readonly string[]): unknown {
+  let value: unknown = raw
+  for (const key of path) {
+    if (value === null || typeof value !== 'object') return undefined
+    value = (value as Record<string, unknown>)[key]
+  }
+  return value
+}
 
 /** Default model: DeepSeek-V4.1-Flash on the official API. */
 export const DEFAULT_MODEL: ModelRoute = { provider: 'deepseek-official', model: 'deepseek-flash' }
@@ -95,14 +110,10 @@ const modelRoute = z.object({
   model: z.string().default(DEFAULT_MODEL.model),
 })
 
-function modeSchema(defaults: { min: number; max: number; def: number; wakes: number; effects: EffectClass[] }) {
+function modeSchema(defaults: { effects: EffectClass[] }) {
   return z.object({
     triageModel: modelRoute.description('Model of triage turns.'),
     actionModel: modelRoute.description('Model of action turns in the Self session.'),
-    minIntervalMinutes: z.number().min(1).default(defaults.min).description('Shortest heartbeat interval she may choose.'),
-    maxIntervalMinutes: z.number().min(1).default(defaults.max).description('Longest heartbeat interval she may choose.'),
-    defaultIntervalMinutes: z.number().min(1).default(defaults.def).description('Interval when she does not choose one.'),
-    maxWakes: z.number().min(0).default(defaults.wakes).description('Wake-ups allowed per night.'),
     allowedEffects: z.array(effect).default(defaults.effects).description('Effect classes her body can do in this mode.'),
   })
 }
@@ -153,14 +164,14 @@ export const Config: z<Config> = z.object({
     halfLifeHours: z.number().min(0).default(3),
   }),
   modes: z.object({
-    day: modeSchema({ min: 20, max: 240, def: 60, wakes: 0, effects: [...EFFECT_CLASSES] }),
-    night: modeSchema({ min: 20, max: 480, def: 60, wakes: 1, effects: ['observe', 'internal'] }),
-  }).description('Per-mode models and heartbeat intervals.'),
+    day: modeSchema({ effects: [...EFFECT_CLASSES] }),
+    night: modeSchema({ effects: ['observe', 'internal'] }),
+  }).description('Per-mode models.'),
+  heartbeat: z.object({
+    restingMinutes: z.number().min(1).default(60).description('Her resting heart rhythm (a gene): minutes on her clock between beats. Nothing she does and nothing outside changes it.'),
+  }).description('Her heart: the rhythm of her self-drive (genes, not limits).'),
   selfModel: z.object({
-    maxEntries: z.natural().min(1).default(40).description('Most self-model notes she may keep.'),
-    maxEntryChars: z.natural().min(20).default(200).description('Longest self-model note, in characters.'),
     digestChars: z.natural().min(0).default(600).description('Characters of the short self-model digest in conversation prompts.'),
-    changesPerDay: z.natural().min(1).default(3).description('Changes her self-model takes in 24 hours; it changes slowly.'),
   }).description('Her self-model.'),
 }) as z<Config>
 
@@ -182,17 +193,15 @@ export function resolveConfig(input: Partial<Config> | undefined): ResolvedConfi
   if (moved.length > 0) {
     throw new AnimaError('anima/config-moved', `${moved.join(', ')} moved to the anima-guard row (safety limits live outside the persona). Move them there; modes.day/night.tokenBudget becomes budget.day/night.`)
   }
+  const removed = REMOVED.filter(entry => valueAt(raw, entry.path) !== undefined)
+  if (removed.length > 0) {
+    throw new AnimaError('anima/config-removed', removed.map(entry => `${entry.path.join('.')} is gone: ${entry.why}`).join('; ') + '. Remove it from the anima-core row.')
+  }
   let config: Config
   try {
     config = Config((input ?? {}) as Config)
   } catch (error: unknown) {
     throw new AnimaError('anima/config-invalid', `${error instanceof Error ? error.message : String(error)}. Check the anima-core row in cordis.yml.`)
-  }
-  for (const mode of ['day', 'night'] as const) {
-    const m = config.modes[mode]
-    if (m.minIntervalMinutes > m.maxIntervalMinutes) {
-      throw new AnimaError('anima/config-invalid', `modes.${mode}: minIntervalMinutes (${m.minIntervalMinutes}) exceeds maxIntervalMinutes (${m.maxIntervalMinutes}).`)
-    }
   }
   const names = new Set<string>()
   for (const need of config.needs) {

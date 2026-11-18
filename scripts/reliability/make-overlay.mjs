@@ -36,6 +36,10 @@ const yaml = `# Scripted reliability check (DESIGN §14). Own character and data
     initiate: { perDay: 0 }
     budget: { day: 3000000, night: 20000 }
     outbox: { delaySeconds: 5 }
+    allowlist:
+      qq:
+        users: [${USERS.map(user => `'${user.id}'`).join(', ')}]
+        groups: [${GROUPS.map(group => `'${group.id}'`).join(', ')}]
     quotas:
 ${quotas.map(rule => `      - ${JSON.stringify(rule)}`).join('\n')}
 - id: anima-life
@@ -49,11 +53,6 @@ ${quotas.map(rule => `      - ${JSON.stringify(rule)}`).join('\n')}
     account: '${ACCOUNT}'
     owner: '${OWNER.id}'
     ownerName: ${OWNER.name}
-    allow:
-      users:
-${USERS.map(user => `        - { id: '${user.id}', name: ${user.name} }`).join('\n')}
-      groups:
-${GROUPS.map(group => `        - { id: '${group.id}', name: ${group.name} }`).join('\n')}
 - insert:
     - id: anima-reliability-check
       name: ${check}

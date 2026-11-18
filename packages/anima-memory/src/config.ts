@@ -11,7 +11,7 @@ import { AnimaError, DEFAULT_MODEL, type ModelRoute } from '@anima/core'
 export interface PersonLink {
   /** Person id used in scopes, e.g. `alice` gives `private:alice`. */
   id: string
-  /** Accounts `platform:userId`, e.g. `qq:12345`, `local:alice`. */
+  /** Accounts `platform:userId`, e.g. `qq:12345`, `qq:67890`. */
   accounts: string[]
 }
 

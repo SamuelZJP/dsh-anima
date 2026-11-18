@@ -9,13 +9,12 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from
 import { join } from 'node:path'
 import type { ActivityRecord, GateRecord, SleepActivity, WakeRecord } from '@anima/core'
 
-export type { ActivityRecord, GateRecord, NewActivity, OwnerRecord, OwnerSource, PlatformRecord, SleepActivity, SpeechRecord, WakeRecord } from '@anima/core'
+export type { ActivityRecord, GateRecord, NewActivity, OwnerRecord, OwnerSource, PlatformRecord, SleepActivity, WakeRecord } from '@anima/core'
 
 /** Budget counters of one day, for the summary. */
 export interface DayCounts {
   readonly tokens: Readonly<Record<'day' | 'night', number>>
   readonly initiates: number
-  readonly nightWakes: number
 }
 
 /** Day summary for the Activity tab. */
@@ -31,9 +30,7 @@ export interface DaySummary {
   readonly ownerActions: number
   readonly tokens: Readonly<Record<'day' | 'night', number>>
   readonly initiates: number
-  readonly nightWakes: number
   /** Reminders steered into unclosed conversation turns, and turns that still ended unclosed (DESIGN §6). */
-  readonly speech: { readonly reminders: number; readonly lostReplies: number }
   /**
    * Sleep and the inbox (Phase 9): times she went to sleep (by her, at the latest
    * bedtime), deliberate wakes, held and released inbox messages, and how often
@@ -123,8 +120,6 @@ export function summarize(day: string, records: readonly ActivityRecord[], ledge
     ownerActions: records.filter(r => r.type === 'owner').length,
     tokens: { ...ledger.tokens },
     initiates: ledger.initiates,
-    nightWakes: ledger.nightWakes,
-    speech: { reminders: records.filter(r => r.type === 'reminder').length, lostReplies: records.filter(r => r.type === 'lost-reply').length },
     sleep: {
       byHer: records.filter(r => r.type === 'sleep' && r.by === 'her').length,
       atLatest: records.filter(r => r.type === 'sleep' && r.by === 'latest').length,

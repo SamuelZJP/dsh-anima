@@ -1,6 +1,7 @@
 packages:
   - packages/*
   - bundle
+  - guard-bundle
 
 # Install scripts of DSH's own runtime dependencies (native addons for shells
 # and subprocesses). Same code `npx @deepseek-ai/dsh` would run.

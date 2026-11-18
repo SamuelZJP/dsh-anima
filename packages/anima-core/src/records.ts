@@ -63,25 +63,6 @@ export interface PlatformRecord {
 }
 
 /**
- * A conversation turn that was about to stop without a closing action (DESIGN
- * §6, Turn shape): `reminder` when a reminder was steered into it, `lost-reply`
- * when it ended unclosed after the reminders. Nothing is ever forwarded.
- */
-export interface SpeechRecord {
-  readonly type: 'reminder' | 'lost-reply'
-  readonly at: number
-  readonly real: number
-  readonly channel: string
-  readonly sessionId: string
-  /** Her last plain text in that turn, which nobody saw (may be empty). */
-  readonly text: string
-  /** Reminder number in the turn (reminders only). */
-  readonly count?: number
-  /** Lost replies only: how the turn ended when it was not by running out of reminders, e.g. `error: MALFORMED_RESPONSE`. */
-  readonly reason?: string
-}
-
-/**
  * Sleep and the inbox (Phase 9): she fell asleep (`sleep`, by her or at the
  * latest bedtime), the owner woke her (`woken`), a chat message was held while
  * she slept or was paused (`inbox-held`), or held messages went to their chat
@@ -107,7 +88,7 @@ export interface SleepActivity {
 }
 
 /** Any activity record. */
-export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SpeechRecord | SleepActivity
+export type ActivityRecord = GateRecord | WakeRecord | OwnerRecord | PlatformRecord | SleepActivity
 
 /** Activity record without its timestamps, as producers hand it in. */
-export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SpeechRecord, 'at' | 'real'> | Omit<SleepActivity, 'at' | 'real'>
+export type NewActivity = Omit<GateRecord, 'at' | 'real'> | Omit<WakeRecord, 'at' | 'real'> | Omit<OwnerRecord, 'at' | 'real'> | Omit<PlatformRecord, 'at' | 'real'> | Omit<SleepActivity, 'at' | 'real'>

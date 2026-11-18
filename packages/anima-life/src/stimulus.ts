@@ -215,7 +215,7 @@ export function senderLabel(stimulus: Extract<Stimulus, { type: 'message' }>): s
  * the primer; each states the facts of the arrival (DESIGN §5 table) and never
  * whether she should answer. The router adds the "how to answer here" line to
  * waking conversation arrivals.
- * @returns e.g. `[本地 私聊「Owner (local)」] Sam（主人）对你说: hello`.
+ * @returns e.g. `[QQ 私聊「Sam」] Sam（主人）对你说: hello`.
  */
 export function stimulusText(stimulus: Stimulus): string {
   switch (stimulus.type) {
@@ -312,7 +312,7 @@ export function burstText(stimulus: Extract<Stimulus, { type: 'burst' }>): strin
 export function answerLine(channel: ChannelRef, say: string | undefined, ender: string | undefined): string {
   const who = channel.kind === 'group' ? '群里所有人都看得到' : '只有对方看得到'
   const speak = say === undefined ? '这里没有说话的工具' : `用 ${say} 说话（${who}）`
-  return `在这里回应：${speak}${ender === undefined ? '' : `，或用 ${ender} 结束不说`}。只写文字不算回应。`
+  return `在这里回应：${speak}${ender === undefined ? '' : `，或用 ${ender} 结束不说`}。只写文字没有人看得到。`
 }
 
 /** One-line summary shown on the collapsed context row. */

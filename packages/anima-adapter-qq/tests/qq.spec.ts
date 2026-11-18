@@ -40,6 +40,8 @@ class FakeHost implements SessionHost<FakeAgent> {
 async function setup(extra: Record<string, unknown> = {}, life: Record<string, unknown> = {}) {
   const server = new FakeOneBot(ACCOUNT)
   const url = await server.listen()
+  server.respond('get_friend_list', () => [{ user_id: Number(OWNER), nickname: 'sam' }, { user_id: Number(FRIEND), nickname: 'cat', remark: 'Cat' }])
+  server.respond('get_group_list', () => [{ group_id: Number(GROUP), group_name: 'Test group' }])
   onTestFinished(() => server.close())
   const dataDir = mkdtempSync(join(tmpdir(), 'anima-qq-'))
   onTestFinished(() => rmSync(dataDir, { recursive: true, force: true }))
@@ -52,11 +54,12 @@ async function setup(extra: Record<string, unknown> = {}, life: Record<string, u
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, ...life } })
   const fiber = await ctx.plugin(qq, {
     url, accessToken: 'tok', account: ACCOUNT, owner: OWNER, ownerName: 'Sam',
-    allow: { users: [{ id: FRIEND, name: 'Cat' }], groups: [{ id: GROUP, name: 'Test group' }] },
     callTimeoutSeconds: 2, reconnect: { maxSeconds: 1 },
     ...extra,
   })
   await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toMatch(/QQ: connected .* \(Anima\)/))
+  // The adapter publishes every friend and group the account has once it is logged in.
+  await vi.waitFor(() => expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:${GROUP}`)).toBeDefined())
   return { ctx, host, server, fiber }
 }
 
@@ -83,31 +86,33 @@ function groupMessage(groupId: string, userId: string, segments: unknown[], id =
 }
 
 describe('QQ adapter', () => {
-  it('connects with the access token, verifies the account and publishes the allowlist', async () => {
+  it('connects with the access token, verifies the account and publishes every friend and group', async () => {
     const { ctx, server } = await setup()
     expect(server.connections[0]).toBe('?access_token=tok')
     expect(server.callsOf('get_login_info')).toHaveLength(1)
     expect(ctx.anima.describeSession(ownerSession)).toMatchObject({ kind: 'conversation', channelKey: ownerKey })
     expect(ctx.anima.channelInfo(ownerKey)).toMatchObject({ isOwner: true, display: 'Sam (QQ)' })
-    // She has the configured chats only.
-    expect(ctx.anima.channelInfo(groupKey)).toMatchObject({ isOwner: false })
+    // Every chat of the account, with its name; which ones may reach her is decided outside.
+    expect(ctx.anima.channelInfo(groupKey)).toMatchObject({ isOwner: false, display: 'Test group (QQ)' })
+    expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:private:${FRIEND}`)).toMatchObject({ isOwner: false, display: 'Cat (QQ)' })
     expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:999`)).toBeUndefined()
-    expect(ctx.anima.statusLines().join('\n')).toContain(`QQ allowlist: owner ${OWNER}; users ${FRIEND}; groups ${GROUP}`)
+    expect(ctx.anima.statusLines().join('\n')).not.toContain('allowlist')
     expect(ctx.anima.ownerLine?.name).toContain('QQ private chat with the owner')
   })
 
-  it('delivers private messages from the owner and allowlisted users, and drops everyone else', async () => {
+  it('delivers every chat, a new one included: the adapter filters nothing', async () => {
     const { ctx, host, server } = await setup()
     server.push(privateMessage(OWNER, 'morning!'))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    expect(host.inbox(ownerSession)[0]).toMatch(/\[QQ 私聊「Sam」\] Sam（主人） \[msg \d+\] 对你说: morning!\n在这里回应：用 qq_say 说话（只有对方看得到），或用 end_turn 结束不说。只写文字不算回应。$/)
+    expect(host.inbox(ownerSession)[0]).toMatch(/\[QQ 私聊「Sam」\] Sam（主人） \[msg \d+\] 对你说: morning!\n在这里回应：用 qq_say 说话（只有对方看得到），或用 end_turn 结束不说。只写文字没有人看得到。$/)
     server.push(privateMessage(FRIEND, 'hi there'))
     await vi.waitFor(() => expect(host.inbox(conversationSessionId('anima', `qq:${ACCOUNT}:private:${FRIEND}`))).toHaveLength(1))
     server.push(privateMessage('55555', 'spam'))
     server.push(groupMessage('999', '2002', [{ type: 'at', data: { qq: ACCOUNT } }]))
     server.push(privateMessage(ACCOUNT, 'my own echo'))
-    await vi.waitFor(() => expect(ctx.anima.statusLines().join('\n')).toContain('dropped (not allowlisted) 2'))
-    expect([...host.sessions.keys()]).toHaveLength(2)
+    await vi.waitFor(() => expect([...host.sessions.keys()]).toHaveLength(4))
+    expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:private:55555`)).toMatchObject({ display: 'someone (QQ)' })
+    expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:999`)).toMatchObject({ display: 'group 999 (QQ)' })
   })
 
   it('wakes a group when she is @-mentioned or replied to, and triages other chatter', async () => {
@@ -186,7 +191,7 @@ describe('QQ adapter', () => {
     expect(partial.text).toContain('anima/partly-sent: 1 of 3 messages went out (msg 9501); message 2 failed')
   })
 
-  it('refuses qq_say outside allowlisted QQ sessions and mentions in private chats', async () => {
+  it('refuses qq_say outside QQ sessions and mentions in private chats', async () => {
     const { ctx } = await setup()
     expect((await callAs(ctx, selfSessionId('anima'), 'qq_say', { text: 'x' })).text).toContain('anima/wrong-session')
     expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'x', mention: ['2002'] })).text).toContain('mention works only in group chats')

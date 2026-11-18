@@ -214,6 +214,33 @@ async function preStep(ctx: Context, sessionId: string, text: string): Promise<U
   return decision.kind === 'enter' ? decision.messages : []
 }
 
+describe('native DSH sessions (not hers)', () => {
+  it('get nothing from Anima: no behavior, no recall, no record, no stimulus', async () => {
+    const { ctx, host } = await setup()
+    await callAs(ctx, sessionOf(ALICE), 'memory_remember', { text: 'Alice likes rainy days.' })
+    const records: unknown[] = []
+    ctx.on('anima/record', record => { records.push(record) })
+    const sent = host.delivered.length + host.injected.length
+    const web = 'web-session-1'
+    expect(ctx.anima.describeSession(web)).toBeUndefined()
+
+    const agent = { id: web } as unknown as Agent
+    const toolSet = await ctx.tools.resolve({ agent, modelSelection: { provider: 't', model: 't' }, signal: new AbortController().signal })
+    try {
+      const view = toolSet.view(agent)
+      expect(ctx.anima.behaviorNames().length).toBeGreaterThan(5)
+      expect(ctx.anima.behaviorNames().filter(name => view.has(name))).toEqual([])
+    } finally {
+      toolSet.dispose()
+    }
+    expect(await preStep(ctx, web, 'what does Alice like? rainy days?')).toHaveLength(1)
+    ctx.emit('session/event' as never, { id: web } as never, { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] } } as never)
+    ctx.emit('session/event' as never, { id: web } as never, { type: 'turn/end', data: { reason: 'done' } } as never)
+    expect(records).toEqual([])
+    expect(host.delivered.length + host.injected.length).toBe(sent)
+  })
+})
+
 describe('AnimaMemory', () => {
   it('records inbound messages and outbound speech with the session scope', async () => {
     const { ctx } = await setup()

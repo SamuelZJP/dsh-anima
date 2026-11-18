@@ -14,8 +14,6 @@ export interface Config {
     settleSeconds: number
     /** Real seconds after a burst's first message after which she is woken anyway (Phase 9). */
     settleMaxSeconds: number
-    /** Reminders steered into a turn that is about to stop without a closing action, before a lost reply is recorded. */
-    closeReminders: number
   }
   /** Group triage (DESIGN §5). */
   groupTriage: {
@@ -42,8 +40,7 @@ export const Config: z<Config> = z.object({
   conversation: z.object({
     settleSeconds: z.number().min(0).default(15).description('Real seconds a chat must stay quiet (no message, no typing) before its messages wake her, so a burst arrives as one wake; 0 wakes at once. Intents are never delayed.'),
     settleMaxSeconds: z.number().min(0).default(60).description('Real seconds after the first message of a burst after which she is woken anyway, however long the stream goes on.'),
-    closeReminders: z.natural().default(2).description('Reminders steered into a conversation turn that is about to stop without a say or end_turn; after them the turn ends and a lost reply is recorded.'),
-  }).description('Conversation turns: settle window and close reminders.'),
+  }).description('Conversation turns: the settle window of bursts.'),
   groupTriage: z.object({
     attentionSeconds: z.number().min(0).default(90).description('Real seconds after she spoke in a group during which its messages wake her directly (counted by the group_attention quota); 0 turns it off.'),
     windowSeconds: z.number().min(0.01).default(60).description('Real seconds a group\'s buffer of unaddressed messages stays open.'),
@@ -63,6 +60,9 @@ export const Config: z<Config> = z.object({
 export function resolveLifeConfig(input: Partial<Config> | undefined): Readonly<Config> {
   if ((input as Record<string, unknown> | undefined)?.outbox !== undefined) {
     throw new AnimaError('anima/config-moved', 'outbox moved to the anima-guard row (holding her messages is done outside the persona). Move it there.')
+  }
+  if ((input as { conversation?: Record<string, unknown> } | undefined)?.conversation?.closeReminders !== undefined) {
+    throw new AnimaError('anima/config-removed', 'conversation.closeReminders is gone: her plain text is her thinking, and nothing reminds her to speak. Remove it from the anima-life row.')
   }
   let config: Config
   try {

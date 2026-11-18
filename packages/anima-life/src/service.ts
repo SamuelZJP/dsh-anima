@@ -8,7 +8,7 @@
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, channelKey, type ChannelRef, closesTurn, describeGoal, formatLocal, formatStamp, nextWake, parseWhen, readJson, writeJson, type AdmitRefusal } from '@anima/core'
+import { AnimaError, channelKey, type ChannelRef, describeGoal, formatLocal, formatStamp, readJson, writeJson, type AdmitRefusal } from '@anima/core'
 import type {} from '@anima/core'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
@@ -17,10 +17,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-title'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-workspace'
-import { reminderText, TurnCloser } from './closer.ts'
 import { groupTriageModel, resolveLifeConfig, type Config as LifeConfig } from './config.ts'
 import { batchText, GroupTriage, type Batch, type MessageStimulus } from './group-triage.ts'
-import { nextHeartbeat } from './heartbeat.ts'
+import { nextBeat } from './heartbeat.ts'
 import { answeringIntent, describeOutcome, IntentTracker, type Outcome, type TrackerState } from './intent.ts'
 import { buildReport, type ChannelLine } from './report.ts'
 import { Inbox, inboxSummary } from './inbox.ts'
@@ -283,8 +282,6 @@ export class AnimaLife extends Service {
   private readonly platforms = new Map<string, PlatformHealth>()
   /** Pending express calls in conversation sessions, by `session|callId`. */
   private readonly expressCalls = new Map<string, string>()
-  /** Whether each conversation turn closed by an action (DESIGN §6, Turn shape). */
-  private readonly closer: TurnCloser
   /** Chat messages waiting for their chat to settle, by channel key (DESIGN §6, message timing). */
   private readonly settling = new Map<string, SettleEntry>()
   /** Her inbox: chat messages held while she slept or was paused (Phase 9). */
@@ -315,7 +312,6 @@ export class AnimaLife extends Service {
     this.inbox = new Inbox(join(dataDir, 'inbox.json'))
     this.file = { ...emptyFile(), ...readJson<LifeFile>(this.path) }
     this.tracker = new IntentTracker(this.file.intents, name => core.behavior(name)?.effect === 'express')
-    this.closer = new TurnCloser(this.config.conversation.closeReminders)
     const { groupTriage } = this.config
     this.triage = new GroupTriage(
       { windowMs: groupTriage.windowSeconds * 1000, maxBatch: groupTriage.maxBatch, timeoutMs: groupTriage.timeoutSeconds * 1000 },
@@ -347,9 +343,6 @@ export class AnimaLife extends Service {
     // deliberate wake or a resume shows her the inbox in Self.
     ctx.on('anima/sleep', () => {
       for (const key of [...this.settling.keys()]) this.flushSettled(key)
-      const next = this.file.nextHeartbeatAt
-      const now = core.clock.now()
-      if (next !== undefined && core.mode(next) === 'night') this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
     })
     ctx.on('anima/woken', () => {
       void this.wakeSelf('[被叫醒] 主人把你叫醒了。').catch((error: unknown) => ctx.logger.warn(`anima: could not wake Self: ${String(error)}`))
@@ -360,13 +353,11 @@ export class AnimaLife extends Service {
     })
 
     ctx.on('session/event', (session, event) => this.onSessionEvent(session.id, event))
-    ctx.on('agent/turn-stopping', ({ agent }) => this.onStopping(agent))
 
     ctx.effect(() => {
       this.disposed = false
       if (this.file.nextHeartbeatAt === undefined) {
-        const now = core.clock.now()
-        this.schedule(core.mode(now) === 'night' ? nextWakeOf(core, now) : now + MIN)
+        this.schedule(core.clock.now() + MIN)
       } else {
         this.arm()
       }
@@ -426,6 +417,10 @@ export class AnimaLife extends Service {
   async deliver(stimulus: Stimulus, options: { model?: ModelChoice } = {}): Promise<string> {
     if (stimulus.type === 'message' || stimulus.type === 'channel-event' || stimulus.type === 'intent' || stimulus.type === 'burst') {
       const key = channelKey(stimulus.channel)
+      // The outside may keep a chat away from her altogether (the allowlist): it never reaches her.
+      if (stimulus.type === 'message' || stimulus.type === 'channel-event') {
+        if (this.ctx.anima.admit({ kind: 'reach', channelKey: key })?.drop === true) return this.router.conversationId(stimulus.channel)
+      }
       if (stimulus.type === 'message') {
         // Known without replacing the adapter's own entry, so unloading the adapter still forgets it.
         if (this.router.channel(key) === undefined) this.router.know(stimulus.channel)
@@ -695,7 +690,7 @@ export class AnimaLife extends Service {
     const now = core.clock.now()
     this.groupDay(batch.channelKey, now).batches += 1
     this.save()
-    if (core.mode(now) === 'night' || core.admit({ kind: 'turn', purpose: 'group-triage' }) !== undefined) return false
+    if (core.mode(now) === 'night') return false
     const day = core.dayKey(now)
     this.router.groupTriageId(day)
     const lines = batch.messages.map(m => `${formatLocal(m.ts).slice(11)} ${senderLabel(m)}: ${m.text}`)
@@ -853,8 +848,7 @@ export class AnimaLife extends Service {
       if (this.disposed) return
       if (this.file.nextHeartbeatAt !== undefined && clock.now() + 1 < this.file.nextHeartbeatAt) return this.arm()
       this.beat().catch((error: unknown) => {
-        this.ctx.logger.warn(`anima heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
-        this.schedule(clock.now() + this.ctx.anima.modeConfig('day').minIntervalMinutes * MIN)
+        this.ctx.logger.warn(`anima heartbeat: the turn it started failed: ${error instanceof Error ? error.message : String(error)}`)
       })
     }, delay)
   }
@@ -865,9 +859,11 @@ export class AnimaLife extends Service {
   }
 
   /**
-   * Run one heartbeat now: build the situation report and deliver it to the
-   * day's triage session on the triage model. Skips (and reschedules) when
-   * paused, over budget, busy, or at night with no wake-up left.
+   * One beat of her heart (docs/design/body.md): her self-drive. The next beat
+   * is set first, from her resting rhythm alone; nothing she does and nothing
+   * outside changes it. Awake and idle, the beat stirs her: the situation report
+   * goes to the day's triage session. Asleep, it beats without waking her; while
+   * she is already in a turn, it starts no second one.
    */
   async beat(): Promise<void> {
     if (this.beating) return
@@ -875,19 +871,18 @@ export class AnimaLife extends Service {
     try {
       const core = this.ctx.anima
       const now = core.clock.now()
+      this.schedule(nextBeat(now, core.config.heartbeat.restingMinutes))
+      this.file.lastHeartbeatAt = now
+      this.file.counts.heartbeats += 1
+      this.save()
       const mode = core.mode(now)
-      const held = core.admit({ kind: 'turn', purpose: 'heartbeat' })
-      if (held !== undefined) return this.schedule(held.untilWake === true ? nextWakeOf(core, now) : now + core.modeConfig('day').minIntervalMinutes * MIN)
-      if (mode === 'night' && core.nightWakesLeft(now) <= 0) return this.schedule(nextWakeOf(core, now))
+      if (mode === 'night') return
       const day = core.dayKey(now)
       const triageId = this.router.triageId(day)
-      if (await this.busy(triageId) || await this.busy(this.router.selfId)) return this.schedule(now + MIN)
-      if (mode === 'night') core.useNightWake(now)
+      if (await this.busy(triageId) || await this.busy(this.router.selfId)) return
       // Awake with new messages in her inbox: she sees them in Self at once, not after a
       // cheap triage rest (owner decision 2026-11-12); she still decides whether to answer.
-      if (mode === 'day' && this.inboxNewest() > (this.file.inboxSeen ?? 0)) {
-        this.file.lastHeartbeatAt = now
-        this.file.counts.heartbeats += 1
+      if (this.inboxNewest() > (this.file.inboxSeen ?? 0)) {
         await this.wakeSelf('[醒来] 你醒了，收件箱里有你睡着时收到的消息。')
         return
       }
@@ -895,31 +890,14 @@ export class AnimaLife extends Service {
       const report = this.reportText(now)
       this.lastReport = report
       this.file.events = []
-      this.file.lastHeartbeatAt = now
-      this.file.counts.heartbeats += 1
       this.triageDecided = false
-      // Fallback if the triage turn never decides; rest() replaces it.
-      this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
-      const canConsolidate = core.behavior('memory_consolidate') !== undefined
-      const ask = mode === 'night'
-        ? canConsolidate ? 'You are asleep. Call rest(until?) to go back to sleep, or memory_consolidate() to sort your memories first.' : 'You are asleep. Call rest(until?) to go back to sleep.'
-        : 'Decide: rest(until?) to keep resting, or heartbeat_act(reason) to get up and act now.'
+      this.save()
+      const ask = 'Decide: rest to keep resting, or heartbeat_act(reason) to get up and act now.'
       await withTimeout(this.routed({ type: 'heartbeat', to: 'triage', day, text: `${report}\n\n${ask}`, ts: now }, agent => {
         this.host.selectModel(agent, core.modeConfig(mode).triageModel)
       }), DELIVERY_TIMEOUT_MS, 'heartbeat delivery to the triage session')
     } finally {
       this.beating = false
-    }
-  }
-
-  private scheduleInput(now: number, requested: number | undefined) {
-    const core = this.ctx.anima
-    const day = core.modeConfig('day')
-    return {
-      now, requested, rhythm: core.config.day,
-      minMinutes: day.minIntervalMinutes, maxMinutes: day.maxIntervalMinutes, defaultMinutes: day.defaultIntervalMinutes,
-      nightWakesLeft: core.nightWakesLeft(now),
-      mode: (t: number) => core.mode(t),
     }
   }
 
@@ -930,7 +908,7 @@ export class AnimaLife extends Service {
       return { key, display: channel.display, mayInitiate: core.admit({ kind: 'initiate', channelKey: key }) === undefined, lastContact: this.file.lastContact[key] }
     })
     const notes = [...this.sleepLines(now), core.selfModelReportLine(), ...[...this.reportLines].flatMap(provider => provider())]
-    if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed; alarms from schedule_create run on the real clock (real time now ${formatLocal(core.clock.realTime())}).`)
+    if (forSelf && core.clock.speed > 1) notes.push(`Test clock: your clock runs at ${core.clock.speed}× speed.`)
     return buildReport({
       time: formatStamp(now), phase: core.phase(now), mode: core.mode(now),
       state: core.stateText(),
@@ -977,11 +955,10 @@ export class AnimaLife extends Service {
     const report = this.reportText(now, true)
     this.file.events = []
     this.save()
-    const text = `${first}\n\n${report}\n\nDo what you want with your tools. When you are done, call rest(until?).`
+    const text = `${first}\n\n${report}\n\nDo what you want with your tools. When you are done, call rest.`
     await this.routed({ type: 'heartbeat', to: 'self', day: core.dayKey(now), text, ts: now }, agent => {
       this.host.selectModel(agent, core.modeConfig(core.mode(now)).actionModel)
     })
-    this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
   }
 
   /** Send time of the newest held message, or 0. */
@@ -997,7 +974,7 @@ export class AnimaLife extends Service {
     this.file.counts.acts += 1
     this.save()
     const report = this.lastReport === '' ? this.reportText(now, true) : `${this.lastReport}\n${this.reportText(now, true).split('\n').filter(line => line.startsWith('Test clock:')).join('\n')}`.trimEnd()
-    const text = `${report}\n\nYou woke up wanting to: ${reason}\nAct on it with your tools if you still want to. When you are done, call rest(until?).`
+    const text = `${report}\n\nYou woke up wanting to: ${reason}\nAct on it with your tools if you still want to. When you are done, call rest.`
     await this.routed({ type: 'heartbeat', to: 'self', day: core.dayKey(now), text, ts: now }, agent => {
       this.host.selectModel(agent, core.modeConfig(core.mode(now)).actionModel)
     })
@@ -1051,7 +1028,6 @@ export class AnimaLife extends Service {
       case 'user/message': {
         const source = (data as { source?: { kind?: string; ref?: string; wake?: boolean } }).source
         if (info.kind === 'conversation' && source?.kind === 'anima-stimulus') this.tracker.onUserMessage(sessionId, source.ref)
-        if (info.kind === 'conversation' && source?.kind === 'anima-stimulus' && source.wake === true) this.closer.onWake(sessionId)
         if (info.kind === 'group-triage' && source?.kind === 'anima-stimulus' && source.ref !== undefined) this.triageTurn = source.ref
         if (info.kind === 'self' && source?.kind === 'schedule') {
           const content = (data as { content?: { type: string; text?: string }[] }).content ?? []
@@ -1068,7 +1044,6 @@ export class AnimaLife extends Service {
           const args = safeObject(raw)
           this.tracker.onToolCall(sessionId, callId, name, typeof args.reason === 'string' ? args.reason : undefined)
           const meta = this.ctx.anima.behavior(name)
-          this.closer.onToolCall(sessionId, callId, meta !== undefined && closesTurn(meta, args))
           if (meta?.effect === 'express') {
             this.expressCalls.set(`${sessionId}|${callId}`, name)
             this.file.lastContact[info.channelKey] = this.ctx.anima.clock.now()
@@ -1084,7 +1059,6 @@ export class AnimaLife extends Service {
         const errorText = message.isError === true ? (message.content ?? []).map(block => block.text ?? '').join('') : undefined
         const outcome = this.tracker.onToolResult(sessionId, message.toolCallId, message.isError === true, errorText)
         this.report(outcome)
-        this.closer.onToolResult(sessionId, message.toolCallId, message.isError === true)
         const express = this.expressCalls.get(`${sessionId}|${message.toolCallId}`)
         this.expressCalls.delete(`${sessionId}|${message.toolCallId}`)
         // Speaking in a group opens its attention window (DESIGN §6, message timing).
@@ -1098,10 +1072,6 @@ export class AnimaLife extends Service {
         break
       }
       case 'assistant/message': {
-        if (info.kind === 'conversation') {
-          const content = (data as { message?: { content?: { type: string; text?: string }[] } }).message?.content ?? []
-          this.closer.onText(sessionId, content.filter(block => block.type === 'text').map(block => block.text ?? '').join(''))
-        }
         const waiter = info.kind === 'viewing' ? this.views.get(sessionId) : undefined
         if (waiter !== undefined) {
           const content = (data as { message?: { content?: { type: string; text?: string }[] } }).message?.content ?? []
@@ -1124,50 +1094,16 @@ export class AnimaLife extends Service {
         } else if (info.kind === 'conversation') {
           this.report(this.tracker.onTurnEnd(sessionId))
           this.save()
-          // A turn that failed (a model error, max tokens) never reaches turn-stopping: if a
-          // waking arrival was still unanswered, nothing reached them, so it is a lost reply too.
-          const reason = (data as { reason?: { kind?: string; error?: { code?: string; message?: string } } }).reason
-          const text = this.closer.lastText(sessionId)
-          if (this.closer.isOpen(sessionId) && reason?.kind !== undefined && reason.kind !== 'completed' && reason.kind !== 'aborted') {
-            const why = reason.kind === 'error' ? `error: ${reason.error?.code ?? reason.error?.message ?? 'unknown'}` : reason.kind
-            this.ctx.anima.recordActivity({ type: 'lost-reply', channel: info.channelKey, sessionId, text, reason: why })
-            this.ctx.logger.warn(`anima: lost reply in ${info.channel.id}: the turn ended with ${why} before a say or end_turn`)
-          }
-          this.closer.onTurnEnd(sessionId)
         } else if (info.kind === 'triage' && !this.triageDecided) {
           // Keep the fallback heartbeat scheduled at beat time.
           this.triageDecided = true
         } else if (info.kind === 'self' && this.file.awaitingSelfRest) {
           this.file.awaitingSelfRest = false
-          const now = this.ctx.anima.clock.now()
-          this.schedule(nextHeartbeat(this.scheduleInput(now, undefined)).at)
+          this.save()
         }
         break
       }
     }
-  }
-
-  /**
-   * A conversation turn is about to stop (DSH `agent/turn-stopping`). If no
-   * closing action followed the arrival that opened it, steer a reminder into
-   * the same turn; after `conversation.closeReminders` of them, let it end and
-   * record a lost reply (DESIGN §6). Nothing she wrote is ever forwarded.
-   */
-  private onStopping(agent: Agent): void {
-    const info = this.router.describe(agent.id)
-    if (info?.kind !== 'conversation') return
-    const action = this.closer.onStopping(agent.id)
-    if (action === undefined) return
-    const core = this.ctx.anima
-    if (action.kind === 'remind') {
-      core.recordActivity({ type: 'reminder', channel: info.channelKey, sessionId: agent.id, text: action.text, count: action.count })
-      const text = reminderText(`${info.channel.platform}_say`, action.text, action.count, this.config.conversation.closeReminders)
-      if (this.host.steer === undefined) return
-      this.host.steer(agent, this.router.stamped(text), `Close reminder ${action.count}`, 'close-reminder')
-      return
-    }
-    core.recordActivity({ type: 'lost-reply', channel: info.channelKey, sessionId: agent.id, text: action.text })
-    this.ctx.logger.warn(`anima: lost reply in ${this.router.channel(info.channelKey)?.display ?? info.channelKey}: the turn ended without a say or end_turn${action.text === '' ? '' : ` (text: ${JSON.stringify(action.text.slice(0, 80))})`}`)
   }
 
   /** One report line per channel: the latest time her conversation there responded. */
@@ -1185,36 +1121,22 @@ export class AnimaLife extends Service {
 
     core.registerBehavior(defineTool({
       name: 'rest',
-      description: 'Rest until your next heartbeat and end this turn. Give `until` as local "HH:mm" or "YYYY-MM-DD HH:mm" for when you want to be woken; the owner\'s limits may adjust it.',
+      description: 'Stop and rest: ends this turn. It sets nothing in your body; your heart keeps its own rhythm. To come back to something at a time, set an alarm.',
       parameters: {
-        until: { type: 'string', description: 'When to wake you next, local "HH:mm" or "YYYY-MM-DD HH:mm". Omit for the default interval.' },
-        note: { type: 'string', description: 'Optional note to yourself about why.' },
+        note: { type: 'string', description: 'Optional note to yourself.' },
       },
       output: {
-        schema: {
-          type: 'object', additionalProperties: false,
-          properties: {
-            next: { type: 'string', required: true, description: 'Next heartbeat, local time.' },
-            adjusted: { type: 'string', description: 'How your request was adjusted, if it was.' },
-          },
-        },
-        render: (_args, value) => [{ type: 'text', text: `Resting. Next heartbeat ${value.next}${value.adjusted === undefined ? '' : ` (${value.adjusted})`}.` }],
+        schema: { type: 'object', additionalProperties: false, properties: { resting: { type: 'boolean', required: true, description: 'Always true.' } } },
+        render: () => [{ type: 'text', text: 'Resting.' }],
       },
-      execute: async (args, exec) => {
-        const now = core.clock.now()
-        let requested: number | undefined
-        if (args.until !== undefined && args.until.trim() !== '') {
-          requested = parseWhen(args.until, now)
-          if (requested === undefined) throw new AnimaError('anima/bad-time', `"${args.until}" is not a time like 21:00 or 2026-11-10 21:00.`)
-        }
-        const next = nextHeartbeat(this.scheduleInput(now, requested))
+      execute: async (_args, exec) => {
         const kind = exec.agent === undefined ? undefined : core.describeSession(exec.agent.id)?.kind
         if (kind === 'triage') this.triageDecided = true
         if (kind === 'self') this.file.awaitingSelfRest = false
         this.file.counts.rests += 1
-        this.schedule(next.at)
+        this.save()
         exec.concludeTurn()
-        return { next: formatLocal(next.at), ...next.adjusted === undefined ? {} : { adjusted: next.adjusted } }
+        return { resting: true }
       },
     }), { effect: 'internal', sessions: ['triage', 'self'], closes: true })
 
@@ -1240,7 +1162,7 @@ export class AnimaLife extends Service {
       name: 'open_conversation',
       description: 'Start (or resume) a conversation with someone. The conversation session with them writes the actual words and may still decide to stay silent; the outcome comes back to you as a notice.',
       parameters: {
-        channel: { type: 'string', required: true, description: 'Channel key from your report, e.g. "local:owner:private:owner".' },
+        channel: { type: 'string', required: true, description: 'Channel key from your report, e.g. "qq:12345:private:67890".' },
         intent: { type: 'string', required: true, description: 'What you want from this conversation and why, in a sentence or two.' },
         context: { type: 'string', description: 'Optional context the conversation should know.' },
       },
@@ -1421,10 +1343,6 @@ export class AnimaLife extends Service {
       ...this.router.known().map(({ sessionId, channel }) => `Conversation ${channel.display}: ${sessionId}`),
     ]
   }
-}
-
-function nextWakeOf(core: Context['anima'], now: number): number {
-  return nextWake(now, core.config.day)
 }
 
 function safeObject(raw: string): Record<string, unknown> {

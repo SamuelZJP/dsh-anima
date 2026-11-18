@@ -7,7 +7,8 @@ import { callAs, provideSessions, registerEcho, setupGuarded, textOf } from './h
 const chat = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } as const
 
 async function withSay(config: Parameters<typeof setupGuarded>[0] = {}) {
-  const ctx = await setupGuarded(config)
+  // This chat is on the allowlist; the allowlist itself is tested in allowlist.spec.ts.
+  const ctx = await setupGuarded({ allowlist: { qq: { open: true, users: [], groups: [] } }, ...config })
   provideSessions(ctx, { c1: chat })
   const sent: string[][] = []
   ctx.anima.registerBehavior(defineTool({
@@ -83,7 +84,7 @@ describe('anima/admit wakes (not tool calls)', () => {
 
 describe('closing without speech is never refused by a quota', () => {
   it('lets end_turn through when the global ceiling is spent, and does not count it', async () => {
-    const ctx = await setupGuarded({ quotas: [{ per: 'global', limit: 2, windowMinutes: 24 * 60 }] })
+    const ctx = await setupGuarded({ quotas: [{ per: 'global', limit: 2, windowMinutes: 24 * 60 }], allowlist: { qq: { open: true, users: [], groups: [] } } })
     provideSessions(ctx, { c1: chat })
     registerEcho(ctx, 'qq_react', { platform: 'qq', effect: 'express', sessions: ['conversation'] })
     registerEcho(ctx, 'end_turn', { effect: 'internal', sessions: ['conversation'], closes: true })

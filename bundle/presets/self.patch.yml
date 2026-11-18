@@ -16,9 +16,6 @@
             name: '@anima/core/persona'
             config:
               kind: self
-          # Her own alarms (DESIGN §7). The gate allows only target this_session.
-          - id: tool-schedule
-            name: '@deepseek-ai/dsh-tool-schedule'
           - id: compaction
             name: cordis:group
             group: true

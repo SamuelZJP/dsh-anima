@@ -6,10 +6,10 @@ import { callAs, invoke, provideSessions, registerEcho, setupGuarded, setupGuard
 
 const localChat = {
   kind: 'conversation' as const,
-  channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'local:owner:private:owner',
+  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
+  channelKey: 'demo:owner:private:owner',
 }
-const say = { platform: 'local', effect: 'express' as const, sessions: ['conversation' as const] }
+const say = { platform: 'demo', effect: 'express' as const, sessions: ['conversation' as const] }
 const self = { kind: 'self' as const }
 const T = new Date('2026-11-10T10:00').getTime()
 
@@ -17,10 +17,10 @@ describe('guard gate on tools/pre-execute', () => {
   it('allows a fitting call, then refuses over quota as an owner rule', async () => {
     const ctx = await setupGuarded({ quotas: [{ effect: 'express', per: 'channel', limit: 2, windowMinutes: 10 }] })
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
-    expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
-    expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
-    const third = await callAs(ctx, 'chat-1', 'local_say')
+    registerEcho(ctx, 'demo_say', say)
+    expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
+    expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
+    const third = await callAs(ctx, 'chat-1', 'demo_say')
     expect(third.isError).toBe(true)
     expect(textOf(third)).toMatch(/^Error: anima\/over-quota: （外面拦住了你，不是你自己的身体）主人定的限制：一个聊天里每 10 分钟最多说 2 次/)
   })
@@ -28,11 +28,11 @@ describe('guard gate on tools/pre-execute', () => {
   it('refuses everything while paused and recovers on resume', async () => {
     const ctx = await setupGuarded()
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
+    registerEcho(ctx, 'demo_say', say)
     await invoke(ctx, 'pause')
-    expect(textOf(await callAs(ctx, 'chat-1', 'local_say'))).toMatch(/^Error: anima\/paused: /)
+    expect(textOf(await callAs(ctx, 'chat-1', 'demo_say'))).toMatch(/^Error: anima\/paused: /)
     await invoke(ctx, ' resume ')
-    expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
+    expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
   })
 
   it('leaves non-Anima tools alone', async () => {
@@ -44,9 +44,9 @@ describe('guard gate on tools/pre-execute', () => {
   it('leaves what her body refuses to her body', async () => {
     const ctx = await setupGuarded({ quotas: [{ per: 'global', limit: 1, windowMinutes: 60 }] })
     provideSessions(ctx, { self })
-    registerEcho(ctx, 'local_say', say)
+    registerEcho(ctx, 'demo_say', say)
     // A say in Self is the body's refusal, not the guard's, and it counts nothing.
-    expect(textOf(await callAs(ctx, 'self', 'local_say'))).toMatch(/^Error: anima\/wrong-session: /)
+    expect(textOf(await callAs(ctx, 'self', 'demo_say'))).toMatch(/^Error: anima\/wrong-session: /)
     registerEcho(ctx, 'goals_x', { effect: 'internal', sessions: ['self'] })
     expect((await callAs(ctx, 'self', 'goals_x')).isError).toBe(false)
   })
@@ -54,11 +54,11 @@ describe('guard gate on tools/pre-execute', () => {
   it('is gone when the guard unloads: no pause, no quota', async () => {
     const { ctx, fiber } = await setupGuardedFiber({ quotas: [{ effect: 'express', per: 'channel', limit: 1, windowMinutes: 10 }] })
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
+    registerEcho(ctx, 'demo_say', say)
     await invoke(ctx, 'pause')
     await fiber.dispose()
     expect(ctx.get('animaGuard')).toBeUndefined()
-    for (let i = 0; i < 3; i++) expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
+    for (let i = 0; i < 3; i++) expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
   })
 })
 
@@ -81,7 +81,7 @@ describe('/anima subcommands', () => {
   it('offers a platform\'s subcommands while it describes itself', async () => {
     const ctx = await setupGuarded()
     const fiber = await ctx.plugin({ name: 'owner', inject: ['anima'], apply: (child: Context) => {
-      child.anima.providePlatform({ platform: 'local', title: 'Local', view: () => ({ health: 'ok', summary: '', details: {} }), subcommands: [{ name: 'chat', usage: 'chat', run: () => ({ kind: 'success', text: 'hi' }) }] })
+      child.anima.providePlatform({ platform: 'demo', title: 'Local', view: () => ({ health: 'ok', summary: '', details: {} }), subcommands: [{ name: 'chat', usage: 'chat', run: () => ({ kind: 'success', text: 'hi' }) }] })
     } })
     expect((await invoke(ctx, 'chat x')).text).toBe('hi')
     await fiber.dispose()
@@ -110,35 +110,35 @@ describe('budgets and conversations she starts', () => {
     const ctx = await setupGuarded({ budget: { day: 1000, night: 20_000 } })
     ctx.anima.setClock(() => T)
     provideSessions(ctx, { 'chat-1': localChat, self })
-    registerEcho(ctx, 'local_say', say)
+    registerEcho(ctx, 'demo_say', say)
     const usage = (sessionId: string, inputTokens: number) => ctx.emit('session/event' as never, { id: sessionId } as never, { type: 'assistant/message', data: { usage: { inputTokens, outputTokens: 0, cacheReadTokens: 50_000 } } } as never)
     usage('plain', 5000)
     expect(ctx.animaGuard.todayCounts().tokens.day).toBe(0)
     usage('chat-1', 600)
-    expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
+    expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
     usage('self', 400)
     expect(ctx.animaGuard.todayCounts().tokens.day).toBe(1000)
-    expect(textOf(await callAs(ctx, 'chat-1', 'local_say'))).toMatch(/^Error: anima\/over-budget: /)
-    // Code-started turns are held too, until her next waking.
-    expect(ctx.anima.admit({ kind: 'turn', purpose: 'heartbeat' })).toMatchObject({ code: 'anima/over-budget', untilWake: true })
+    expect(textOf(await callAs(ctx, 'chat-1', 'demo_say'))).toMatch(/^Error: anima\/over-budget: /)
+    // Her body runs on: the outside is never asked about her heartbeat, only what she does is refused.
+    expect(ctx.anima.admit({ kind: 'reach' })).toBeUndefined()
   })
 
   it('counts conversations she starts and refuses past the daily limit', async () => {
-    const ctx = await setupGuarded({ initiate: { perDay: 1, quietHours: [], consent: { owner: true, channels: ['local:owner:private:owner'] } } })
+    const ctx = await setupGuarded({ initiate: { perDay: 1, quietHours: [], consent: { owner: true, channels: ['demo:owner:private:owner'] } } })
     ctx.anima.setClock(() => T)
     provideSessions(ctx, { self })
-    ctx.anima.provideChannels(key => key === 'local:owner:private:owner' ? { isOwner: true } : undefined, () => ['local:owner:private:owner'])
+    ctx.anima.provideChannels(key => key === 'demo:owner:private:owner' ? { isOwner: true } : undefined, () => ['demo:owner:private:owner'])
     registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
-    expect((await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' })).isError).toBe(false)
+    expect((await callAs(ctx, 'self', 'open_conversation', { text: 'demo:owner:private:owner' })).isError).toBe(false)
     expect(ctx.animaGuard.todayCounts().initiates).toBe(1)
-    expect(textOf(await callAs(ctx, 'self', 'open_conversation', { text: 'local:owner:private:owner' }))).toMatch(/^Error: anima\/over-quota: （外面拦住了你，不是你自己的身体）主人定的限制：每天最多主动找人聊 1 次/)
+    expect(textOf(await callAs(ctx, 'self', 'open_conversation', { text: 'demo:owner:private:owner' }))).toMatch(/^Error: anima\/over-quota: （外面拦住了你，不是你自己的身体）主人定的限制：每天最多主动找人聊 1 次/)
   })
 
   it('answers consent for her report through anima/admit', async () => {
     const ctx = await setupGuarded()
-    ctx.anima.provideChannels(key => key === 'local:owner:private:owner' ? { isOwner: true } : { isOwner: false })
-    expect(ctx.anima.admit({ kind: 'initiate', channelKey: 'local:owner:private:owner' })).toBeUndefined()
-    expect(ctx.anima.admit({ kind: 'initiate', channelKey: 'local:owner:private:friend' })).toMatchObject({ code: 'anima/no-consent' })
+    ctx.anima.provideChannels(key => key === 'demo:owner:private:owner' ? { isOwner: true } : { isOwner: false })
+    expect(ctx.anima.admit({ kind: 'initiate', channelKey: 'demo:owner:private:owner' })).toBeUndefined()
+    expect(ctx.anima.admit({ kind: 'initiate', channelKey: 'demo:owner:private:friend' })).toMatchObject({ code: 'anima/no-consent' })
   })
 
   it('runs the owner goal command; she may close an owner goal without a reason', async () => {

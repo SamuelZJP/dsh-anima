@@ -9,10 +9,10 @@ import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDi
 
 const localChat = {
   kind: 'conversation' as const,
-  channel: { platform: 'local', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'local:owner:private:owner',
+  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
+  channelKey: 'demo:owner:private:owner',
 }
-const say = { platform: 'local', effect: 'express' as const, sessions: ['conversation' as const] }
+const say = { platform: 'demo', effect: 'express' as const, sessions: ['conversation' as const] }
 const self = { kind: 'self' as const }
 const T = new Date('2026-11-10T10:00').getTime()
 
@@ -20,11 +20,11 @@ describe('body check on tools/pre-execute', () => {
   it('hides behaviors outside Anima sessions', async () => {
     const ctx = await setupCore()
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
+    registerEcho(ctx, 'demo_say', say)
     for (const [sessionId, visible] of [['plain', false], ['chat-1', true]] as const) {
       const agent = fakeAgent(sessionId)
       const resolved = await ctx.tools.resolve({ agent, modelSelection: { provider: 't', model: 't' }, signal: new AbortController().signal })
-      expect(resolved.view(agent).has('local_say')).toBe(visible)
+      expect(resolved.view(agent).has('demo_say')).toBe(visible)
       resolved.dispose()
     }
   })
@@ -32,8 +32,8 @@ describe('body check on tools/pre-execute', () => {
   it('has no limits of its own: without anything outside, she can say as much as she likes', async () => {
     const ctx = await setupCore()
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
-    for (let i = 0; i < 40; i++) expect((await callAs(ctx, 'chat-1', 'local_say')).isError).toBe(false)
+    registerEcho(ctx, 'demo_say', say)
+    for (let i = 0; i < 40; i++) expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
   })
 
   it('admits everything when nothing outside listens', async () => {
@@ -48,9 +48,9 @@ describe('body check on tools/pre-execute', () => {
     const seen: unknown[] = []
     ctx.on('anima/record', record => { seen.push(record) })
     provideSessions(ctx, { self })
-    registerEcho(ctx, 'local_say', say)
-    await callAs(ctx, 'self', 'local_say')
-    expect(seen).toEqual([expect.objectContaining({ type: 'gate', behavior: 'local_say', decision: 'refused', code: 'anima/wrong-session', day: '2026-11-10' })])
+    registerEcho(ctx, 'demo_say', say)
+    await callAs(ctx, 'self', 'demo_say')
+    expect(seen).toEqual([expect.objectContaining({ type: 'gate', behavior: 'demo_say', decision: 'refused', code: 'anima/wrong-session', day: '2026-11-10' })])
   })
 })
 
@@ -62,12 +62,12 @@ describe('behavior registry', () => {
 
   it('removes the tool and its metadata when the owner plugin unloads', async () => {
     const ctx = await setupCore()
-    const fiber = await ctx.plugin({ name: 'owner', inject: ['anima'], apply: (child: Context) => registerEcho(child, 'local_say', say) })
-    expect(ctx.tools.get('local_say')).toBeDefined()
-    expect(ctx.anima.behavior('local_say')).toBeDefined()
+    const fiber = await ctx.plugin({ name: 'owner', inject: ['anima'], apply: (child: Context) => registerEcho(child, 'demo_say', say) })
+    expect(ctx.tools.get('demo_say')).toBeDefined()
+    expect(ctx.anima.behavior('demo_say')).toBeDefined()
     await fiber.dispose()
-    expect(ctx.tools.get('local_say')).toBeUndefined()
-    expect(ctx.anima.behavior('local_say')).toBeUndefined()
+    expect(ctx.tools.get('demo_say')).toBeUndefined()
+    expect(ctx.anima.behavior('demo_say')).toBeUndefined()
   })
 })
 
@@ -104,25 +104,37 @@ describe('core service', () => {
     const dataDir = tempDataDir()
     const ctx = await setupCore({ dataDir })
     ctx.anima.setClock(() => T)
-    provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'local_say', say)
+    provideSessions(ctx, { 'chat-1': { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } })
+    registerEcho(ctx, 'qq_say', { ...say, platform: 'qq' })
     const before = ctx.anima.selfState().needs.connect!
-    await callAs(ctx, 'chat-1', 'local_say')
+    await callAs(ctx, 'chat-1', 'qq_say')
     expect(ctx.anima.selfState().needs.connect).toBeCloseTo(Math.max(0, before - 0.3))
     expect(JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8')).self.needs.connect).toBeCloseTo(Math.max(0, before - 0.3))
   })
 
-  it('refuses schedule targets other than this_session', async () => {
-    const ctx = await setupCore()
-    provideSessions(ctx, { self })
-    const { defineTool } = await import('@deepseek-ai/dsh-tools')
-    ctx.tools.register(defineTool({
-      name: 'schedule_create', description: 'fake', parameters: { target: { type: 'string' } },
-      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
-      async execute() { return { ok: true } },
-    }))
-    expect(textOf(await callAs(ctx, 'self', 'schedule_create', { target: 'new' }))).toMatch(/^Error: anima\/not-allowed: /)
-    expect((await callAs(ctx, 'self', 'schedule_create', { target: 'this_session' })).isError).toBe(false)
+  it('sets her alarms in the session she calls from, timed on her clock', async () => {
+    const ctx = await setupCore({ clock: { speed: 60, start: '2026-11-10T10:00' } })
+    provideSessions(ctx, { self, 'other-self': self })
+    const tasks: { id: string; title: string; prompt: string; status: string; target: { kind: string; sessionId: string }; after: number }[] = []
+    ctx.provide('schedule')
+    ctx.set('schedule', {
+      create: async (request: { title: string; prompt: string; timing: { after_seconds: number }; target: { kind: string; sessionId: string } }) => {
+        const task = { id: `s${tasks.length + 1}`, title: request.title, prompt: request.prompt, status: 'active', target: request.target, after: request.timing.after_seconds }
+        tasks.push(task)
+        return task
+      },
+      list: async () => ({ items: tasks }),
+      edit: async (request: { id: string }) => { tasks.find(task => task.id === request.id)!.status = 'ended'; return { deleted: true } },
+    })
+    const set = await callAs(ctx, 'self', 'alarm_set', { at: '11:00', note: 'call mum' })
+    expect(set.isError).toBe(false)
+    // One hour on her clock at 60x speed is one real minute.
+    expect(tasks[0]).toMatchObject({ target: { kind: 'session', sessionId: 'self' }, prompt: 'call mum', after: 60 })
+    expect(textOf(await callAs(ctx, 'self', 'alarm_list'))).toMatch(/^s1: 2026-11-10 11:00 — call mum$/)
+    expect(textOf(await callAs(ctx, 'other-self', 'alarm_list'))).toBe('没有闹钟。')
+    expect(textOf(await callAs(ctx, 'other-self', 'alarm_cancel', { id: 's1' }))).toMatch(/anima\/unknown-alarm/)
+    expect((await callAs(ctx, 'self', 'alarm_cancel', { id: 's1' })).isError).toBe(false)
+    expect(tasks[0]!.status).toBe('ended')
   })
 
   it('runs her goal tools; she may close a goal the owner set without a reason', async () => {

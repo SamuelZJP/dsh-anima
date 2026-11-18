@@ -23,7 +23,7 @@ import type { PreToolDecision } from '@deepseek-ai/dsh-tools'
 import { ActivityLog, summarize, type ActivityRecord, type DaySummary } from './activity.ts'
 import { ApprovalBroker, parseOwnerReply, type ApprovalAnswer } from './approvals.ts'
 import { SubcommandTable } from './commands.ts'
-import { resolveGuardConfig, type Config, type ResolvedGuardConfig } from './config.ts'
+import { onAllowlist, resolveGuardConfig, type Config, type ResolvedGuardConfig } from './config.ts'
 import { decide, GuardCode, OUTSIDE, QuotaBook, windowZh, type GateCall, type GateMoment } from './gate.ts'
 import { Outbox, platformOf } from './outbox.ts'
 import { OwnerRegistry } from './owner.ts'
@@ -278,6 +278,7 @@ export class AnimaGuard extends Service {
       mayInitiate: key => this.mayInitiate(key),
       ownerLine: core.ownerLine !== undefined,
       ownerChannel: key => core.channelInfo(key)?.isOwner === true,
+      allowedChannel: key => this.allowed(key),
     }
   }
 
@@ -301,18 +302,25 @@ export class AnimaGuard extends Service {
   /** Summary of one of her days (default today). */
   daySummary(day = this.ctx.anima.dayKey()): DaySummary {
     const counts = this.ledger.peek(day)
-    return summarize(day, this.activity.read(day), { ...counts, nightWakes: this.ctx.anima.todayLedger().nightWakes })
+    return summarize(day, this.activity.read(day), counts)
   }
 
   // ---- admission ----
 
+  /** Whether a channel is on the owner's allowlist (the owner's own channels always are). */
+  allowed(channelKey: string): boolean {
+    return onAllowlist(this.config.allowlist, channelKey, this.ctx.anima.channelInfo(channelKey)?.isOwner === true)
+  }
+
   private admitRequest(request: AdmitRequest): AdmitRefusal | undefined {
     const paused: AdmitRefusal = { code: GuardCode.paused, reason: 'paused' }
     switch (request.kind) {
-      case 'reach': return this.pausedState ? paused : undefined
-      case 'turn':
-        if (this.pausedState) return paused
-        return this.overBudget() ? { code: GuardCode.overBudget, reason: 'over-budget', untilWake: true } : undefined
+      case 'reach':
+        if (request.channelKey !== undefined && !this.allowed(request.channelKey)) {
+          this.log({ type: 'gate', behavior: 'reach', decision: 'refused', channel: request.channelKey, code: GuardCode.notAllowlisted, hint: 'not on the allowlist; it does not reach her' })
+          return { code: GuardCode.notAllowlisted, reason: 'not-allowlisted', drop: true }
+        }
+        return this.pausedState ? paused : undefined
       case 'initiate': return this.mayInitiate(request.channelKey) ? undefined : { code: GuardCode.noConsent, reason: 'no-consent' }
       case 'wake': return this.admitWake(request.name, request.channelKey)
     }
@@ -523,12 +531,10 @@ export class AnimaGuard extends Service {
       budgets: {
         tokens: { day: day.tokens.day, night: day.tokens.night, dayBudget: this.config.budget.day, nightBudget: this.config.budget.night },
         initiates: { used: day.initiates, perDay: this.config.initiate.perDay },
-        nightWakesLeft: body.nightWakesLeft,
         overBudget: this.overBudget(now),
       },
       approvals: this.approvals.list().length,
       ownerLine: core.ownerLine?.name ?? null,
-      speech: this.daySummary(core.dayKey(now)).speech,
       quotas: this.quota.usage(this.config.quotas, now),
       parts: core.statusParts(),
     }
@@ -538,14 +544,12 @@ export class AnimaGuard extends Service {
   statusText(): string {
     const core = this.ctx.anima
     const now = core.clock.now()
-    const speech = this.daySummary(core.dayKey(now)).speech
     return [
       `Paused: ${this.pausedState ? 'yes' : 'no'}`,
       ...core.statusLines(),
       ...this.budgetLines(now).map(line => `Budget: ${line}`),
       `Pending approvals: ${this.approvals.list().map(p => `${p.id} ${p.summary}`).join('; ') || 'none'}`,
       `Outbox: delay ${this.config.outbox.delaySeconds} s, offline hold ${this.config.outbox.offlineHoldMinutes} min; held ${this.outbox.list().map(m => `${m.id} → ${m.display}${m.offlineSince === undefined ? '' : ' (waiting for its platform)'}`).join(', ') || 'none'}`,
-      `Speech today: ${speech.lostReplies} lost replies, ${speech.reminders} close reminders`,
       'Quotas:',
       ...this.quota.usage(this.config.quotas, now).map(line => `  ${line}`),
     ].join('\n')
@@ -560,7 +564,7 @@ export class AnimaGuard extends Service {
 const EFFECT_ZH: Readonly<Record<string, string>> = {
   observe: '观看', internal: '内心', workspace: '工作区', express: '表达', initiate: '发起', public: '公开', irreversible: '不可撤回',
 }
-const PLATFORM_ZH: Readonly<Record<string, string>> = { qq: 'QQ', local: '本地', bili: 'B站' }
+const PLATFORM_ZH: Readonly<Record<string, string>> = { qq: 'QQ', bili: 'B站' }
 
 /** Short argument summary for an approval request. */
 function describeArgs(args: Readonly<Record<string, unknown>>): string {
