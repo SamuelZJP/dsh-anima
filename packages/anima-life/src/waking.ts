@@ -31,6 +31,40 @@ export interface HostAgent {
 /** What DSH says when asked to archive a session. */
 export type ArchiveResult = 'archived' | 'busy'
 
+/** A person in an arrival, for the message source (logged, not model-visible). */
+export interface SourcePerson {
+  readonly platform: string
+  readonly userId: string
+  readonly name: string
+  readonly owner?: true
+}
+
+/** One message delivered into a session. */
+export interface Delivery {
+  /** Model-facing text. */
+  readonly text: string
+  /** One-line summary for the collapsed context row. */
+  readonly summary: string
+  /** Stimulus type, recorded in the source. */
+  readonly stimulus: string
+  /** Reference recorded in the source. */
+  readonly ref?: string | undefined
+  /** Content blocks after the text. */
+  readonly extra?: readonly ExtraBlock[] | undefined
+  /** Channel key of the arrival, recorded in the source (where it came from). */
+  readonly channel?: string | undefined
+  /** Who wrote in the arrival, recorded in the source. */
+  readonly people?: readonly SourcePerson[] | undefined
+}
+
+/** One event of a session's durable log, as DSH's persistence returns it. */
+export interface LogEvent {
+  readonly type: string
+  readonly seq: number
+  readonly time: number
+  readonly data: unknown
+}
+
 /** Session operations life needs from DSH. */
 export interface SessionHost<A extends HostAgent = HostAgent> {
   /** Live agent of an existing session, or undefined when no session has the id. */
@@ -39,16 +73,20 @@ export interface SessionHost<A extends HostAgent = HostAgent> {
   create(sessionId: string, spec: { agentPreset: string; cwd: string }): Promise<string>
   /** Whether the session is archived. */
   isArchived(sessionId: string): boolean
-  /** Archive a session; `busy` when DSH refuses because a turn runs or an alarm still targets it. */
+  /** Archive a session (its log flushed first); `busy` when DSH refuses because a turn runs or an alarm still targets it. */
   archive(sessionId: string): Promise<ArchiveResult>
+  /** The whole durable log of a session (an archived one included). */
+  readLog(sessionId: string): Promise<LogEvent[]>
   /** Move every pending alarm that targets one session to another. Returns how many moved. */
   moveAlarms(from: string, to: string): Promise<number>
   /** Set a session's title. */
   rename(agent: A, title: string): void
   /** Deliver a message that starts a turn when idle, or joins the running one at its next step. */
-  deliver(agent: A, text: string, summary: string, stimulus: string, ref?: string, extra?: readonly ExtraBlock[]): Promise<void>
+  deliver(agent: A, message: Delivery): Promise<void>
   /** Queue context for the agent's next turn without starting one. */
-  inject(agent: A, text: string, summary: string, stimulus: string): Promise<void>
+  inject(agent: A, message: Delivery): Promise<void>
+  /** Cancel the agent's running turn, if any. */
+  cancel(agent: A): void
   /** Select the model of the agent's next requests. */
   selectModel(agent: A, choice: ModelChoice): void
 }
@@ -158,9 +196,9 @@ export class WakingSessions<A extends HostAgent = HostAgent> {
    * it, and archive the ended one (now, or once its last turn ends).
    * @param at - when she fell asleep, on her clock.
    * @param busy - whether a session is still running a turn.
-   * @returns the ended and the prepared session ids, and how many alarms moved.
+   * @returns the ended and the prepared session ids, how many alarms moved, and the sessions archived now.
    */
-  sleep(at: number, busy: (sessionId: string) => boolean): Promise<{ ended: string | undefined; next: string; alarms: number }> {
+  sleep(at: number, busy: (sessionId: string) => boolean): Promise<{ ended: string | undefined; next: string; alarms: number; archived: string[] }> {
     // The next waking is hers from this moment: nothing that arrives meanwhile goes to the ended one.
     const ended = this.state.current
     const next = wakingSessionId(this.options.characterId, at)
@@ -171,8 +209,8 @@ export class WakingSessions<A extends HostAgent = HostAgent> {
     return this.serial(async () => {
       await this.make(next)
       const alarms = ended !== undefined && ended !== next ? await this.host.moveAlarms(ended, next) : 0
-      await this.archiveNow(busy)
-      return { ended, next, alarms }
+      const archived = await this.archiveNow(busy)
+      return { ended, next, alarms, archived }
     })
   }
 

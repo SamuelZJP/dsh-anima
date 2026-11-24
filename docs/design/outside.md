@@ -53,7 +53,7 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 - `status`, `pause`, `resume`, `wake` (her body records the waking; her waking session opens with her inbox);
 - `self [text]` (with text, the owner's words reach her waking session and start a turn);
 - `goal add|list|close`, `inbox`, `outbox [cancel <id>]`, `approve <id>`, `deny <id>`;
-- `memory list [text]`, `memory forget <id>`;
+- `memory list [text]`, `memory forget <id>` (every memory, whatever its source);
 - `selfmodel [revert <id>]`.
 
 ### Memory and persona management

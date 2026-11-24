@@ -24,8 +24,10 @@ class FakeHost implements SessionHost<FakeAgent> {
   async archive(): Promise<ArchiveResult> { return 'archived' }
   async moveAlarms() { return 0 }
   rename() {}
-  async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
-  async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
+  async deliver(agent: FakeAgent, { text }: { text: string }) { agent.inbox.push(text) }
+  async inject(agent: FakeAgent, { text }: { text: string }) { agent.inbox.push(`(inject) ${text}`) }
+  cancel() {}
+  async readLog() { return [] }
   selectModel(agent: FakeAgent, choice: ModelChoice) { agent.models.push(choice) }
   /** Every arrival, the waking context excluded. */
   all() { return [...this.sessions.values()].flatMap(agent => agent.inbox).filter(text => !text.includes('[醒来]')) }
@@ -181,10 +183,10 @@ describe('/anima self', () => {
 })
 
 describe('memory management from outside', () => {
-  it('lets the owner list and delete memories of every scope, and goes away with the memory plugin', async () => {
+  it('lets the owner list and delete memories from every source, and goes away with the memory plugin', async () => {
     const { ctx } = await setup()
     const fiber = await ctx.plugin(animaMemory, {})
-    ctx.animaMemory.store.remember({ kind: 'fact', scope: 'private:test:alice', text: 'Alice likes tea.', now: ctx.anima.clock.now() })
+    ctx.animaMemory.store.remember({ kind: 'fact', channelKey: 'test:me:private:alice', fromPerson: 'test:alice', fromName: 'Alice', text: 'Alice likes tea.', now: ctx.anima.clock.now() })
     expect(await invoke(ctx, 'memory list')).toMatchObject({ kind: 'success', text: expect.stringContaining('Alice likes tea.') })
     expect(await invoke(ctx, 'memory forget m1')).toMatchObject({ kind: 'success', text: 'Deleted m1.' })
     expect(await invoke(ctx, 'memory list')).toMatchObject({ text: 'No memories.' })

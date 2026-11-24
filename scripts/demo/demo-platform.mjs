@@ -2,7 +2,9 @@
 // absolute path from a demo overlay, after anima-core and anima-life. It stands in for a chat
 // platform the way a test double does: a demo driver delivers scripted messages as people on
 // it (`deliverAs`), and her `demo_say` goes to <dataDir>/demo/outbox.jsonl, which the driver
-// reads (`said`). Code here never decides what she says.
+// reads (`said`). Every line said on it, by people or by her, goes to <dataDir>/demo/history.jsonl,
+// which is the platform's chat history (first contact in a waking, reading a group further back).
+// Code here never decides what she says.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
@@ -28,6 +30,24 @@ export const keyOf = channel => `${channel.platform}:${channel.account}:${channe
 
 /** Path of her outbox on the demo platform. */
 export const outboxPath = dataDir => join(dataDir, 'demo', 'outbox.jsonl')
+
+/** Path of the demo platform's chat history. */
+export const historyPath = dataDir => join(dataDir, 'demo', 'history.jsonl')
+
+let seq = 0
+function remember(dataDir, row) {
+  const path = historyPath(dataDir)
+  mkdirSync(dirname(path), { recursive: true })
+  const messageId = row.messageId ?? `d${Date.now().toString(36)}${++seq}`
+  appendFileSync(path, `${JSON.stringify({ ...row, messageId })}\n`)
+  return messageId
+}
+
+function historyOf(dataDir, channelKey) {
+  const path = historyPath(dataDir)
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(row => row.channel === channelKey)
+}
 
 /** What she said on one channel, in order. */
 export function said(dataDir, channelKey) {
@@ -61,10 +81,19 @@ export function apply(ctx) {
       if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
       const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
-      for (const text of messages) appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel, text })}\n`)
+      for (const text of messages) {
+        appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel, text })}\n`)
+        remember(ctx.anima.config.dataDir, { channel, ts: ctx.anima.clock.now(), who: 'you', text })
+      }
       return { sent: messages.length, at }
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['waking'], ...SAY_META })
+
+  ctx.animaLife.provideHistory(PLATFORM, async (channel, request) => {
+    const lines = historyOf(ctx.anima.config.dataDir, keyOf(channel))
+    const end = request.before === undefined ? lines.length : lines.findIndex(line => line.messageId === request.before)
+    return lines.slice(0, end < 0 ? 0 : end).slice(-request.count)
+  })
 }
 
 /**
@@ -73,5 +102,8 @@ export function apply(ctx) {
  * @param core - the anima service (for her clock).
  */
 export function deliverAs(life, core, channel, sender, text, extra = {}) {
-  return life.deliver({ type: 'message', channel, sender, text, ts: core.clock.now(), ...extra })
+  const ts = core.clock.now()
+  const who = `${sender.displayName}${sender.isOwner ? ' (owner)' : ''}`
+  const messageId = remember(core.config.dataDir, { channel: keyOf(channel), ts, who, text, messageId: extra.messageId })
+  return life.deliver({ type: 'message', channel, sender, text, ts, ...extra, messageId })
 }

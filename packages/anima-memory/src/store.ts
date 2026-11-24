@@ -1,19 +1,19 @@
 /**
- * The memory store (DESIGN §8 Storage): one SQLite file under the Anima data
- * directory, on Node's built-in `node:sqlite`. It holds her own transcript of
- * channel messages and speech, the memories with their scopes, and an FTS5
- * trigram index for recall.
+ * The memory store (docs/design/memory.md, Storage): one SQLite file under the
+ * Anima data directory, on Node's built-in `node:sqlite`. It holds her
+ * memories with their sources, an FTS5 trigram index for recall, what came to
+ * mind in each waking, and how far each ended waking is consolidated.
  * @module @anima/memory/store
  */
 
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { EVERYONE, type Audience, type Scope } from './audience.ts'
+import { AnimaError } from '@anima/core'
 import type { DecayConfig } from './config.ts'
-import { decayStep, estimateTokens, gistOf, type MemoryKind } from './decay.ts'
+import { decayStep, gistOf, type MemoryKind } from './decay.ts'
 
-/** Memory status. Only `active` memories are recalled by default or injected. */
+/** Memory status. Only `active` memories come to mind or are recalled by default. */
 export type MemoryStatus = 'active' | 'archived' | 'superseded'
 
 /** One stored memory. */
@@ -21,13 +21,16 @@ export interface Memory {
   /** Id shown to her, `m<n>`. */
   readonly id: string
   readonly kind: MemoryKind
-  readonly scope: Scope
-  /** The person it is about, if any. */
-  readonly personId: string | undefined
-  /** Channel it was learned in, if any. */
-  readonly channelKey: string | undefined
   /** Current text (a gist once decayed). */
   readonly text: string
+  /** Source: the channel it came from, if any. */
+  readonly channelKey: string | undefined
+  /** Source: the person it came from, if any. */
+  readonly fromPerson: string | undefined
+  /** Source: that person's name when it was kept. */
+  readonly fromName: string | undefined
+  /** The person it is about, if any. */
+  readonly personId: string | undefined
   readonly importance: number
   readonly strength: number
   readonly recalls: number
@@ -35,66 +38,41 @@ export interface Memory {
   readonly status: MemoryStatus
   /** Id of the memory that replaced this one. */
   readonly replacedBy: string | undefined
+  /** The waking session it came from, if any. */
+  readonly waking: string | undefined
 }
 
 /** A new memory. */
 export interface NewMemory {
   readonly kind: MemoryKind
-  readonly scope: Scope
   readonly text: string
-  readonly personId?: string | undefined
   readonly channelKey?: string | undefined
+  readonly fromPerson?: string | undefined
+  readonly fromName?: string | undefined
+  readonly personId?: string | undefined
   readonly importance?: number | undefined
-  /** Session it came from. */
-  readonly source?: string | undefined
+  readonly waking?: string | undefined
   readonly now: number
 }
 
-/** One transcript line. */
-export interface TranscriptLine {
-  readonly id: number
-  readonly ts: number
+/** An ended waking and how far its log is consolidated. */
+export interface WakingProgress {
   readonly sessionId: string
-  readonly channelKey: string | undefined
-  readonly scope: Scope
-  readonly dir: 'in' | 'out'
-  readonly speaker: string
-  /** Person id of the speaker (`in` lines). */
-  readonly speakerId?: string | undefined
-  readonly text: string
-}
-
-/** Unconsolidated transcript lines of one session, in order. */
-export interface Segment {
-  readonly sessionId: string
-  readonly channelKey: string | undefined
-  readonly scope: Scope
-  readonly lines: readonly TranscriptLine[]
+  /** Last log seq consolidated, -1 for none. */
+  readonly upto: number
+  readonly archivedAt: number
 }
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS transcript (
-  id INTEGER PRIMARY KEY,
-  ts INTEGER NOT NULL,
-  session_id TEXT NOT NULL,
-  channel_key TEXT,
-  scope TEXT NOT NULL,
-  dir TEXT NOT NULL,
-  speaker TEXT NOT NULL,
-  speaker_id TEXT,
-  text TEXT NOT NULL,
-  run TEXT,
-  consolidated INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS transcript_pending ON transcript (consolidated, run, id);
 CREATE TABLE IF NOT EXISTS memories (
   id INTEGER PRIMARY KEY,
   kind TEXT NOT NULL,
-  scope TEXT NOT NULL,
-  person_id TEXT,
-  channel_key TEXT,
   text TEXT NOT NULL,
   full TEXT,
+  source_channel TEXT,
+  source_person TEXT,
+  source_name TEXT,
+  about_person TEXT,
   importance REAL NOT NULL DEFAULT 0,
   strength REAL NOT NULL DEFAULT 1,
   recalls INTEGER NOT NULL DEFAULT 0,
@@ -103,10 +81,11 @@ CREATE TABLE IF NOT EXISTS memories (
   last_recalled_at INTEGER,
   status TEXT NOT NULL DEFAULT 'active',
   replaced_by INTEGER,
-  source TEXT
+  source_session TEXT
 );
-CREATE INDEX IF NOT EXISTS memories_scope ON memories (status, scope);
-CREATE INDEX IF NOT EXISTS memories_person ON memories (person_id);
+CREATE INDEX IF NOT EXISTS memories_status ON memories (status, kind);
+CREATE INDEX IF NOT EXISTS memories_about ON memories (about_person);
+CREATE INDEX IF NOT EXISTS memories_channel ON memories (source_channel);
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text, content='memories', content_rowid='id', tokenize='trigram');
 CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
   INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
@@ -118,57 +97,44 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF text ON memories BEGIN
   INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.id, old.text);
   INSERT INTO memories_fts(rowid, text) VALUES (new.id, new.text);
 END;
+CREATE TABLE IF NOT EXISTS shown (session_id TEXT NOT NULL, item TEXT NOT NULL, PRIMARY KEY (session_id, item));
+CREATE TABLE IF NOT EXISTS wakings (session_id TEXT PRIMARY KEY, archived_at INTEGER NOT NULL, upto INTEGER NOT NULL DEFAULT -1, done INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `
 
 interface MemoryRow {
   id: number
   kind: string
-  scope: string
-  person_id: string | null
-  channel_key: string | null
   text: string
+  source_channel: string | null
+  source_person: string | null
+  source_name: string | null
+  about_person: string | null
   importance: number
   strength: number
   recalls: number
   created_at: number
   status: string
   replaced_by: number | null
-}
-
-interface LineRow {
-  id: number
-  ts: number
-  session_id: string
-  channel_key: string | null
-  scope: string
-  dir: string
-  speaker: string
-  speaker_id: string | null
-  text: string
+  source_session: string | null
 }
 
 function toMemory(row: MemoryRow): Memory {
   return {
     id: `m${row.id}`,
     kind: row.kind as MemoryKind,
-    scope: row.scope,
-    personId: row.person_id ?? undefined,
-    channelKey: row.channel_key ?? undefined,
     text: row.text,
+    channelKey: row.source_channel ?? undefined,
+    fromPerson: row.source_person ?? undefined,
+    fromName: row.source_name ?? undefined,
+    personId: row.about_person ?? undefined,
     importance: row.importance,
     strength: row.strength,
     recalls: row.recalls,
     createdAt: row.created_at,
     status: row.status as MemoryStatus,
     replacedBy: row.replaced_by === null ? undefined : `m${row.replaced_by}`,
-  }
-}
-
-function toLine(row: LineRow): TranscriptLine {
-  return {
-    id: row.id, ts: row.ts, sessionId: row.session_id, channelKey: row.channel_key ?? undefined,
-    scope: row.scope, dir: row.dir as 'in' | 'out', speaker: row.speaker, speakerId: row.speaker_id ?? undefined, text: row.text,
+    waking: row.source_session ?? undefined,
   }
 }
 
@@ -192,24 +158,26 @@ export function searchTerms(query: string): string[] {
   return [...new Set(terms)].slice(0, 16)
 }
 
-/** SQL filter of an audience. */
-function audienceFilter(audience: Audience): { sql: string; params: SQLInputValue[] } {
-  if (audience === EVERYONE) return { sql: '1', params: [] }
-  if (audience.length === 0) return { sql: '0', params: [] }
-  return { sql: `scope IN (${audience.map(() => '?').join(', ')})`, params: [...audience] }
-}
+const like = (text: string) => `%${text.replace(/[\\%_]/g, c => `\\${c}`)}%`
 
 /** The SQLite memory store. */
 export class MemoryStore {
   private readonly db: DatabaseSync
 
   /**
-   * Open (and create) the store.
+   * Open (and create) the store. A store of the first design (audience
+   * scopes, her own transcript) fails loud: R5 starts with an empty memory.
    * @param path - database file, or `:memory:`.
    */
   constructor(path: string) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true })
     this.db = new DatabaseSync(path)
+    const old = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'transcript'").get() !== undefined
+      || (this.db.prepare("SELECT name FROM pragma_table_info('memories') WHERE name = 'scope'").get() !== undefined)
+    if (old) {
+      this.db.close()
+      throw new AnimaError('anima/memory-old-store', `${path} is a memory store of the first design (audience scopes and a transcript). Memory starts empty from R5: give anima-core a fresh dataDir; the old one is left as it is.`)
+    }
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
     this.db.exec(SCHEMA)
   }
@@ -232,79 +200,14 @@ export class MemoryStore {
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
   }
 
-  // ---- transcript ----
-
-  /** Append one transcript line. */
-  record(line: Omit<TranscriptLine, 'id'>): number {
-    const result = this.db.prepare('INSERT INTO transcript (ts, session_id, channel_key, scope, dir, speaker, speaker_id, text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(line.ts, line.sessionId, line.channelKey ?? null, line.scope, line.dir, line.speaker, line.speakerId ?? null, line.text)
-    return Number(result.lastInsertRowid)
-  }
-
-  /** Lines not yet consolidated and not claimed by a run. */
-  pendingCount(): number {
-    return (this.db.prepare('SELECT count(*) AS n FROM transcript WHERE consolidated = 0 AND run IS NULL').get() as { n: number }).n
-  }
-
-  /** Time of the oldest pending line, or undefined. */
-  oldestPending(): number | undefined {
-    const row = this.db.prepare('SELECT min(ts) AS ts FROM transcript WHERE consolidated = 0 AND run IS NULL').get() as { ts: number | null }
-    return row.ts ?? undefined
-  }
-
-  /**
-   * Claim pending lines for a consolidation run, oldest first, up to a token
-   * budget, grouped into one segment per session.
-   * @param run - run id.
-   * @param maxTokens - token budget of the lines.
-   * @returns the segments (empty when nothing is pending).
-   */
-  claim(run: string, maxTokens: number): Segment[] {
-    const rows = this.db.prepare('SELECT id, ts, session_id, channel_key, scope, dir, speaker, speaker_id, text FROM transcript WHERE consolidated = 0 AND run IS NULL ORDER BY id').all() as unknown as LineRow[]
-    const taken: TranscriptLine[] = []
-    let tokens = 0
-    for (const row of rows) {
-      const cost = estimateTokens(row.text) + 8
-      if (taken.length > 0 && tokens + cost > maxTokens) break
-      tokens += cost
-      taken.push(toLine(row))
-    }
-    if (taken.length === 0) return []
-    const mark = this.db.prepare('UPDATE transcript SET run = ? WHERE id = ?')
-    for (const line of taken) mark.run(run, line.id)
-    const segments = new Map<string, { sessionId: string; channelKey: string | undefined; scope: Scope; lines: TranscriptLine[] }>()
-    for (const line of taken) {
-      const key = `${line.sessionId}\0${line.scope}`
-      const segment = segments.get(key) ?? { sessionId: line.sessionId, channelKey: line.channelKey, scope: line.scope, lines: [] }
-      segment.lines.push(line)
-      segments.set(key, segment)
-    }
-    return [...segments.values()]
-  }
-
-  /** Mark a run's lines consolidated. */
-  finishRun(run: string): number {
-    return Number(this.db.prepare('UPDATE transcript SET consolidated = 1 WHERE run = ? AND consolidated = 0').run(run).changes)
-  }
-
-  /** Release a run's unconsolidated lines so a later run takes them again. */
-  releaseRun(run: string): void {
-    this.db.prepare('UPDATE transcript SET run = NULL WHERE run = ? AND consolidated = 0').run(run)
-  }
-
-  /** Release every claimed but unfinished line (after a restart). */
-  releaseAll(): void {
-    this.db.prepare('UPDATE transcript SET run = NULL WHERE consolidated = 0 AND run IS NOT NULL').run()
-  }
-
   // ---- memories ----
 
   /** Store a memory. */
   remember(input: NewMemory): Memory {
     const importance = Math.min(1, Math.max(0, input.importance ?? 0.3))
-    const result = this.db.prepare(`INSERT INTO memories (kind, scope, person_id, channel_key, text, importance, strength, created_at, updated_at, source)
-      VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
-      .run(input.kind, input.scope, input.personId ?? null, input.channelKey ?? null, input.text.trim(), importance, input.now, input.now, input.source ?? null)
+    const result = this.db.prepare(`INSERT INTO memories (kind, text, source_channel, source_person, source_name, about_person, importance, strength, created_at, updated_at, source_session)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`)
+      .run(input.kind, input.text.trim(), input.channelKey ?? null, input.fromPerson ?? null, input.fromName ?? null, input.personId ?? null, importance, input.now, input.now, input.waking ?? null)
     return this.get(`m${Number(result.lastInsertRowid)}`)!
   }
 
@@ -321,23 +224,23 @@ export class MemoryStore {
     this.db.prepare('UPDATE memories SET status = ?, replaced_by = ?, updated_at = ? WHERE id = ?').run('superseded', rowId(newId)!, now, rowId(oldId)!)
   }
 
-  /** Hard-delete a memory. @returns whether it existed. */
+  /** Hard-delete a memory: the owner's, from outside, never hers. @returns whether it existed. */
   forget(id: string): boolean {
     const n = rowId(id)
     if (n === undefined) return false
     this.db.prepare('UPDATE memories SET replaced_by = NULL WHERE replaced_by = ?').run(n)
+    this.db.prepare('DELETE FROM shown WHERE item = ?').run(`m${n}`)
     return Number(this.db.prepare('DELETE FROM memories WHERE id = ?').run(n).changes) > 0
   }
 
   /**
-   * Full-text recall within an audience. Terms of 3+ characters use the FTS5
-   * trigram index (bm25); shorter CJK terms fall back to LIKE.
+   * Full-text recall over every memory, wherever it came from. Terms of 3+
+   * characters use the FTS5 trigram index (bm25); shorter CJK terms fall back to LIKE.
    * @param query - free text.
-   * @param audience - scopes that may be heard.
    * @param options.archive - also search the archive.
    * @param options.limit - most results.
    */
-  recall(query: string, audience: Audience, options: { archive?: boolean; limit?: number } = {}): Memory[] {
+  recall(query: string, options: { archive?: boolean; limit?: number } = {}): Memory[] {
     const terms = searchTerms(query)
     if (terms.length === 0) return []
     const scores = new Map<number, number>()
@@ -349,39 +252,36 @@ export class MemoryStore {
       for (const row of rows) scores.set(row.id, (scores.get(row.id) ?? 0) + 1 - row.rank)
     }
     for (const term of short) {
-      const rows = this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\' LIMIT 200").all(`%${term.replace(/[\\%_]/g, c => `\\${c}`)}%`) as { id: number }[]
+      const rows = this.db.prepare("SELECT id FROM memories WHERE text LIKE ? ESCAPE '\\' LIMIT 200").all(like(term)) as { id: number }[]
       for (const row of rows) scores.set(row.id, (scores.get(row.id) ?? 0) + 1)
     }
     if (scores.size === 0) return []
-    const filter = audienceFilter(audience)
     const statuses = options.archive === true ? ['active', 'archived'] : ['active']
     const ids = [...scores.keys()]
-    const rows = this.db.prepare(`SELECT * FROM memories WHERE id IN (${ids.map(() => '?').join(', ')}) AND status IN (${statuses.map(() => '?').join(', ')}) AND ${filter.sql}`)
-      .all(...ids, ...statuses, ...filter.params) as unknown as MemoryRow[]
+    const rows = this.db.prepare(`SELECT * FROM memories WHERE id IN (${ids.map(() => '?').join(', ')}) AND status IN (${statuses.map(() => '?').join(', ')})`)
+      .all(...ids, ...statuses) as unknown as MemoryRow[]
     return rows
       .sort((a, b) => (scores.get(b.id)! - scores.get(a.id)!) || (b.strength - a.strength))
       .slice(0, options.limit ?? 8)
       .map(toMemory)
   }
 
-  /** Strongest active facts about a person, within an audience. */
-  about(personId: string, audience: Audience, limit: number): Memory[] {
-    const filter = audienceFilter(audience)
-    return (this.db.prepare(`SELECT * FROM memories WHERE status = 'active' AND person_id = ? AND kind = 'fact' AND ${filter.sql} ORDER BY strength DESC, id DESC LIMIT ?`)
-      .all(personId, ...filter.params, limit) as unknown as MemoryRow[]).map(toMemory)
+  /** Strongest active facts about a person. */
+  about(personId: string, limit: number): Memory[] {
+    return (this.db.prepare("SELECT * FROM memories WHERE status = 'active' AND about_person = ? AND kind = 'fact' ORDER BY strength DESC, id DESC LIMIT ?")
+      .all(personId, limit) as unknown as MemoryRow[]).map(toMemory)
   }
 
-  /** Most recent active episodes of a channel, within an audience. */
-  recentEpisodes(channelKey: string, audience: Audience, limit: number): Memory[] {
-    const filter = audienceFilter(audience)
-    return (this.db.prepare(`SELECT * FROM memories WHERE status = 'active' AND channel_key = ? AND kind = 'episode' AND ${filter.sql} ORDER BY created_at DESC, id DESC LIMIT ?`)
-      .all(channelKey, ...filter.params, limit) as unknown as MemoryRow[]).map(toMemory)
+  /** Most recent active episodes of a channel. */
+  recentEpisodes(channelKey: string, limit: number): Memory[] {
+    return (this.db.prepare("SELECT * FROM memories WHERE status = 'active' AND source_channel = ? AND kind = 'episode' ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(channelKey, limit) as unknown as MemoryRow[]).map(toMemory)
   }
 
-  /** Active memories of one scope (for consolidation context). */
-  inScope(scope: Scope, limit: number): Memory[] {
-    return (this.db.prepare("SELECT * FROM memories WHERE status = 'active' AND scope = ? ORDER BY strength DESC, id DESC LIMIT ?")
-      .all(scope, limit) as unknown as MemoryRow[]).map(toMemory)
+  /** Most recent active episodes from anywhere. */
+  latestEpisodes(limit: number): Memory[] {
+    return (this.db.prepare("SELECT * FROM memories WHERE status = 'active' AND kind = 'episode' ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(limit) as unknown as MemoryRow[]).map(toMemory)
   }
 
   /** Count a recall: refresh strength and bump the recall count. */
@@ -390,37 +290,80 @@ export class MemoryStore {
     for (const id of ids) bump.run(now, rowId(id)!)
   }
 
-  /** Every memory, newest first, optionally filtered by a substring (owner listing). */
-  list(options: { query?: string; limit?: number } = {}): Memory[] {
-    const limit = options.limit ?? 50
-    const rows = options.query === undefined || options.query === ''
-      ? this.db.prepare('SELECT * FROM memories ORDER BY id DESC LIMIT ?').all(limit)
-      : this.db.prepare("SELECT * FROM memories WHERE text LIKE ? OR scope LIKE ? OR person_id LIKE ? ORDER BY id DESC LIMIT ?").all(`%${options.query}%`, `%${options.query}%`, `%${options.query}%`, limit)
-    return (rows as unknown as MemoryRow[]).map(toMemory)
+  // ---- what came to mind in a waking ----
+
+  /** Which of these items (`m12`, `c:<channel key>`, `waking`) were already shown in a waking session. */
+  shownIn(sessionId: string, items: readonly string[]): Set<string> {
+    if (items.length === 0) return new Set()
+    const rows = this.db.prepare(`SELECT item FROM shown WHERE session_id = ? AND item IN (${items.map(() => '?').join(', ')})`).all(sessionId, ...items) as { item: string }[]
+    return new Set(rows.map(row => row.item))
   }
 
+  /** Every item shown in a waking session. */
+  shownAll(sessionId: string): Set<string> {
+    return new Set((this.db.prepare('SELECT item FROM shown WHERE session_id = ?').all(sessionId) as { item: string }[]).map(row => row.item))
+  }
+
+  /** Mark items shown in a waking session. */
+  markShown(sessionId: string, items: readonly string[]): void {
+    const mark = this.db.prepare('INSERT OR IGNORE INTO shown (session_id, item) VALUES (?, ?)')
+    for (const item of items) mark.run(sessionId, item)
+  }
+
+  // ---- consolidation progress ----
+
+  /** An ended waking was archived: its log waits for consolidation. */
+  addWaking(sessionId: string, archivedAt: number): void {
+    this.db.prepare('INSERT OR IGNORE INTO wakings (session_id, archived_at) VALUES (?, ?)').run(sessionId, archivedAt)
+  }
+
+  /** Whether a waking is known to consolidation (done or not). */
+  hasWaking(sessionId: string): boolean {
+    return this.db.prepare('SELECT 1 AS x FROM wakings WHERE session_id = ?').get(sessionId) !== undefined
+  }
+
+  /** Ended wakings not yet fully consolidated, oldest first. */
+  pendingWakings(): WakingProgress[] {
+    return (this.db.prepare('SELECT session_id, upto, archived_at FROM wakings WHERE done = 0 ORDER BY archived_at, session_id').all() as { session_id: string; upto: number; archived_at: number }[])
+      .map(row => ({ sessionId: row.session_id, upto: row.upto, archivedAt: row.archived_at }))
+  }
+
+  /** A piece is consolidated: everything up to this log seq. */
+  advanceWaking(sessionId: string, upto: number): void {
+    this.db.prepare('UPDATE wakings SET upto = max(upto, ?) WHERE session_id = ?').run(upto, sessionId)
+  }
+
+  /** A waking is fully consolidated. */
+  finishWaking(sessionId: string): void {
+    this.db.prepare('UPDATE wakings SET done = 1 WHERE session_id = ?').run(sessionId)
+  }
+
+  // ---- the owner's view (outside) ----
+
   /**
-   * Owner browsing (the Anima page): filter by text, scope and status, newest first.
-   * @param options.query - substring of the text, scope or person.
-   * @param options.scope - an exact scope, or a prefix ending in `:` (e.g. `private:`).
+   * Owner browsing (the Anima page): filter by text, source and status, newest first.
+   * @param options.query - substring of the text, source or person.
+   * @param options.source - a channel key, `self` (no channel), or a prefix ending in `:` (e.g. `qq:`).
    * @param options.status - one status, or `all`.
    * @returns one page and the total that match.
    */
-  browse(options: { query?: string | undefined; scope?: string | undefined; status?: MemoryStatus | 'all' | undefined; limit?: number; offset?: number } = {}): { memories: Memory[]; total: number } {
+  browse(options: { query?: string | undefined; source?: string | undefined; status?: MemoryStatus | 'all' | undefined; limit?: number; offset?: number } = {}): { memories: Memory[]; total: number } {
     const where: string[] = []
-    const params: string[] = []
+    const params: SQLInputValue[] = []
     if (options.query !== undefined && options.query !== '') {
-      where.push("(text LIKE ? ESCAPE '\\' OR scope LIKE ? ESCAPE '\\' OR person_id LIKE ? ESCAPE '\\')")
-      const like = `%${options.query.replace(/[\\%_]/g, c => `\\${c}`)}%`
-      params.push(like, like, like)
+      where.push("(text LIKE ? ESCAPE '\\' OR source_channel LIKE ? ESCAPE '\\' OR source_person LIKE ? ESCAPE '\\' OR source_name LIKE ? ESCAPE '\\' OR about_person LIKE ? ESCAPE '\\')")
+      const pattern = like(options.query)
+      params.push(pattern, pattern, pattern, pattern, pattern)
     }
-    if (options.scope !== undefined && options.scope !== '') {
-      if (options.scope.endsWith(':')) {
-        where.push('substr(scope, 1, ?) = ?')
-        params.push(String(options.scope.length), options.scope)
+    if (options.source !== undefined && options.source !== '') {
+      if (options.source === 'self') {
+        where.push('source_channel IS NULL')
+      } else if (options.source.endsWith(':')) {
+        where.push('substr(source_channel, 1, ?) = ?')
+        params.push(options.source.length, options.source)
       } else {
-        where.push('scope = ?')
-        params.push(options.scope)
+        where.push('source_channel = ?')
+        params.push(options.source)
       }
     }
     const status = options.status ?? 'active'
@@ -435,9 +378,14 @@ export class MemoryStore {
     return { memories: rows.map(toMemory), total }
   }
 
-  /** Distinct scopes with their memory counts. */
-  scopes(): { scope: string; count: number }[] {
-    return this.db.prepare('SELECT scope, count(*) AS count FROM memories GROUP BY scope ORDER BY count DESC').all() as { scope: string; count: number }[]
+  /** Every memory, newest first, optionally filtered by a substring (owner listing). */
+  list(options: { query?: string; limit?: number } = {}): Memory[] {
+    return this.browse({ query: options.query, status: 'all', limit: options.limit ?? 50 }).memories
+  }
+
+  /** Distinct sources (a channel key, or `self`) with their memory counts. */
+  sources(): { source: string; count: number }[] {
+    return (this.db.prepare("SELECT coalesce(source_channel, 'self') AS source, count(*) AS count FROM memories GROUP BY source ORDER BY count DESC").all() as { source: string; count: number }[])
   }
 
   /** Counts by status, for status lines. */
@@ -446,6 +394,8 @@ export class MemoryStore {
     for (const row of this.db.prepare('SELECT status, count(*) AS n FROM memories GROUP BY status').all() as { status: MemoryStatus; n: number }[]) result[row.status] = row.n
     return result
   }
+
+  // ---- forgetting ----
 
   /**
    * Apply daily decay to every active memory.

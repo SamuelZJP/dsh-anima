@@ -11,7 +11,6 @@ import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
 import { AnimaLife, type ExtraBlock, type SessionHost } from '@anima/life'
-import * as animaMemory from '@anima/memory'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as bili from '../src/index.ts'
 
@@ -36,11 +35,13 @@ class FakeHost implements SessionHost<FakeAgent> {
   async archive() { return 'archived' as const }
   async moveAlarms() { return 0 }
   rename() {}
-  async deliver(agent: FakeAgent, text: string, _s: string, _t: string, _r?: string, extra: readonly ExtraBlock[] = []) {
+  async deliver(agent: FakeAgent, { text, extra = [] }: { text: string; extra?: readonly ExtraBlock[] | undefined }) {
     agent.inbox.push({ text, extra })
     queueMicrotask(() => this.onDeliver(agent))
   }
   async inject() {}
+  cancel() {}
+  async readLog() { return [] }
   selectModel() {}
 }
 
@@ -81,7 +82,6 @@ async function setup(options: { core?: Record<string, unknown>; bili?: Record<st
   await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
   const host = new FakeHost()
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
-  await ctx.plugin(animaMemory, {})
   const saved: { name?: string; bytes: number }[] = []
   ctx.provide('attachments')
   ctx.set('attachments', { saveImage: async (input: { data: Uint8Array; name?: string }) => { saved.push({ name: input.name, bytes: input.data.length }); return { attachmentId: `a${saved.length}`, mediaType: 'image/jpeg', bytes: input.data.length, width: 160, height: 90 } } })
@@ -128,16 +128,13 @@ describe('Bilibili adapter', () => {
     expect(feed.text).toMatch(/^Error: anima\/bili-login-needed: .*\/anima bili login/)
   })
 
-  it('watches as a text digest and remembers it as public, for the owner chat too', async () => {
+  it('watches as a text digest', async () => {
     const { ctx, self } = await setup()
     const watch = await call(ctx, self, 'bili_watch', { bvid: SHORT })
     expect(watch.text).toContain('# 猫弹琴 (BV1xx411c7mD)')
     expect(watch.text).toContain('## Subtitles (AI 中文（自动生成）)\n[0:00] 大家好 换一个画面')
     expect(watch.text).toContain('[0:15] 好看')
     expect(watch.text).toContain('- fan (42 likes, 2 replies): 太可爱了')
-    const lines = ctx.animaMemory.store.claim('r', 10_000)
-    expect(lines[0]).toMatchObject({ scope: 'public', sessionId: animaMemory.OBSERVATIONS })
-    expect(lines[0]!.lines[0]!.text).toBe(`You watched ${SHORT} «猫弹琴» by Mao (0:20, 动物圈) on Bilibili.`)
     expect(ctx.anima.selfState().needs.curiosity).toBeLessThan(0.3)
     const bad = await call(ctx, self, 'bili_watch', { bvid: 'not-a-bvid' })
     expect(bad.text).toMatch(/^Error: .*is not a bvid/)
@@ -186,7 +183,6 @@ describe('Bilibili adapter', () => {
     expect(parts.filter(block => block.type === 'image')).toHaveLength(4)
     expect(saved).toHaveLength(4)
     expect(readdirSync(join(dataDir, 'bili', 'cache'))).toEqual([])
-    expect(ctx.animaMemory.store.recall('colour bars', ['public']).map(m => m.scope)).toEqual(['public'])
   })
 
   it.each([false, true])('logs in by QR, stores the cookies 0600 and shows the login in status (webserver: %s)', async (withWeb) => {

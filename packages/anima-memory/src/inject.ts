@@ -1,76 +1,103 @@
 /**
- * Automatic recall (DESIGN §8): the memory block injected at a turn start.
- * Everything is filtered by the session's audience in code and trimmed to a
- * token budget. Pure over the store.
+ * What comes to mind (docs/design/memory.md, Coming to mind): the `[memory]`
+ * message added at a step of her waking session. Cues pick the memories; every
+ * memory says where it came from, and nothing is filtered by who will hear her.
+ * Pure over the store.
  * @module @anima/memory/inject
  */
 
-import { formatLocal } from '@anima/core'
-import { describeScope, EVERYONE, type Audience } from './audience.ts'
+import { formatLocal, type ChannelRef } from '@anima/core'
 import { estimateTokens } from './decay.ts'
+import { sourceLabel } from './source.ts'
 import type { Memory, MemoryStore } from './store.ts'
 
-/** Inputs of one memory block. */
-export interface BlockInput {
-  readonly store: MemoryStore
-  readonly audience: Audience
-  /** The person of a private chat, for their pinned facts. */
-  readonly person?: string | undefined
-  /** The channel, for its recent episodes. */
-  readonly channelKey?: string | undefined
+/** Looks up a channel as it is published now, for source labels. */
+export type ChannelLookup = (key: string) => (ChannelRef & { readonly display?: string }) | undefined
+
+/** One memory as a line of her context, with where it came from. */
+export function memoryLine(memory: Memory, channel: ChannelLookup): string {
+  const about = memory.personId === undefined ? '' : `，关于 ${memory.personId}`
+  const label = sourceLabel(memory, memory.channelKey === undefined ? undefined : channel(memory.channelKey))
+  return `- ${memory.id}（${memory.kind}${about}；${label}）：${memory.text}`
+}
+
+/** Cues of one `[memory]` message. */
+export interface Cues {
+  /** People who just wrote, or whose messages wait in her inbox. */
+  readonly people: readonly string[]
+  /** Channels that just wrote. */
+  readonly channels: readonly string[]
   /** Text of what just arrived, for full-text recall. */
   readonly query: string
+  /** Latest episodes to come to mind (at waking). */
+  readonly latest: number
+}
+
+/** Inputs of one `[memory]` message. */
+export interface BlockInput {
+  readonly store: MemoryStore
+  readonly cues: Cues
+  /** Recent episodes per channel. */
+  readonly channelEpisodes: number
+  /** Memories already shown in this waking: not shown again. */
+  readonly exclude: ReadonlySet<string>
+  /** Lines that come first and are not memories (open goals, a chat from before she woke). */
+  readonly extra?: readonly string[] | undefined
+  readonly channel: ChannelLookup
   readonly tokenBudget: number
   readonly maxItems: number
 }
 
-/** One memory as a line of her context. */
-export function memoryLine(memory: Memory, showScope: boolean): string {
-  const about = memory.personId === undefined ? '' : ` about ${memory.personId}`
-  const scope = showScope ? `; heard by: ${describeScope(memory.scope)}` : ''
-  return `- ${memory.id} (${memory.kind}${about}, ${formatLocal(memory.createdAt).slice(0, 10)}${scope}): ${memory.text}`
-}
+/** Header of the `[memory]` message. */
+export const MEMORY_HEADER = '[memory] 你此刻想起的事（每条写着你是从哪里知道的）：'
 
 /**
- * Build the memory block: pinned facts about the person, recent episodes of
- * the channel, then full-text hits, without duplicates, within the budget.
- * @returns the text and the ids it shows, or undefined when nothing fits.
+ * Build the `[memory]` message: latest episodes (at waking), facts about the
+ * people, recent episodes of the channels, then full-text hits, without
+ * repeats, within the budget.
+ * @returns the text and the memory ids it shows, or undefined when nothing comes to mind.
  */
 export function buildBlock(input: BlockInput): { text: string; ids: string[] } | undefined {
-  const { store, audience } = input
+  const { store, cues } = input
   const candidates: Memory[] = []
-  if (input.person !== undefined) candidates.push(...store.about(input.person, audience, input.maxItems))
-  if (input.channelKey !== undefined) candidates.push(...store.recentEpisodes(input.channelKey, audience, 3))
-  candidates.push(...store.recall(input.query, audience, { limit: input.maxItems }))
-  const showScope = audience === EVERYONE
-  const header = showScope
-    ? '[memory] Things you remember that may matter now (each says who may hear it):'
-    : '[memory] Things you remember that may be shared in this chat:'
+  if (cues.latest > 0) candidates.push(...store.latestEpisodes(cues.latest))
+  for (const person of cues.people) candidates.push(...store.about(person, input.maxItems))
+  for (const key of cues.channels) candidates.push(...store.recentEpisodes(key, input.channelEpisodes))
+  candidates.push(...store.recall(cues.query, { limit: input.maxItems }))
   const lines: string[] = []
   const ids: string[] = []
-  let tokens = estimateTokens(header)
+  let tokens = estimateTokens(MEMORY_HEADER)
+  for (const line of input.extra ?? []) {
+    const cost = estimateTokens(line)
+    if (tokens + cost > input.tokenBudget) break
+    tokens += cost
+    lines.push(line)
+  }
+  const memories: string[] = []
   for (const memory of candidates) {
-    if (ids.includes(memory.id) || ids.length >= input.maxItems) continue
-    const line = memoryLine(memory, showScope)
+    if (ids.includes(memory.id) || input.exclude.has(memory.id) || ids.length >= input.maxItems) continue
+    const line = memoryLine(memory, input.channel)
     const cost = estimateTokens(line)
     if (tokens + cost > input.tokenBudget) continue
     tokens += cost
-    lines.push(line)
+    memories.push(line)
     ids.push(memory.id)
   }
-  if (ids.length === 0) return undefined
-  return { text: [header, ...lines].join('\n'), ids }
+  if (lines.length === 0 && memories.length === 0) return undefined
+  return { text: [MEMORY_HEADER, ...memories, ...lines].join('\n'), ids }
 }
 
 /**
- * Query text of a Self turn: for a heartbeat, only what she woke up wanting
- * (the report's numbers would match everything); otherwise the whole text.
+ * Query text of an arrival: nothing for a heartbeat (her state's numbers would
+ * match everything); otherwise the text without its clock stamp and place tag.
  * @param text - delivered message text.
  */
-export function selfQuery(text: string): string {
-  const marker = 'You woke up wanting to:'
-  const at = text.indexOf(marker)
-  if (at >= 0) return text.slice(at + marker.length).split('\n')[0] ?? ''
-  if (text.includes('[heartbeat]')) return ''
-  return text
+export function cueText(text: string): string {
+  if (/^(\[[^\]]*\]\s*)*\[心跳\]/u.test(text)) return ''
+  return text.replace(/^(\[[^\]]*\]\s*)+/u, '')
+}
+
+/** A history line as she remembers a chat from before she woke. */
+export function historyLine(line: { readonly ts: number; readonly who: string; readonly text: string }): string {
+  return `  ${formatLocal(line.ts).slice(5)} ${line.who}: ${line.text}`
 }

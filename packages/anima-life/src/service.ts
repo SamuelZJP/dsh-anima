@@ -24,7 +24,7 @@ import { consolidationSessionId } from './identity.ts'
 import { Inbox, inboxSummary } from './inbox.ts'
 import { buildReport, formatSpan, type ChannelLine } from './report.ts'
 import { senderLabel, stimulusRef, stimulusSummary, stimulusText, wakes, whereOf, type ExtraBlock, type MessageStimulus, type PublishedChannel, type Stimulus } from './stimulus.ts'
-import { CONSOLIDATION_PRESET, WakingSessions, type ArchiveResult, type ModelChoice, type SessionHost, type WakingState } from './waking.ts'
+import { CONSOLIDATION_PRESET, WakingSessions, type ArchiveResult, type Delivery, type LogEvent, type ModelChoice, type SessionHost, type SourcePerson, type WakingState } from './waking.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -35,6 +35,8 @@ declare module '@deepseek-ai/cordis' {
     'anima/stimulus'(payload: StimulusEvent): void
     /** She read a chat (it reached her, or she read a group): its adapter may mark it read. */
     'anima/read'(payload: { readonly channel: ChannelRef }): void
+    /** An ended waking session was archived after its last turn, its log flushed: sleep's consolidation reads it. */
+    'anima/waking-archived'(payload: { readonly sessionId: string }): void
   }
 }
 
@@ -54,7 +56,7 @@ export interface StimulusEvent {
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** A stimulus Anima delivered into one of her sessions. */
-    'anima-stimulus': { kind: 'anima-stimulus'; stimulus: string; ref?: string; wake?: true } & ContextFormed
+    'anima-stimulus': { kind: 'anima-stimulus'; stimulus: string; ref?: string; wake?: true; channel?: string; people?: SourcePerson[] } & ContextFormed
   }
 }
 
@@ -100,6 +102,24 @@ interface ScheduleMover {
   edit(request: { id: string; action: 'update'; patch: { target: { kind: 'session'; sessionId: string } } }): Promise<unknown>
 }
 
+/** The part of DSH's session persistence used to read an archived log (docs/dsh.md). */
+interface LogReader {
+  open(id: SessionId, access: 'read'): Promise<{ read(offset?: number): Promise<{ events: readonly LogEvent[] }>; close(): Promise<void> }>
+}
+
+/** One line of a chat's history on its platform (first contact, reading a group further back). */
+export interface HistoryLine {
+  /** Epoch milliseconds on her clock (the platform's time). */
+  readonly ts: number
+  /** Who wrote it, as she would see it (`you` for her own lines). */
+  readonly who: string
+  readonly text: string
+  readonly messageId?: string | undefined
+}
+
+/** A platform's chat history, provided by its adapter: the latest `count` lines, oldest first, ending before message `before` when given. */
+export type HistoryProvider = (channel: PublishedChannel, request: { readonly count: number; readonly before?: string | undefined }) => Promise<readonly HistoryLine[]>
+
 /** {@link SessionHost} over DSH's session controller, title, workspace and schedule services. */
 export class DshSessionHost implements SessionHost<Agent> {
   constructor(private readonly ctx: Context) {}
@@ -131,6 +151,9 @@ export class DshSessionHost implements SessionHost<Agent> {
   async archive(sessionId: string): Promise<ArchiveResult> {
     const registry = this.ctx.get('workspaceRegistry')
     if (registry === undefined) throw new AnimaError('anima/no-workspace-registry', 'DSH has no workspace registry, so her ended waking sessions cannot be archived.')
+    // Flush first: sleep reads the archived log, and a read sees only what was committed (docs/dsh.md).
+    const agent = await this.resolve(sessionId).catch(() => undefined)
+    if (agent !== undefined) await this.ctx.get('sessions')?.flush(agent.session).catch(() => undefined)
     try {
       await registry.archiveSession(sessionId as SessionId)
       return 'archived'
@@ -150,14 +173,30 @@ export class DshSessionHost implements SessionHost<Agent> {
     return mine.length
   }
 
+  async readLog(sessionId: string): Promise<LogEvent[]> {
+    const persistence = this.ctx.get('sessionPersistence' as never) as LogReader | undefined
+    if (persistence === undefined) throw new AnimaError('anima/no-session-persistence', 'DSH session persistence is missing, so an ended waking cannot be read.')
+    const handle = await persistence.open(sessionId as SessionId, 'read')
+    try {
+      return [...(await handle.read(0)).events]
+    } finally {
+      await handle.close()
+    }
+  }
+
   rename(agent: Agent, title: string): void {
     this.ctx.get('sessionTitle')?.rename(agent.session, title)
   }
 
-  private message(text: string, summary: string, stimulus: string, ref?: string, extra: readonly ExtraBlock[] = [], wake = false) {
+  private message(delivery: Delivery, wake = false) {
+    const { text, summary, stimulus, ref, extra = [], channel, people } = delivery
     return createUserMessage({
       content: [{ type: 'text', text }, ...extra],
-      source: { kind: 'anima-stimulus', stimulus, form: 'notice', summary: boundContextSummary(summary), ...ref === undefined ? {} : { ref }, ...wake ? { wake: true as const } : {} },
+      source: {
+        kind: 'anima-stimulus', stimulus, form: 'notice', summary: boundContextSummary(summary),
+        ...ref === undefined ? {} : { ref }, ...wake ? { wake: true as const } : {},
+        ...channel === undefined ? {} : { channel }, ...people === undefined || people.length === 0 ? {} : { people: [...people] },
+      },
     })
   }
 
@@ -169,15 +208,19 @@ export class DshSessionHost implements SessionHost<Agent> {
     }
   }
 
-  async deliver(agent: Agent, text: string, summary: string, stimulus: string, ref?: string, extra?: readonly ExtraBlock[]): Promise<void> {
+  async deliver(agent: Agent, delivery: Delivery): Promise<void> {
     // Idle, a steer starts a turn; during a turn it joins as the next step (docs/dsh.md).
-    agent.steer(this.message(text, summary, stimulus, ref, extra, true))
+    agent.steer(this.message(delivery, true))
     await this.flush(agent)
   }
 
-  async inject(agent: Agent, text: string, summary: string, stimulus: string): Promise<void> {
-    agent.inject(this.message(text, summary, stimulus))
+  async inject(agent: Agent, delivery: Delivery): Promise<void> {
+    agent.inject(this.message(delivery))
     await this.flush(agent)
+  }
+
+  cancel(agent: Agent): void {
+    agent.cancel({ kind: 'hook', reason: 'anima: she woke' })
   }
 
   selectModel(agent: Agent, choice: ModelChoice): void {
@@ -275,8 +318,10 @@ export class AnimaLife extends Service {
   private readonly budgetLines = new Set<() => string[]>()
   /** Channels adapters published, by key. */
   private readonly channels = new Map<string, PublishedChannel[]>()
-  /** Consolidation session ids, by id → her day. */
+  /** Consolidation session ids, by id → the waking each sorts. */
   private readonly consolidations = new Map<string, string>()
+  /** Chat history per platform, from adapters. */
+  private readonly histories = new Map<string, HistoryProvider>()
   /** Sessions running a turn now. */
   private readonly running = new Set<string>()
   /** `wait` calls waiting for something to arrive. */
@@ -370,10 +415,10 @@ export class AnimaLife extends Service {
     return this.waking.describe(sessionId) ?? (this.consolidations.has(sessionId) ? { kind: 'consolidation' } : undefined)
   }
 
-  /** The consolidation session id of one of her days, known to {@link describe}. */
-  consolidationId(day: string): string {
-    const id = consolidationSessionId(this.ctx.anima.config.characterId, day)
-    this.consolidations.set(id, day)
+  /** The consolidation session id of one ended waking, known to {@link describe}. */
+  consolidationId(waking: string): string {
+    const id = consolidationSessionId(this.ctx.anima.config.characterId, waking)
+    this.consolidations.set(id, waking)
     return id
   }
 
@@ -616,8 +661,9 @@ export class AnimaLife extends Service {
       this.file.lastHeard[key] = Math.max(this.file.lastHeard[key] ?? 0, last.ts)
       this.save()
     }
-    if (wake) await this.host.deliver(agent, text, stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus))
-    else await this.host.inject(agent, text, stimulusSummary(stimulus), stimulus.type)
+    const delivery: Delivery = { text, summary: stimulusSummary(stimulus), stimulus: stimulus.type, ref: stimulusRef(stimulus), ...arrivalSource(stimulus) }
+    if (wake) await this.host.deliver(agent, delivery)
+    else await this.host.inject(agent, delivery)
     this.waking.markOpened(agent, now)
     if (wake) {
       for (const resolve of [...this.waiters]) resolve()
@@ -640,9 +686,9 @@ export class AnimaLife extends Service {
     return agent.id
   }
 
-  /** Deliver a consolidation to sleep's consolidation session of the day. */
+  /** Deliver a piece of an ended waking to its consolidation session. */
   private async consolidate(stimulus: Extract<Stimulus, { type: 'consolidate' }>, model: ModelChoice | undefined): Promise<string> {
-    const sessionId = this.consolidationId(stimulus.day)
+    const sessionId = this.consolidationId(stimulus.waking)
     let agent = await this.host.resolve(sessionId)
     if (agent === undefined) {
       const cwd = join(this.ctx.anima.config.dataDir, 'consolidation')
@@ -652,11 +698,45 @@ export class AnimaLife extends Service {
       if (created !== sessionId) throw new AnimaError('anima/session-id-mismatch', `DSH created session ${created} instead of ${sessionId}.`)
       agent = await this.host.resolve(sessionId)
       if (agent === undefined) throw new AnimaError('anima/session-missing', `session ${sessionId} was created but cannot be resolved.`)
-      this.host.rename(agent, `Anima · memory ${stimulus.day}`)
+      this.host.rename(agent, `Anima · memory ${formatLocal(stimulus.ts).slice(5)}`)
     }
     if (model !== undefined) this.host.selectModel(agent, model)
-    await this.host.deliver(agent, stimulusText(stimulus), stimulusSummary(stimulus), stimulus.type, stimulusRef(stimulus))
+    await this.host.deliver(agent, { text: stimulusText(stimulus), summary: stimulusSummary(stimulus), stimulus: stimulus.type, ref: stimulusRef(stimulus) })
     return sessionId
+  }
+
+  /** She woke: a consolidation turn still running in this session is cut short (sleep's work stops when sleep does). */
+  async stopConsolidation(sessionId: string): Promise<void> {
+    const agent = await this.host.resolve(sessionId)
+    if (agent !== undefined) this.host.cancel(agent)
+  }
+
+  /** The whole durable log of one of her ended waking sessions. */
+  readLog(sessionId: string): Promise<LogEvent[]> {
+    return this.host.readLog(sessionId)
+  }
+
+  /**
+   * Provide a platform's chat history, owned by the calling plugin (the adapter contract).
+   * @param platform - platform id.
+   * @param provider - reads a chat's history.
+   */
+  provideHistory(platform: string, provider: HistoryProvider): () => void {
+    return this.ctx.effect(() => {
+      this.histories.set(platform, provider)
+      return () => { if (this.histories.get(platform) === provider) this.histories.delete(platform) }
+    }, 'animaLife.provideHistory()')
+  }
+
+  /**
+   * A chat's history from its platform, oldest first.
+   * @returns the lines, or undefined when its platform provides no history or the chat is unknown.
+   */
+  async history(key: string, request: { readonly count: number; readonly before?: string | undefined }): Promise<readonly HistoryLine[] | undefined> {
+    const channel = this.channel(key)
+    const provider = channel === undefined ? undefined : this.histories.get(channel.platform)
+    if (channel === undefined || provider === undefined) return undefined
+    return provider(channel, request)
   }
 
   /**
@@ -702,6 +782,7 @@ export class AnimaLife extends Service {
     try {
       for (const id of await this.waking.archivePending(id => this.running.has(id))) {
         this.ctx.anima.recordActivity({ type: 'waking-archive', sessionId: id })
+        this.ctx.emit('anima/waking-archived', { sessionId: id })
       }
     } catch (error: unknown) {
       this.ctx.logger.warn(`anima: archiving: ${errorText(error)}`)
@@ -775,9 +856,12 @@ export class AnimaLife extends Service {
     this.file.lastSleep = { since: at, by: info.by, ...info.note === undefined ? {} : { note: info.note } }
     this.file.counts.sleeps += 1
     this.save()
-    const { ended, next, alarms } = await this.waking.sleep(at, id => this.running.has(id))
+    const { next, alarms, archived } = await this.waking.sleep(at, id => this.running.has(id))
     core.recordActivity({ type: 'waking-open', sessionId: next, ...alarms > 0 ? { count: alarms } : {} })
-    if (ended !== undefined && !this.waking.state.pending.includes(ended)) core.recordActivity({ type: 'waking-archive', sessionId: ended })
+    for (const id of archived) {
+      core.recordActivity({ type: 'waking-archive', sessionId: id })
+      this.ctx.emit('anima/waking-archived', { sessionId: id })
+    }
   }
 
   /** She woke by her body or the owner (or her first waking): her waking session gets its first arrival. */
@@ -1095,7 +1179,7 @@ export class AnimaLife extends Service {
 
     core.registerBehavior(defineTool({
       name: 'group_read',
-      description: 'Read one group: its recent messages, oldest first, and mark it read. Give `before` (a message id) to read further back.',
+      description: 'Read one group: its recent messages, oldest first, and mark it read. Give `before` (a message id) to read further back, through the platform\'s history where it has one.',
       parameters: {
         channel: { type: 'string', required: true, description: 'The group\'s channel key.' },
         before: { type: 'string', description: 'Optional message id: read the messages before it.' },
@@ -1103,12 +1187,31 @@ export class AnimaLife extends Service {
       },
       output: { ...lines, render: (_args, value) => [{ type: 'text', text: value.lines.length === 0 ? '这里没有可读的消息。' : value.lines.join('\n') }] },
       execute: async (args, exec) => {
+        const key = args.channel.trim()
         const count = Math.max(1, Math.min(this.config.groups.bufferMessages, Math.round(args.count ?? READ_LINES)))
-        const read = this.groups.read(args.channel.trim(), count, args.before)
-        if (read === undefined) return { lines: [] }
-        this.perceived(read.fresh, exec.agent?.id)
-        this.ctx.emit('anima/read', { channel: read.channel })
-        return { lines: [`${whereOf(read.channel)}${read.earlier ? '（更早的还有）' : ''}：`, ...read.lines.map(groupLine)] }
+        const read = this.groups.read(key, count, args.before)
+        const channel = read?.channel ?? this.channel(key)
+        if (channel === undefined) return { lines: [] }
+        const buffered = read?.lines ?? []
+        let older: readonly HistoryLine[] = []
+        // Past the buffer, the platform's history (when the adapter provides one).
+        if (buffered.length < count && read?.earlier !== true) {
+          const oldest = buffered[0]
+          const before = oldest === undefined ? (args.before === undefined || args.before === '' ? undefined : args.before) : oldest.messageId
+          if (oldest === undefined || before !== undefined) {
+            const lines = await this.history(key, { count: count - buffered.length, before }).catch((error: unknown) => {
+              this.ctx.logger.warn(`anima: history of ${key}: ${errorText(error)}`)
+              return undefined
+            })
+            const seen = new Set(buffered.map(line => line.messageId).filter(id => id !== undefined))
+            older = (lines ?? []).filter(line => (line.messageId === undefined || !seen.has(line.messageId)) && (oldest === undefined || line.ts <= oldest.ts))
+          }
+        }
+        if (read !== undefined) this.perceived(read.fresh, exec.agent?.id)
+        if (buffered.length === 0 && older.length === 0) return { lines: [] }
+        this.ctx.emit('anima/read', { channel })
+        const historyLine = (line: HistoryLine) => `  ${formatLocal(line.ts).slice(5)} ${line.who}${line.messageId === undefined ? '' : ` [msg ${line.messageId}]`}: ${line.text}`
+        return { lines: [`${whereOf(channel)}${read?.earlier === true ? '（更早的还有）' : ''}：`, ...older.map(historyLine), ...buffered.map(groupLine)] }
       },
     }), { effect: 'observe', ...awake, target: args => typeof args.channel === 'string' ? args.channel.trim() : undefined })
   }
@@ -1152,6 +1255,19 @@ function lifeMessage(text: string, summary: string): UserMessage {
     content: [{ type: 'text', text }],
     source: { kind: 'anima-stimulus', stimulus: 'waking', form: 'notice', summary: boundContextSummary(summary) },
   })
+}
+
+/** Where an arrival came from, for its message source: the channel key and who wrote (logged, not model-visible). */
+export function arrivalSource(stimulus: Stimulus): { channel?: string; people?: SourcePerson[] } {
+  if (stimulus.type !== 'message' && stimulus.type !== 'burst' && stimulus.type !== 'channel-event') return {}
+  const channel = channelKey(stimulus.channel)
+  if (stimulus.type === 'channel-event') return { channel }
+  const people = new Map<string, SourcePerson>()
+  for (const message of stimulus.type === 'burst' ? stimulus.messages : [stimulus]) {
+    const { sender } = message
+    people.set(sender.platformUserId, { platform: message.channel.platform, userId: sender.platformUserId, name: sender.displayName, ...sender.isOwner ? { owner: true as const } : {} })
+  }
+  return { channel, people: [...people.values()] }
 }
 
 function errorText(error: unknown): string {

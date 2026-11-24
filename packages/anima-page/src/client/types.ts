@@ -53,12 +53,12 @@ export interface SelfDiff {
 export interface SelfModelView { entries: SelfEntry[]; diffs: SelfDiff[] }
 
 export interface Memory {
-  id: string; kind: string; scope: string; personId?: string; channelKey?: string; text: string
+  id: string; kind: string; channelKey?: string; fromPerson?: string; fromName?: string; personId?: string; text: string
   importance: number; strength: number; recalls: number; createdAt: number; status: string; replacedBy?: string
 }
 export interface MemoryView {
   memories: Memory[]; total: number; limit: number; offset: number
-  counts: Record<string, number>; scopes: { scope: string; count: number }[]; pending: number
+  counts: Record<string, number>; sources: { source: string; count: number }[]; pending: number
 }
 
 export interface Goal { id: string; text: string; owner: string; status: string; due?: number; notes: { at: number; text: string }[] }

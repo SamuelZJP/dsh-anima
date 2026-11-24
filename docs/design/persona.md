@@ -21,7 +21,7 @@ Who she is, and how that reaches her prompt. Package: `anima-core`.
 The waking session's system prompt, in order:
 
 1. **Persona card**: who she is.
-2. **Her world**: she is one person with one stream of attention; her behaviors are her body; her plain text is her thinking and reaches nobody; she goes to bed when she wants, and sleep comes when she is sleepy enough; each sleep ends a waking and the next waking starts fresh, with what comes to mind; while she sleeps nothing reaches her but her alarms and the owner; messages come in bursts; each memory says where she heard it, and what she shares is up to her.
+2. **Her world**: she is one person with one stream of attention; her behaviors are her body; her plain text is her thinking and reaches nobody; she goes to bed when she wants, and sleep comes when she is sleepy enough; each sleep ends a waking and the next waking starts fresh, with what comes to mind; while she sleeps nothing reaches her but her alarms and the owner; messages come in bursts. The waking rules add that each memory says where she heard it, and what she shares is up to her.
 3. **Her channels**: each platform she can reach, how to speak there, who reads what, generated from the loaded adapters and her actual behaviors.
 4. **Self-model**: every note with its id, as a logged prompt context re-sent only when its text changes.
 5. **State**: phase, sleep pressure, energy, mood and needs, carried by every heartbeat.

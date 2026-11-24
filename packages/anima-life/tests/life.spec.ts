@@ -67,6 +67,24 @@ describe('falling asleep and waking', () => {
     expect(recorded.filter(r => r.type === 'waking-open' || r.type === 'waking-archive').map(r => r.type)).toEqual(['waking-open', 'waking-archive'])
   })
 
+  it('tells memory each waking archived after its last turn, and writes each arrival\'s channel and people into its source', async () => {
+    const env = await setup('2026-11-10T08:00')
+    const { ctx, clock, host } = env
+    const archived: string[] = []
+    ctx.on('anima/waking-archived', ({ sessionId }) => { archived.push(sessionId) })
+    const first = ctx.animaLife.waking.current!
+    await ctx.animaLife.deliver(message(ALICE, '在吗', clock.now))
+    expect(host.sources.at(-1)).toEqual({ id: first, channel: ALICE_KEY, people: [{ platform: 'demo', userId: 'alice', name: 'Alice' }] })
+    clock.now = at('2026-11-10T20:00')
+    event(ctx, first, 'turn/start')
+    expect((await callAs(ctx, first, 'sleep', {})).text).toBe('你睡着了。')
+    await settle()
+    expect(archived).toEqual([])
+    event(ctx, first, 'turn/end')
+    await settle()
+    expect(archived).toEqual([first])
+  })
+
   it('holds chats in her inbox while she sleeps, and opens the next waking when she is rested', async () => {
     const { ctx, clock, host, first, next, stimuli } = await asleepAt('2026-11-10T20:00')
     event(ctx, first, 'turn/end')

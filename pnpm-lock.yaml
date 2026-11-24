@@ -59,9 +59,6 @@ importers:
       '@anima/life':
         specifier: workspace:*
         version: link:../anima-life
-      '@anima/memory':
-        specifier: workspace:*
-        version: link:../anima-memory
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ~4.1.0

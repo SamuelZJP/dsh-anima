@@ -452,6 +452,28 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
     },
   }), { platform: PLATFORM, effect: 'express', sessions: ['waking'], ...SAY_META })
 
+  /** A chat's messages from QQ's history, rendered as she sees them, oldest first. */
+  async function historyOf(kind: ChatKind, chatId: string, count: number): Promise<{ ts: number; who: string; text: string; messageId: string; replyTo?: string | undefined }[]> {
+    const key = qqChannelKey(config.account, kind as 'private' | 'group', chatId)
+    const messages: readonly QqMessage[] = (await backend.history!(kind, chatId, count)).slice(-count)
+    return messages.map((message) => {
+      const { userId } = message
+      const who = userId === config.account ? 'you' : userId === config.owner ? `${config.ownerName} (owner)` : `${message.displayName} [qq ${userId}]`
+      const { text, replyTo } = renderSegments(message.segments, renderIn(key))
+      keep(message.messageId, userId === config.account ? 'you' : who, text)
+      return { ts: message.time ?? 0, who, text: `${replyTo === undefined ? '' : `${replyLabel(replyTo, recent.get(replyTo))} `}${text}`, messageId: message.messageId }
+    })
+  }
+
+  // Her chats' history for first contact in a waking and for reading a group further back (the adapter contract).
+  if (backend.history !== undefined) {
+    life.provideHistory(PLATFORM, async (channel, request) => {
+      const lines = await historyOf(channel.kind as ChatKind, channel.id, request.before === undefined ? request.count : HISTORY_MAX)
+      const end = request.before === undefined ? lines.length : lines.findIndex(line => line.messageId === request.before)
+      return lines.slice(0, end < 0 ? 0 : end).slice(-request.count)
+    })
+  }
+
   if (backend.history !== undefined) core.registerBehavior(defineTool({
     name: HISTORY_TOOL,
     description: 'Read recent messages of a QQ chat, oldest first, including ones that did not reach you.',
@@ -465,17 +487,9 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
     },
     async execute(args) {
       const channel = chatOf(args.channel)
-      const session = { channelKey: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
       const count = Math.max(1, Math.min(HISTORY_MAX, Math.round(args.count ?? 15)))
-      const messages: readonly QqMessage[] = (await backend.history!(channel.kind as ChatKind, channel.id, count)).slice(-count)
-      const lines = messages.map((message) => {
-        const { userId } = message
-        const who = userId === config.account ? 'you' : userId === config.owner ? `${config.ownerName} (owner)` : `${message.displayName} [qq ${userId}]`
-        const { text, replyTo } = renderSegments(message.segments, renderIn(session.channelKey))
-        keep(message.messageId, userId === config.account ? 'you' : who, text)
-        const when = message.time === undefined ? '?' : formatLocal(message.time)
-        return `${when} ${who} [msg ${message.messageId}]: ${replyTo === undefined ? '' : `${replyLabel(replyTo, recent.get(replyTo))} `}${text}`
-      })
+      const lines = (await historyOf(channel.kind as ChatKind, channel.id, count))
+        .map(line => `${line.ts === 0 ? '?' : formatLocal(line.ts)} ${line.who} [msg ${line.messageId}]: ${line.text}`)
       return { lines }
     },
   }), { platform: PLATFORM, effect: 'observe', sessions: ['waking'], target: targetOf })

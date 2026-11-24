@@ -1,8 +1,8 @@
 // Write the --patch overlay of the R4 exit demo (scripts/demo/r4-drive.mjs) into a fresh data dir
 // under ~/.anima, with its own characterId so no earlier session is reused. Nothing under ~/.dsh
 // changes. QQ and Bilibili stay off (the bundle disables them); scripted people talk to her on the
-// fake demo platform (scripts/demo/demo-platform.mjs), loaded by path. The guard is loaded by path
-// too (outside her): the owner's night wake goes through it, and the demo chats are allowed.
+// fake demo platform (scripts/demo/demo-platform.mjs), loaded by path. The guard (outside her, from
+// the guard bundle installed in anima-dev) allows the demo chats; the owner's night wake goes through it.
 // Usage: node scripts/demo/r4-overlay.mjs [evening]   → prints the overlay path
 // "evening" starts her clock at 15:00 with a body that has been up since 07:00 (a state.json
 // seeded in the fresh data dir: sleep pressure 0.59, as 8 hours awake from 0.15 give).
@@ -26,7 +26,6 @@ if (mode === 'evening') {
 }
 const drive = fileURLToPath(new URL('./r4-drive.mjs', import.meta.url))
 const platform = fileURLToPath(new URL('./demo-platform.mjs', import.meta.url))
-const guardLib = fileURLToPath(new URL('../../packages/anima-guard/lib/index.js', import.meta.url))
 
 const yaml = `# R4 exit demo, run ${run} (scripts/demo/r4-overlay.mjs).
 - id: anima-core
@@ -38,18 +37,17 @@ const yaml = `# R4 exit demo, run ${run} (scripts/demo/r4-overlay.mjs).
 - id: anima-life
   config:
     conversation: { settleSeconds: 3 }
+# Outside the persona: the guard bundle installed in anima-dev, with the demo chats allowed.
+- id: anima-guard
+  config:
+    allowlist:
+      demo: { open: true }
+    initiate:
+      consent: { owner: true, channels: ['demo:me:private:alice', 'demo:me:group:club'] }
+    outbox: { delaySeconds: 0 }
 - insert:
     - id: anima-demo-platform
       name: ${platform}
-    # Outside the persona, inserted by path (the guard bundle is not installed in anima-dev).
-    - id: anima-guard
-      name: ${guardLib}
-      config:
-        allowlist:
-          demo: { open: true }
-        initiate:
-          consent: { owner: true, channels: ['demo:me:private:alice', 'demo:me:group:club'] }
-        outbox: { delaySeconds: 0 }
     - id: anima-r4-demo
       name: ${drive}
       config:

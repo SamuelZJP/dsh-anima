@@ -8,7 +8,8 @@ She has one stream of attention, like a person, and it breaks only when she slee
 - **Opened by whatever wakes her:** her pressure falling, an alarm, or the owner. Its first arrival is the waking context: the time, why she woke, when and how she fell asleep, her sleep note, her inbox summarised per channel, and what happened while she slept. When her body or the owner wakes her, it is the message that starts the turn; when an alarm does, life adds it at the alarm's first step (`agent/pre-step`), ahead of the alarm. Either way it is a logged session message and comes first. What `design/memory.md` adds at waking comes from memory's own step.
 - **One session for everything.** Private chats, groups, heartbeats, alarms, browsing, her workspace. There are no per-chat, Self or triage sessions. Sleep's consolidation runs in its own session, as part of her sleep (`design/memory.md`).
 - **Her context is her working memory.** What she saw and did since she woke is already in it, from every channel. DSH compaction trims it on long wakings; that is working memory fading.
-- **Archived when she falls asleep,** after its last turn ends (DSH refuses to archive a running session). Sleep reads its log (`design/memory.md`). Nothing is ever delivered into an archived session: DSH would drop it.
+- **Archived when she falls asleep,** after its last turn ends (DSH refuses to archive a running session), its log flushed first. Life then emits `anima/waking-archived`, and sleep reads its log (`design/memory.md`). Nothing is ever delivered into an archived session: DSH would drop it.
+- **Where each arrival came from** is written into its message source (`channel`, and `people`: platform, user id, name, owner), logged but not model-visible. Memory reads it for cues and for consolidation, never the words.
 - **Model.** One model for waking sessions, `waking.model` on the anima-life row.
 
 ## Stimuli
@@ -48,7 +49,7 @@ People do not read every unread message in every group. She doesn't either.
 
 - **Unread buffer.** Unaddressed group messages wait in a buffer per group (last `groups.bufferMessages` lines, in memory: a restart loses them). Nothing is shown to her until she looks.
 - **`groups_glance()`** lists groups with unread messages: name, unread count, and the latest few lines (`groups.glanceLines`). It does not mark them read.
-- **`group_read(channel, before?, count?)`** reads one group's buffer, oldest first, and marks it read; `before` reads further back. Reading past the buffer, through the platform's history, comes with first-contact history (R5).
+- **`group_read(channel, before?, count?)`** reads one group's buffer, oldest first, and marks it read; `before` reads further back. Where the buffer does not reach back far enough (or the group has none), it reads on through the platform's history (`animaLife.history`, provided by the adapter).
 - **An @ of her** brings the group's lines she has not seen yet, as one burst.
 - **She speaks in a group with the same `say`.** For a while after she speaks there (`groups.attentionSeconds`), that group's new messages reach her as stimuli, as an open conversation does.
 - **What she never looked at, she never perceived.** It is not remembered: only lines that reached her, or that she glanced at or read, go to her transcript.

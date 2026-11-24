@@ -73,3 +73,25 @@ describe('groups in her waking session', () => {
     expect(ctx.animaLife.groups.unread()).toEqual({ [GROUP_KEY]: 1 })
   })
 })
+
+describe('reading a group further back', () => {
+  it('goes past the buffer through the platform\'s history, oldest first, and reads a group it never buffered', async () => {
+    const { ctx, clock } = await setup('2026-11-10T08:00')
+    const id = ctx.animaLife.waking.current!
+    const asked: { count: number; before?: string | undefined }[] = []
+    const all = [{ ts: clock.now - 7_200_000, who: 'Bob', text: '上周的书读完了吗', messageId: 'h1' }, { ts: clock.now - 3_600_000, who: 'you', text: '读完啦', messageId: 'h2' }]
+    ctx.animaLife.provideHistory('demo', async (_channel, request) => {
+      asked.push(request)
+      const end = request.before === undefined ? all.length : all.findIndex(line => line.messageId === request.before)
+      return all.slice(0, end < 0 ? 0 : end).slice(-request.count)
+    })
+    const empty = await callAs(ctx, id, 'group_read', { channel: GROUP_KEY, count: 5 })
+    expect(empty.text).toContain('上周的书读完了吗')
+    expect(asked.at(-1)).toEqual({ count: 5, before: undefined })
+    all.push({ ts: clock.now, who: 'Alice', text: '今天读哪一章', messageId: '7' })
+    await ctx.animaLife.deliver(line('今天读哪一章', clock.now, '7'))
+    const read = await callAs(ctx, id, 'group_read', { channel: GROUP_KEY, count: 3 })
+    expect(read.text.split('\n').slice(1).map(l => l.trim().split(' ').slice(-1)[0])).toEqual(['上周的书读完了吗', '读完啦', '今天读哪一章'])
+    expect(asked.at(-1)).toEqual({ count: 2, before: '7' })
+  })
+})

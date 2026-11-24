@@ -1,6 +1,6 @@
 /**
- * Anima memory configuration: person links, auto-injection budget, decay and
- * consolidation (DESIGN §8). Every tunable is a validated field.
+ * Anima memory configuration (docs/design/memory.md): person links, what comes
+ * to mind, decay and consolidation. Every tunable is a validated field.
  * @module @anima/memory/config
  */
 
@@ -9,7 +9,7 @@ import { AnimaError, DEFAULT_MODEL, type ModelRoute } from '@anima/core'
 
 /** A person with accounts on one or more platforms, linked by hand (DESIGN §3). */
 export interface PersonLink {
-  /** Person id used in scopes, e.g. `alice` gives `private:alice`. */
+  /** Person id used in source labels and `about`, e.g. `alice`. */
   id: string
   /** Accounts `platform:userId`, e.g. `qq:12345`, `qq:67890`. */
   accounts: string[]
@@ -35,9 +35,11 @@ export interface DecayConfig {
 export interface ConsolidationConfig {
   /** Model of the consolidation session (a cheap one). */
   model: ModelRoute
-  /** Most transcript tokens handed to one consolidation run. */
+  /** Most log tokens in one piece of a waking, handed to one consolidation turn. */
   maxInputTokens: number
-  /** Real seconds a consolidation run may take before it is given up and retried. */
+  /** Most characters of one tool result, heartbeat or thought kept in a piece. */
+  resultChars: number
+  /** Real seconds a consolidation turn may take before it is given up and retried at the next sleep. */
   timeoutSeconds: number
 }
 
@@ -45,12 +47,21 @@ export interface ConsolidationConfig {
 export interface Config {
   /** Hand-linked persons. Unlinked accounts are persons of their own (`platform:userId`). */
   persons: PersonLink[]
-  /** Auto-injection at turn start. */
+  /** What comes to mind: the `[memory]` message. */
   inject: {
-    /** Token budget of the injected memory block. */
+    /** Token budget of one `[memory]` message. */
     tokenBudget: number
-    /** Most memories in the block. */
+    /** Most memories in one message. */
     maxItems: number
+  }
+  /** Cues of what comes to mind. */
+  recall: {
+    /** Latest episodes that come to mind at waking. */
+    wakingEpisodes: number
+    /** Recent episodes of a channel that come to mind when it writes. */
+    channelEpisodes: number
+    /** Lines of a chat from before she woke that come to mind at first contact in a waking (from the adapter's history). */
+    firstContactLines: number
   }
   decay: DecayConfig
   consolidation: ConsolidationConfig
@@ -68,8 +79,13 @@ export const Config: z<Config> = z.object({
     accounts: z.array(z.string().pattern(/^[a-z][a-z0-9_-]*:.+$/)).default([]),
   })).default([]).description('Persons linked across platforms; accounts are "platform:userId".'),
   inject: z.object({
-    tokenBudget: z.number().min(0).default(800).description('Token budget of the memory block injected at each turn start.'),
-    maxItems: z.natural().min(1).default(12).description('Most memories in the injected block.'),
+    tokenBudget: z.number().min(0).default(800).description('Token budget of one [memory] message.'),
+    maxItems: z.natural().min(1).default(12).description('Most memories in one [memory] message.'),
+  }),
+  recall: z.object({
+    wakingEpisodes: z.natural().default(5).description('Latest episodes that come to mind at waking.'),
+    channelEpisodes: z.natural().default(3).description('Recent episodes of a channel that come to mind when it writes.'),
+    firstContactLines: z.natural().default(6).description('Lines of a chat from before she woke that come to mind at first contact in a waking.'),
   }),
   decay: z.object({
     halfLifeDays: z.number().min(0.01).default(7),
@@ -81,8 +97,9 @@ export const Config: z<Config> = z.object({
   }).description('Daily decay of memory strength.'),
   consolidation: z.object({
     model: modelRoute.description('Model of the consolidation session.'),
-    maxInputTokens: z.natural().min(200).default(6000).description('Most transcript tokens per consolidation run.'),
-    timeoutSeconds: z.number().min(10).default(600).description('Real seconds before a stuck run is given up.'),
+    maxInputTokens: z.natural().min(200).default(6000).description('Most log tokens in one piece of a waking (one consolidation turn).'),
+    resultChars: z.natural().min(40).default(600).description('Most characters of one tool result, heartbeat or thought in a piece.'),
+    timeoutSeconds: z.number().min(10).default(600).description('Real seconds before a stuck consolidation turn is given up (retried at the next sleep).'),
   }),
 }) as z<Config>
 

@@ -10,7 +10,7 @@ import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
 import { SAY_META, SAY_PARAMETERS, sayMessages, type AdmitRefusal, type AdmitRequest } from '@anima/core'
 import { onTestFinished } from 'vitest'
-import { AnimaLife, type ArchiveResult, type ModelChoice, type PublishedChannel, type SessionHost, type Stimulus } from '../src/index.ts'
+import { AnimaLife, type ArchiveResult, type Delivery, type LogEvent, type ModelChoice, type PublishedChannel, type SessionHost, type Stimulus } from '../src/index.ts'
 
 export const at = (text: string) => new Date(text).getTime()
 
@@ -50,11 +50,18 @@ export class FakeHost implements SessionHost<FakeAgent> {
     return n
   }
   rename(agent: FakeAgent, title: string) { agent.title = title }
-  async deliver(agent: FakeAgent, text: string) {
+  readonly logs = new Map<string, LogEvent[]>()
+  readonly cancelled: string[] = []
+  cancel(agent: FakeAgent) { this.cancelled.push(agent.id) }
+  async readLog(id: string) { return this.logs.get(id) ?? [] }
+  readonly sources: Record<string, unknown>[] = []
+  async deliver(agent: FakeAgent, delivery: Delivery) {
+    const { text } = delivery
+    this.sources.push({ id: agent.id, channel: delivery.channel, people: delivery.people })
     if (this.archived.has(agent.id)) throw new Error(`delivered into archived ${agent.id}`)
     agent.inbox.push(text)
   }
-  async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
+  async inject(agent: FakeAgent, { text }: Delivery) { agent.inbox.push(`(inject) ${text}`) }
   selectModel(agent: FakeAgent, choice: ModelChoice) { agent.models.push(choice) }
 }
 

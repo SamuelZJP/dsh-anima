@@ -90,6 +90,14 @@ describe('QQ adapter', () => {
     expect(backend.callsOf('history')[0]!.args).toEqual(['private', OWNER, 5])
   })
 
+  it('gives her life the chats\' history: the latest lines, or those before a message', async () => {
+    const { ctx, backend } = await setup()
+    backend.respond('history', () => [1, 2, 3].map(n => ({ kind: 'private', chatId: OWNER, userId: OWNER, displayName: 'sam', messageId: String(n), time: 1_762_740_000_000 + n, segments: [{ type: 'text', text: `line ${n}` }] })))
+    const key = `qq:${ACCOUNT}:private:${OWNER}`
+    expect((await ctx.animaLife.history(key, { count: 2 }))!.map(line => line.text)).toEqual(['line 2', 'line 3'])
+    expect((await ctx.animaLife.history(key, { count: 5, before: '3' }))!.map(line => `${line.who}: ${line.text}`)).toEqual(['Sam (owner): line 1', 'Sam (owner): line 2'])
+  })
+
   it('sends a list as messages in order, replyTo and mention on the first only, and reports a partial send', async () => {
     const { ctx, backend } = await setup()
     const said = await callAs(ctx, ownerSession, 'qq_say', { text: '在的', also: ['怎么啦'], replyTo: '5' })

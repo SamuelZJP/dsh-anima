@@ -43,8 +43,10 @@ export class FakeHost implements SessionHost<FakeAgent> {
   async archive() { return 'archived' as const }
   async moveAlarms() { return 0 }
   rename() {}
-  async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
-  async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
+  async deliver(agent: FakeAgent, { text }: { text: string }) { agent.inbox.push(text) }
+  async inject(agent: FakeAgent, { text }: { text: string }) { agent.inbox.push(`(inject) ${text}`) }
+  cancel() {}
+  async readLog() { return [] }
   selectModel() {}
   /** Arrivals in her waking session(s) from one chat, by its channel key. */
   inbox(key: string) { return [...this.sessions.values()].flatMap(agent => agent.inbox).filter(text => text.includes(` ${key}]`) && !text.includes('[醒来]')) }

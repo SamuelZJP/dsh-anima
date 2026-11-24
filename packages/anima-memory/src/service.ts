@@ -1,25 +1,27 @@
 /**
- * The `animaMemory` service (docs/design/memory.md): her own transcript, the
- * memory store with audience scopes, the `memory_*` behaviors, automatic recall
- * at turn start, consolidation when she falls asleep, and daily decay.
+ * The `animaMemory` service (docs/design/memory.md): her long-term memory with
+ * the source of every memory, what comes to mind at the steps of her waking
+ * session, the `memory_*` behaviors, consolidation in sleep from the archived
+ * log of each ended waking, and daily decay.
  * @module @anima/memory/service
  */
 
 import { join } from 'node:path'
 import { Service, type Context } from '@deepseek-ai/cordis'
-import { AnimaError, channelKey, formatLocal, sayMessages, type BehaviorEvent, type ChannelRef } from '@anima/core'
+import { AnimaError, channelKey, describeGoal, formatLocal, type ChannelRef } from '@anima/core'
 import type {} from '@anima/core'
-import type { Stimulus, StimulusEvent } from '@anima/life'
+import { whereOf, type PublishedChannel, type SourcePerson } from '@anima/life'
 import type {} from '@anima/life'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { audienceOf, chatPerson, describeScope, hears, learnScope, narrow, personOf, PUBLIC, SELF, type Keep, type MemoryPlace, type Scope, type SessionFacts } from './audience.ts'
 import type { Config } from './config.ts'
-import { buildBlock, memoryLine, selfQuery } from './inject.ts'
-import { MemoryStore, type Memory, type Segment } from './store.ts'
 import type { MemoryKind } from './decay.ts'
+import { buildBlock, cueText, historyLine, memoryLine, type ChannelLookup } from './inject.ts'
+import { cutPieces, pieceFacts, renderLog, type Piece } from './log.ts'
+import { chatPerson, personOf } from './source.ts'
+import { MemoryStore, type Memory } from './store.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -29,50 +31,40 @@ declare module '@deepseek-ai/cordis' {
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** Memories recalled automatically at a turn start. */
+    /** What came to mind at a step of her waking session. */
     'anima-memory': { kind: 'anima-memory' } & ContextFormed
   }
 }
 
 const TICK_MS = 60_000
-const HOUR = 3_600_000
-const DAY = 24 * HOUR
+const DAY = 24 * 3_600_000
+/** Item of the `shown` table: the waking cues of a waking session came. */
+const WAKING_ITEM = 'waking'
 
-/** Transcript session id of observations (what she watched or read on her own). */
-export const OBSERVATIONS = 'anima-observations'
-
-/** Something she observed on her own (a video she watched), from an adapter. */
-export interface Observation {
-  /** What she observed, one or a few lines. */
-  readonly text: string
-  /** Who may hear it later: `public` for public content, `self` for her own thoughts. */
-  readonly scope: 'public' | 'self'
-  /**
-   * Store it as a memory right away (text the model already wrote, such as a
-   * viewing note). Without it the line goes to her transcript, and consolidation sorts it.
-   */
-  readonly memory?: { readonly kind?: MemoryKind; readonly importance?: number }
-  /** Session it came from. */
-  readonly source?: string
-}
-
-/** A consolidation run in progress. */
+/** A consolidation turn in progress: one piece of one ended waking. */
 interface Run {
   readonly id: string
+  readonly waking: string
+  /** The consolidation session of that waking. */
   readonly sessionId: string
-  /** Segment label (`s1`, …) to segment. */
-  readonly segments: ReadonlyMap<string, Segment>
-  /** Real start time, for the timeout. */
+  readonly piece: Piece
+  /** Channel keys in the piece: a memory's source must be one of them. */
+  readonly channels: ReadonlySet<string>
+  /** People in the piece, person id → name. */
+  readonly people: ReadonlyMap<string, string>
   readonly startedReal: number
+  /** DSH turn number, once it started. */
+  turn?: number
 }
 
-/** Strip the clock stamp and channel tag of a delivered message, keeping what was said. */
-function spoken(text: string): string {
-  return text.replace(/^(\[[^\]]*\]\s*)+/u, '').replace(/^[^:\n]{1,60}:\s*/u, '')
-}
+interface Source { kind?: string; stimulus?: string; channel?: string; people?: SourcePerson[] }
 
 function textOf(message: UserMessage): string {
   return message.content.map(block => (block as { text?: string }).text ?? '').join('\n')
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** Anima memory service. */
@@ -83,6 +75,10 @@ export class AnimaMemory extends Service {
   readonly store: MemoryStore
   private run: Run | undefined
   private runSeq = 0
+  /** A consolidation step is being prepared (reading a log). */
+  private starting = false
+  /** Consolidation could not go on (a failed read, a failed or stuck turn): it waits for her next sleep. */
+  private stalled = false
 
   /**
    * @param ctx - root context.
@@ -92,20 +88,20 @@ export class AnimaMemory extends Service {
     super(ctx, 'animaMemory')
     const core = ctx.anima
     this.store = new MemoryStore(join(core.config.dataDir, 'memory.db'))
-    // A run does not survive a restart; its lines go back to pending.
-    this.store.releaseAll()
     ctx.effect(() => () => this.store.close(), 'animaMemory.store')
 
-    ctx.on('anima/stimulus', event => this.onStimulus(event))
-    ctx.on('anima/behavior', event => this.onBehavior(event))
-    // Consolidation is part of her sleep: it starts when she falls asleep, and only then.
+    // Consolidation is part of her sleep: an ended waking is sorted once it is archived, while she sleeps.
+    ctx.on('anima/waking-archived', ({ sessionId }) => {
+      this.store.addWaking(sessionId, core.clock.now())
+      this.kick()
+    })
     ctx.on('anima/sleep', () => {
-      this.consolidate().catch((error: unknown) => ctx.logger.warn(`anima-memory: consolidation failed: ${error instanceof Error ? error.message : String(error)}`))
+      this.stalled = false
+      this.kick()
     })
+    ctx.on('anima/wake', () => this.stopRun('she woke'))
     ctx.on('agent/pre-step', async (payload, next) => this.preStep(payload, next))
-    ctx.on('session/event', (session, event) => {
-      if (event.type === 'turn/end' && this.run !== undefined && session.id === this.run.sessionId) this.finish()
-    })
+    ctx.on('session/event', (session, event) => this.onSessionEvent(session.id, event))
 
     this.registerBehaviors()
 
@@ -114,177 +110,223 @@ export class AnimaMemory extends Service {
 
     ctx.effect(() => {
       const timer = setInterval(() => this.tick(), TICK_MS)
+      // Asleep at load (a restart in her sleep): what is pending goes on.
+      this.kick()
       return () => clearInterval(timer)
     }, 'animaMemory.tick')
   }
 
-  // ---- sessions and scopes ----
+  private readonly channelLookup: ChannelLookup = key => this.ctx.animaLife.channel(key)
 
-  /** What scope decisions need to know about a session: her waking session and sleep's consolidation are her inner life. */
-  facts(sessionId: string | undefined): SessionFacts {
-    const kind = sessionId === undefined ? undefined : this.ctx.anima.describeSession(sessionId)?.kind
-    const info: MemoryPlace | undefined = kind === undefined ? undefined : { kind: 'inner' }
-    return { info, isOwner: false }
-  }
-
-  /** What scope decisions need to know about a chat. */
-  chatFacts(channel: ChannelRef): SessionFacts {
-    const key = channelKey(channel)
-    return { info: { kind: 'chat', channel, channelKey: key }, isOwner: this.ctx.anima.channelInfo(key)?.isOwner === true }
-  }
-
-  // ---- transcript ----
-
-  private onStimulus({ stimulus, sessionId }: StimulusEvent): void {
-    if (stimulus.type !== 'message') return
-    const facts = this.chatFacts(stimulus.channel)
-    const scope = learnScope(facts, this.config.persons)
-    if (scope === undefined || facts.info?.kind !== 'chat') return
-    const { sender, channel } = stimulus
-    this.store.record({
-      ts: stimulus.ts, sessionId, channelKey: facts.info.channelKey, scope, dir: 'in',
-      speaker: `${sender.displayName}${sender.isOwner ? ' (owner)' : ''}`,
-      speakerId: personOf(channel.platform, sender.platformUserId, sender.isOwner, this.config.persons),
-      text: stimulus.text,
-    })
-  }
-
-  private onBehavior(event: BehaviorEvent): void {
-    // A say's text is one message or a list of them (DESIGN §6); each is one transcript line.
-    const messages = event.meta.effect === 'express' ? sayMessages(event.args) : []
-    if (messages.length === 0) return
-    const key = event.meta.target?.(event.args)
-    const channel = key === undefined ? undefined : this.ctx.animaLife.channel(key)
-    if (channel === undefined || event.sessionId === undefined || this.facts(event.sessionId).info === undefined) return
-    const facts = this.chatFacts(channel)
-    const scope = learnScope(facts, this.config.persons)
-    if (scope === undefined || facts.info?.kind !== 'chat') return
-    for (const text of messages) this.store.record({ ts: event.at, sessionId: event.sessionId, channelKey: facts.info.channelKey, scope, dir: 'out', speaker: 'you', text })
-  }
-
-  /**
-   * Record something she observed on her own (DESIGN §8). The caller picks
-   * `public` or `self`; nothing wider can be named.
-   * @returns the memory id when stored as a memory, else undefined.
-   */
-  observe(observation: Observation): string | undefined {
-    const scope: Scope = observation.scope === 'public' ? PUBLIC : SELF
-    const now = this.ctx.anima.clock.now()
-    if (observation.memory !== undefined) {
-      return this.store.remember({
-        kind: observation.memory.kind ?? 'episode', scope, text: observation.text,
-        importance: observation.memory.importance, source: observation.source, now,
-      }).id
-    }
-    this.store.record({ ts: now, sessionId: OBSERVATIONS, channelKey: undefined, scope, dir: 'in', speaker: 'you', text: observation.text })
-    return undefined
-  }
-
-  // ---- automatic recall ----
+  // ---- coming to mind ----
 
   private async preStep(
     payload: { agent: { id: string }; messages: UserMessage[]; step: number; signal: AbortSignal },
     next: () => Promise<PreStepDecision>,
   ): Promise<PreStepDecision> {
     const decision = await next()
-    if (decision.kind === 'reject' || payload.signal.aborted || payload.step !== 1) return decision
-    if (this.ctx.anima.describeSession(payload.agent.id)?.kind !== 'waking') return decision
-    const facts = this.facts(payload.agent.id)
-    const texts = decision.messages
-      .filter(message => message.source?.kind !== 'anima-memory')
-      .map(textOf)
-    const query = texts.map(text => /^\[[^\]]*\]\s*\[(心跳|醒来)\]/u.test(text) ? selfQuery(text) : spoken(text)).join('\n')
-    const block = buildBlock({
-      store: this.store,
-      audience: audienceOf(facts, this.config.persons),
-      person: undefined,
-      channelKey: undefined,
-      query,
-      tokenBudget: this.config.inject.tokenBudget,
-      maxItems: this.config.inject.maxItems,
-    })
-    if (block === undefined) return decision
-    this.store.touch(block.ids, this.ctx.anima.clock.now())
-    const message = createUserMessage({
-      content: [{ type: 'text', text: block.text }],
-      source: { kind: 'anima-memory', form: 'recall' },
-    })
+    if (decision.kind === 'reject' || payload.signal.aborted) return decision
+    const sessionId = payload.agent.id
+    if (this.ctx.anima.describeSession(sessionId)?.kind !== 'waking') return decision
+    const message = await this.comesToMind(sessionId, decision.messages)
+    if (message === undefined) return decision
     return { ...decision, messages: [...decision.messages, message] }
   }
 
-  // ---- consolidation ----
+  /**
+   * What comes to mind with the messages of one step: at the first step of a
+   * waking, her open goals, the latest episodes and the people in her inbox;
+   * on arrivals, the people and channels that wrote and full-text hits on
+   * what arrived, plus, at first contact in this waking, the chat's last
+   * lines from before she woke. Nothing shown in this waking comes again.
+   * @returns the logged `[memory]` message, or undefined when nothing comes to mind.
+   */
+  async comesToMind(sessionId: string, messages: readonly UserMessage[]): Promise<UserMessage | undefined> {
+    const core = this.ctx.anima
+    const life = this.ctx.animaLife
+    const persons = this.config.persons
+    const arrivals = messages.filter(message => message.source?.kind !== 'anima-memory')
+    const shown = this.store.shownIn(sessionId, [WAKING_ITEM])
+    const waking = !shown.has(WAKING_ITEM)
+    if (arrivals.length === 0 && !waking) return undefined
 
-  /** Whether a consolidation run is in progress. */
+    const people = new Set<string>()
+    const channels = new Set<string>()
+    for (const message of arrivals) {
+      const source = message.source as Source | undefined
+      if (source?.channel !== undefined) channels.add(source.channel)
+      for (const person of source?.people ?? []) people.add(personOf(person.platform, person.userId, person.owner === true, persons))
+    }
+    const arrived = arrivals.map(textOf).join('\n')
+    const extra: string[] = []
+    if (waking) {
+      for (const entry of life.inbox.entries()) {
+        for (const held of entry.messages) people.add(personOf(entry.channel.platform, held.sender.platformUserId, held.sender.isOwner, persons))
+      }
+      const goals = core.goals.open()
+      if (goals.length > 0) extra.push('你还没了结的目标：', ...goals.map(goal => `- ${describeGoal(goal)}`))
+    }
+    // First contact of this waking with a chat: where they left off, from the platform's history.
+    const contacts = this.config.recall.firstContactLines > 0 ? [...channels] : []
+    const already = this.store.shownIn(sessionId, contacts.map(key => `c:${key}`))
+    const fresh = contacts.filter(key => !already.has(`c:${key}`))
+    const woke = core.sleepInfo().since
+    for (const key of fresh) {
+      const lines = await life.history(key, { count: this.config.recall.firstContactLines * 2 }).catch((error: unknown) => {
+        this.ctx.logger.warn(`anima-memory: history of ${key}: ${errorText(error)}`)
+        return undefined
+      })
+      const before = (lines ?? []).filter(line => line.ts < woke && !arrived.includes(line.text)).slice(-this.config.recall.firstContactLines)
+      const channel = life.channel(key)
+      if (before.length > 0 && channel !== undefined) extra.push(`${whereOf(channel)} 你醒来之前，这里最后几句：`, ...before.map(historyLine))
+    }
+
+    const block = buildBlock({
+      store: this.store,
+      cues: { people: [...people], channels: [...channels], query: arrivals.map(message => cueText(textOf(message))).join('\n'), latest: waking ? this.config.recall.wakingEpisodes : 0 },
+      channelEpisodes: this.config.recall.channelEpisodes,
+      exclude: this.store.shownAll(sessionId),
+      extra,
+      channel: this.channelLookup,
+      tokenBudget: this.config.inject.tokenBudget,
+      maxItems: this.config.inject.maxItems,
+    })
+    this.store.markShown(sessionId, [...waking ? [WAKING_ITEM] : [], ...fresh.map(key => `c:${key}`), ...block?.ids ?? []])
+    if (block === undefined) return undefined
+    this.store.touch(block.ids, core.clock.now())
+    return createUserMessage({
+      content: [{ type: 'text', text: block.text }],
+      source: { kind: 'anima-memory', form: 'recall' },
+    })
+  }
+
+  // ---- consolidation in sleep ----
+
+  /** Whether a consolidation turn is in progress. */
   get consolidating(): boolean {
     return this.run !== undefined
   }
 
-  /**
-   * Start a consolidation run (she fell asleep): claim pending transcript lines
-   * and deliver them to the day's consolidation session on the consolidation model.
-   * What a run does not take, or a run that fails, waits for her next sleep.
-   * @returns the number of lines handed over (0 when nothing is pending or a run is going).
-   */
-  async consolidate(): Promise<number> {
-    if (this.run !== undefined) return 0
-    const core = this.ctx.anima
-    const now = core.clock.now()
-    const id = `r${now.toString(36)}-${++this.runSeq}`
-    const segments = this.store.claim(id, this.config.consolidation.maxInputTokens)
-    if (segments.length === 0) return 0
-    const labelled = new Map(segments.map((segment, index) => [`s${index + 1}`, segment] as const))
-    const day = core.dayKey(now)
-    const stimulus: Stimulus = { type: 'consolidate', day, text: this.consolidationText(labelled), run: id, ts: now }
-    // Mark the run before delivery: its turn may end before deliver() resolves.
-    const sessionId = this.ctx.animaLife.consolidationId(day)
-    this.run = { id, sessionId, segments: labelled, startedReal: Date.now() }
-    try {
-      await this.ctx.animaLife.deliver(stimulus, { model: this.config.consolidation.model })
-    } catch (error) {
-      this.store.releaseRun(id)
-      this.run = undefined
-      throw error
-    }
-    return segments.reduce((sum, segment) => sum + segment.lines.length, 0)
+  private kick(): void {
+    this.consolidateNext().catch((error: unknown) => {
+      this.stalled = true
+      this.ctx.logger.warn(`anima-memory: consolidation failed: ${errorText(error)}`)
+    })
   }
 
-  private finish(): void {
+  /**
+   * While she sleeps, start the next piece of the oldest ended waking not yet
+   * consolidated: read its archived log, cut what is left into pieces, and
+   * hand the first to its consolidation session on the consolidation model.
+   * @returns whether a piece was handed over.
+   */
+  async consolidateNext(): Promise<boolean> {
+    const core = this.ctx.anima
+    const life = this.ctx.animaLife
+    if (this.run !== undefined || this.starting || this.stalled || !core.asleep()) return false
+    this.starting = true
+    try {
+      for (const waking of this.store.pendingWakings()) {
+        let events
+        try {
+          events = await life.readLog(waking.sessionId)
+        } catch (error: unknown) {
+          this.stalled = true
+          this.ctx.logger.warn(`anima-memory: cannot read waking ${waking.sessionId}: ${errorText(error)}; tried again at her next sleep.`)
+          return false
+        }
+        const lines = renderLog(events.filter(event => event.seq > waking.upto), { resultChars: this.config.consolidation.resultChars })
+        const pieces = cutPieces(lines, this.config.consolidation.maxInputTokens)
+        const piece = pieces[0]
+        if (piece === undefined) {
+          this.store.finishWaking(waking.sessionId)
+          continue
+        }
+        if (!core.asleep()) return false
+        const facts = pieceFacts(piece)
+        const people = new Map(facts.people.map(person => [personOf(person.platform, person.userId, person.owner === true, this.config.persons), person.name] as const))
+        const now = core.clock.now()
+        const run: Run = {
+          id: `r${now.toString(36)}-${++this.runSeq}`, waking: waking.sessionId, sessionId: life.consolidationId(waking.sessionId),
+          piece, channels: new Set(facts.channels), people, startedReal: Date.now(),
+        }
+        // Mark the run before delivery: its turn may end before deliver() resolves.
+        this.run = run
+        try {
+          await life.deliver({ type: 'consolidate', waking: waking.sessionId, text: this.pieceText(run, pieces.length), run: run.id, ts: now }, { model: this.config.consolidation.model })
+        } catch (error) {
+          if (this.run === run) this.run = undefined
+          throw error
+        }
+        return true
+      }
+      return false
+    } finally {
+      this.starting = false
+    }
+  }
+
+  private onSessionEvent(sessionId: string, event: { type: string; data?: unknown }): void {
+    const run = this.run
+    if (run === undefined || sessionId !== run.sessionId) return
+    const data = (event.data ?? {}) as { turn?: number; reason?: { kind?: string } }
+    if (event.type === 'turn/start') {
+      if (run.turn === undefined && data.turn !== undefined) run.turn = data.turn
+      return
+    }
+    if (event.type !== 'turn/end') return
+    if (run.turn !== undefined && data.turn !== undefined && data.turn !== run.turn) return
+    this.run = undefined
+    if (data.reason === undefined || data.reason.kind === 'completed') {
+      this.store.advanceWaking(run.waking, run.piece.to)
+      this.store.setMeta('lastConsolidatedAt', String(this.ctx.anima.clock.now()))
+      this.kick()
+    } else {
+      // Cut short: the piece waits for her next sleep.
+      this.stalled = true
+      this.ctx.logger.warn(`anima-memory: consolidation turn ended ${data.reason.kind ?? 'early'}; the piece is retried at her next sleep.`)
+    }
+  }
+
+  /** Stop the running consolidation turn (she woke, or it is stuck); its piece is retried at her next sleep. */
+  private stopRun(why: string): void {
     const run = this.run
     if (run === undefined) return
-    this.store.finishRun(run.id)
-    this.store.setMeta('lastConsolidatedAt', String(this.ctx.anima.clock.now()))
     this.run = undefined
+    this.ctx.animaLife.stopConsolidation(run.sessionId).catch((error: unknown) => this.ctx.logger.warn(`anima-memory: stopping consolidation (${why}): ${errorText(error)}`))
   }
 
-  private consolidationText(segments: ReadonlyMap<string, Segment>): string {
-    const parts = ['Sort these conversations into memory. Call memory_write for what is worth keeping (segment label, kind, text); skip small talk. If you learned something lasting about your own tastes, habits or opinions, keep it in your self-model with self_note instead. Stop when every segment is done.']
-    for (const [label, segment] of segments) {
-      const display = segment.channelKey === undefined ? undefined : this.ctx.animaLife.channel(segment.channelKey)?.display
-      const people = [...new Map(segment.lines.filter(line => line.speakerId !== undefined).map(line => [line.speakerId!, line.speaker])).entries()]
-      const known = this.store.inScope(segment.scope, 12)
-      parts.push([
-        '',
-        `## ${label}: ${segment.sessionId === OBSERVATIONS ? 'things you watched or read on your own' : display ?? segment.channelKey ?? segment.sessionId}; heard by: ${describeScope(segment.scope)}`,
-        `People: ${people.length === 0 ? 'none' : people.map(([id, name]) => `${name} [${id}]`).join(', ')}`,
-        `Memories you already have for this audience: ${known.length === 0 ? 'none' : ''}`,
-        ...known.map(memory => memoryLine(memory, false)),
-        'Conversation:',
-        ...segment.lines.map(line => `[${formatLocal(line.ts)}] ${line.speaker}: ${line.text}`),
-      ].join('\n'))
-    }
-    return parts.join('\n')
+  private pieceText(run: Run, left: number): string {
+    const life = this.ctx.animaLife
+    const people = [...run.people].map(([id, name]) => `${name} [${id}]`)
+    const places = [...run.channels].map(key => {
+      const channel = life.channel(key)
+      return channel === undefined ? key : whereOf(channel)
+    })
+    const related: Memory[] = []
+    for (const id of run.people.keys()) related.push(...this.store.about(id, 4))
+    for (const key of run.channels) related.push(...this.store.recentEpisodes(key, 3))
+    const known = [...new Map(related.map(memory => [memory.id, memory])).values()].slice(0, this.config.inject.maxItems)
+    return [
+      `这是你上一次醒着时的一段经历（这次醒着的经历还剩 ${left} 段，这是其中最早的一段）。`,
+      `在场的人：${people.length === 0 ? '没有' : people.join('、')}`,
+      `出现的地方：${places.length === 0 ? '没有' : places.join('、')}`,
+      `你已经有的相关记忆：${known.length === 0 ? '没有' : ''}`,
+      ...known.map(memory => memoryLine(memory, this.channelLookup)),
+      '经过：',
+      ...run.piece.lines.map(line => line.text),
+    ].join('\n')
   }
 
-  /** Periodic work: give up a stuck run, decay once a day. */
+  /** Periodic work: give up a stuck consolidation turn, decay once a day. */
   tick(): void {
-    const core = this.ctx.anima
-    const now = core.clock.now()
-    if (this.run !== undefined && Date.now() - this.run.startedReal > this.config.consolidation.timeoutSeconds * 1000) {
-      this.ctx.logger.warn(`anima-memory: consolidation run ${this.run.id} did not finish in ${this.config.consolidation.timeoutSeconds} s; its lines return to pending.`)
-      this.store.releaseRun(this.run.id)
-      this.run = undefined
+    const run = this.run
+    if (run !== undefined && Date.now() - run.startedReal > this.config.consolidation.timeoutSeconds * 1000) {
+      this.ctx.logger.warn(`anima-memory: consolidation turn ${run.id} did not finish in ${this.config.consolidation.timeoutSeconds} s; its piece is retried at her next sleep.`)
+      this.stalled = true
+      this.stopRun('timeout')
     }
-    this.decayIfDue(now)
+    this.decayIfDue()
   }
 
   /** Apply decay for every her-day passed since the last run. */
@@ -300,36 +342,34 @@ export class AnimaMemory extends Service {
 
   // ---- behaviors ----
 
-  private resolveAbout(about: string | undefined, fallback: string | undefined, segment?: Segment): string | undefined {
-    if (about === undefined || about.trim() === '') return fallback
-    const wanted = about.trim()
-    if (segment !== undefined) {
-      const match = segment.lines.find(line => line.speakerId === wanted || line.speaker.replace(/ \(owner\)$/, '').toLowerCase() === wanted.toLowerCase())
-      if (match?.speakerId !== undefined) return match.speakerId
+  /** A person named in a piece or chat: by person id, platform user id or name; otherwise the name as given. */
+  private resolvePerson(named: string | undefined, people: ReadonlyMap<string, string>): { id: string; name: string } | undefined {
+    if (named === undefined || named.trim() === '') return undefined
+    const wanted = named.trim()
+    const lower = wanted.toLowerCase()
+    for (const [id, name] of people) {
+      if (id.toLowerCase() === lower || id.split(':').at(-1)?.toLowerCase() === lower || name.toLowerCase() === lower) return { id, name }
     }
-    return wanted
+    return { id: wanted, name: wanted }
   }
 
-  /** `about` in a chat: the chat's own person when she names them (by id, user id or display name). */
-  private aboutInChat(about: string | undefined, facts: SessionFacts): string | undefined {
-    const person = chatPerson(facts, this.config.persons)
-    if (person === undefined || facts.info?.kind !== 'chat') return this.resolveAbout(about, undefined)
-    if (about === undefined || about.trim() === '') return person
-    const wanted = about.trim().toLowerCase()
-    const display = this.ctx.animaLife.channel(facts.info.channelKey)?.display ?? ''
-    const names = [person, facts.info.channel.id, display.replace(/\s*\([^)]*\)$/, '')].map(name => name.toLowerCase())
-    return names.includes(wanted) ? person : about.trim()
+  /** The person of a private chat, with the chat's name. */
+  private chatPeople(channel: PublishedChannel | undefined): Map<string, string> {
+    if (channel === undefined) return new Map()
+    const person = chatPerson(channel, channel.isOwner === true, this.config.persons)
+    return person === undefined ? new Map() : new Map([[person, channel.display.replace(/\s*\([^)]*\)$/, '')]])
   }
 
   private registerBehaviors(): void {
     const core = this.ctx.anima
+    const life = this.ctx.animaLife
     const memoriesResult = {
       schema: {
         type: 'object' as const,
         additionalProperties: false as const,
         properties: { lines: { type: 'array' as const, items: { type: 'string' as const }, required: true as const, description: 'One line per memory.' } },
       },
-      render: (_args: unknown, value: { lines: string[] }) => [{ type: 'text' as const, text: value.lines.length === 0 ? 'Nothing comes to mind.' : value.lines.join('\n') }],
+      render: (_args: unknown, value: { lines: string[] }) => [{ type: 'text' as const, text: value.lines.length === 0 ? '什么也想不起来。' : value.lines.join('\n') }],
     }
     const lineResult = {
       schema: {
@@ -339,23 +379,21 @@ export class AnimaMemory extends Service {
       },
       render: (_args: unknown, value: { line: string }) => [{ type: 'text' as const, text: value.line }],
     }
-    const keepParam = { type: 'string' as const, enum: ['here', 'self'], description: '"here" (default): kept with the chat it came from. "self": kept as your own private thought.' }
     const importanceParam = { type: 'number' as const, description: 'How much it matters, 0 to 1 (default 0.3). Important memories fade slower.' }
+    const sourceOf = (memory: Memory) => memoryLine(memory, this.channelLookup).replace(/^- /, '')
 
     core.registerBehavior(defineTool({
       name: 'memory_recall',
-      description: 'Try to remember: search your memory.',
+      description: 'Try to remember: search your memory. Each memory says where you learned it.',
       parameters: {
         query: { type: 'string', required: true, description: 'Words to look for: names, topics, places.' },
         archive: { type: 'boolean', description: 'Also search faded, archived memories.' },
       },
       output: memoriesResult,
-      execute: async (args, exec) => {
-        const facts = this.facts(exec.agent?.id)
-        const audience = audienceOf(facts, this.config.persons)
-        const found = this.store.recall(args.query, audience, { archive: args.archive === true, limit: 8 })
+      execute: async (args) => {
+        const found = this.store.recall(args.query, { archive: args.archive === true, limit: 8 })
         this.store.touch(found.map(memory => memory.id), core.clock.now())
-        return { lines: found.map(memory => memoryLine(memory, true)) }
+        return { lines: found.map(memory => memoryLine(memory, this.channelLookup)) }
       },
     }), { effect: 'observe', sessions: ['waking'] })
 
@@ -367,97 +405,74 @@ export class AnimaMemory extends Service {
         kind: { type: 'string', enum: ['fact', 'episode', 'self'], description: 'fact (default), episode (something that happened) or self (about yourself).' },
         about: { type: 'string', description: 'Person it is about, if any. Defaults to the person of a private chat.' },
         channel: { type: 'string', description: 'Channel key of the chat it came from, if any (its source).' },
-        keep: keepParam,
+        from: { type: 'string', description: 'Who told you, if not the person of that private chat.' },
         importance: importanceParam,
       },
       output: lineResult,
       execute: async (args, exec) => {
-        const sessionId = exec.agent?.id
-        if (this.facts(sessionId).info === undefined) throw new AnimaError('anima/no-scope', 'this session cannot keep memories.')
-        const from = args.channel === undefined || args.channel.trim() === '' ? undefined : this.ctx.animaLife.channel(args.channel.trim())
-        if (args.channel !== undefined && args.channel.trim() !== '' && from === undefined) throw new AnimaError('anima/unknown-channel', `没有「${args.channel}」这个地方。`)
-        const facts = from === undefined ? this.facts(sessionId) : this.chatFacts(from)
-        const learned = learnScope(facts, this.config.persons)
-        if (learned === undefined) throw new AnimaError('anima/no-scope', 'this session cannot keep memories.')
         if (args.text.trim() === '') throw new AnimaError('anima/empty-memory', 'text is empty.')
-        const scope = narrow(learned, args.keep as Keep | undefined)
+        const key = args.channel?.trim() ?? ''
+        const channel = key === '' ? undefined : life.channel(key)
+        if (key !== '' && channel === undefined) throw new AnimaError('anima/unknown-channel', `没有「${args.channel}」这个地方。`)
+        const people = this.chatPeople(channel)
+        const chat = [...people][0]
+        const from = this.resolvePerson(args.from, people) ?? (chat === undefined ? undefined : { id: chat[0], name: chat[1] })
+        const kind = (args.kind ?? 'fact') as MemoryKind
+        const about = this.resolvePerson(args.about, people)?.id ?? (kind === 'fact' ? chat?.[0] : undefined)
         const memory = this.store.remember({
-          kind: (args.kind ?? 'fact') as MemoryKind,
-          scope,
-          text: args.text,
-          personId: this.aboutInChat(args.about, facts),
-          channelKey: facts.info?.kind === 'chat' ? facts.info.channelKey : undefined,
-          importance: args.importance,
-          source: sessionId,
-          now: core.clock.now(),
+          kind, text: args.text, channelKey: channel === undefined ? undefined : channelKey(channel),
+          fromPerson: from?.id, fromName: from?.name, personId: kind === 'self' ? undefined : about,
+          importance: args.importance, waking: exec.agent?.id, now: core.clock.now(),
         })
-        return { line: `Remembered as ${memory.id}; heard by: ${describeScope(memory.scope)}.` }
-      },
-    }), { effect: 'internal', sessions: ['waking'] })
-
-    core.registerBehavior(defineTool({
-      name: 'memory_forget',
-      description: 'Forget a memory for good, by its id (e.g. m12). Use it when someone asks you to forget something, or a memory is wrong.',
-      parameters: {
-        id: { type: 'string', required: true, description: 'Memory id, e.g. m12.' },
-      },
-      output: lineResult,
-      execute: async (args, exec) => {
-        const memory = this.store.get(args.id)
-        const audience = audienceOf(this.facts(exec.agent?.id), this.config.persons)
-        if (memory === undefined || !hears(audience, memory.scope)) throw new AnimaError('anima/unknown-memory', `no memory "${args.id}" that you can reach here.`)
-        this.store.forget(memory.id)
-        return { line: `Forgot ${memory.id}.` }
+        return { line: `记住了：${sourceOf(memory)}` }
       },
     }), { effect: 'internal', sessions: ['waking'] })
 
     core.registerBehavior(defineTool({
       name: 'memory_write',
-      description: 'Write one memory from a conversation segment you are sorting. Who may hear it is set by the segment.',
+      description: 'Write one memory from the piece of your waking you are sorting.',
       parameters: {
-        segment: { type: 'string', required: true, description: 'Segment label, e.g. s1.' },
         kind: { type: 'string', enum: ['episode', 'fact', 'self'], required: true, description: 'episode (what happened, dated), fact (about a person or the world), self (a passing thought about yourself; lasting tastes, habits and opinions go to self_note).' },
         text: { type: 'string', required: true, description: 'The memory as a self-contained sentence; name people and dates.' },
-        about: { type: 'string', description: 'Person id from the segment\'s People list, for facts about someone.' },
+        channel: { type: 'string', description: 'Channel key of the place in the piece where it happened or was said (its source). Omit for what was your own (a thought, a video you watched).' },
+        from: { type: 'string', description: 'Who it came from: a person of the piece (id or name). Defaults to the person of a private chat.' },
+        about: { type: 'string', description: 'Person it is about, for facts about someone (id or name).' },
         replaces: { type: 'string', description: 'Id of an older memory this one corrects (e.g. m4); the old one is kept as history.' },
-        keep: keepParam,
         importance: importanceParam,
       },
       output: lineResult,
       execute: async (args, exec) => {
         const run = this.run
         if (run === undefined || exec.agent?.id !== run.sessionId) throw new AnimaError('anima/no-run', 'no consolidation is running in this session.')
-        const segment = run.segments.get(args.segment.trim())
-        if (segment === undefined) throw new AnimaError('anima/unknown-segment', `no segment "${args.segment}"; use one of ${[...run.segments.keys()].join(', ')}.`)
         if (args.text.trim() === '') throw new AnimaError('anima/empty-memory', 'text is empty.')
-        const scope: Scope = narrow(segment.scope, args.keep as Keep | undefined)
+        const key = args.channel?.trim() ?? ''
+        if (key !== '' && !run.channels.has(key)) {
+          throw new AnimaError('anima/unknown-channel', `这段经历里没有「${key}」；这段里出现的地方：${[...run.channels].join('、') || '没有'}。`)
+        }
+        const channel: (ChannelRef & { display?: string; isOwner?: boolean }) | undefined = key === '' ? undefined : life.channel(key)
+        const people = new Map([...run.people, ...this.chatPeople(channel as PublishedChannel | undefined)])
+        const chat = channel === undefined ? undefined : [...this.chatPeople(channel as PublishedChannel)][0]
+        const from = this.resolvePerson(args.from, people) ?? (chat === undefined ? undefined : { id: chat[0], name: chat[1] })
         let replaced: Memory | undefined
         if (args.replaces !== undefined && args.replaces.trim() !== '') {
           replaced = this.store.get(args.replaces)
-          if (replaced === undefined || replaced.status !== 'active' || replaced.scope !== segment.scope) {
-            throw new AnimaError('anima/unknown-memory', `"${args.replaces}" is not an active memory of this segment's audience.`)
-          }
+          if (replaced === undefined || replaced.status !== 'active') throw new AnimaError('anima/unknown-memory', `"${args.replaces}" is not an active memory.`)
         }
-        const person = segment.lines.find(line => line.dir === 'in' && line.speakerId !== undefined && segment.scope.startsWith('private:'))?.speakerId
-          ?? (segment.scope === 'owner' ? 'owner' : undefined)
-        const now = this.ctx.anima.clock.now()
+        const kind = args.kind as MemoryKind
+        const about = this.resolvePerson(args.about, people)?.id ?? (kind === 'fact' ? chat?.[0] : undefined)
+        const now = core.clock.now()
         const memory = this.store.remember({
-          kind: args.kind as MemoryKind,
-          scope,
-          text: args.text,
-          personId: args.kind === 'self' ? undefined : this.resolveAbout(args.about, args.kind === 'fact' ? person : undefined, segment),
-          channelKey: segment.channelKey,
-          importance: args.importance,
-          source: segment.sessionId,
-          now,
+          kind, text: args.text, channelKey: key === '' ? undefined : key,
+          fromPerson: from?.id, fromName: from?.name, personId: kind === 'self' ? undefined : about,
+          importance: args.importance, waking: run.waking, now,
         })
         if (replaced !== undefined) this.store.supersede(replaced.id, memory.id, now)
-        return { line: `Wrote ${memory.id}${replaced === undefined ? '' : `, replacing ${replaced.id}`}; heard by: ${describeScope(scope)}.` }
+        return { line: `写下 ${sourceOf(memory)}${replaced === undefined ? '' : `（代替 ${replaced.id}）`}` }
       },
     }), { effect: 'internal', sessions: ['consolidation'] })
   }
 
-  // ---- report, status, commands ----
+  // ---- report, status ----
 
   private lastConsolidation(): string {
     const at = this.store.meta('lastConsolidatedAt')
@@ -466,17 +481,16 @@ export class AnimaMemory extends Service {
 
   /** Situation report line: facts only. */
   reportLine(): string {
-    const pending = this.store.pendingCount()
-    const oldest = this.store.oldestPending()
-    const since = oldest === undefined ? '' : ` (oldest from ${formatLocal(oldest)})`
-    return `Memory: ${pending} conversation lines not yet consolidated${since}; last consolidation ${this.lastConsolidation()}.`
+    const pending = this.store.pendingWakings().length
+    return `Memory: ${pending === 0 ? 'every ended waking is consolidated' : `${pending} ended waking${pending === 1 ? '' : 's'} not yet consolidated`}; last consolidation ${this.lastConsolidation()}.`
   }
 
   private statusLines(): string[] {
     const counts = this.store.counts()
     return [
       `Memories: ${counts.active} active, ${counts.archived} archived, ${counts.superseded} superseded`,
-      `Transcript: ${this.store.pendingCount()} lines pending; last consolidation ${this.lastConsolidation()}${this.run === undefined ? '' : `; run ${this.run.id} in progress`}`,
+      `Consolidation: ${this.store.pendingWakings().length} ended wakings pending; last ${this.lastConsolidation()}${this.run === undefined ? '' : `; piece ${this.run.id} of ${this.run.waking} in progress`}${this.stalled ? '; waiting for her next sleep' : ''}`,
     ]
   }
 }
+

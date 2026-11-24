@@ -1,6 +1,7 @@
 /**
- * Anima memory plugin: one store for every platform, scoped by audience
- * (DESIGN §8). Recall, auto-injection, consolidation and decay.
+ * Anima memory plugin (docs/design/memory.md): one memory for every channel,
+ * each memory with its source as a label. What comes to mind, recall,
+ * consolidation in sleep from each ended waking's log, and decay.
  * @module @anima/memory
  */
 
@@ -10,12 +11,13 @@ import type {} from '@anima/life'
 import { Config as ConfigSchema, resolveMemoryConfig, type Config as MemoryConfig } from './config.ts'
 import { AnimaMemory } from './service.ts'
 
-export { audienceOf, chatPerson, describeScope, EVERYONE, hears, learnScope, narrow, OWNER, personOf, PUBLIC, SELF, type Audience, type Keep, type Scope, type SessionFacts } from './audience.ts'
+export { chatPerson, OWNER, personOf, sourceLabel, type SourceFacts } from './source.ts'
 export { resolveMemoryConfig, type ConsolidationConfig, type DecayConfig, type PersonLink } from './config.ts'
 export { decayStep, estimateTokens, gistOf, halfLife, type DecayInput, type DecayResult, type MemoryKind } from './decay.ts'
-export { buildBlock, memoryLine, selfQuery, type BlockInput } from './inject.ts'
-export { MemoryStore, rowId, searchTerms, type Memory, type MemoryStatus, type NewMemory, type Segment, type TranscriptLine } from './store.ts'
-export { AnimaMemory, OBSERVATIONS, type Observation } from './service.ts'
+export { buildBlock, cueText, historyLine, MEMORY_HEADER, memoryLine, type BlockInput, type ChannelLookup, type Cues } from './inject.ts'
+export { channelsIn, cutPieces, pieceFacts, renderLog, type LogLine, type Piece, type RenderOptions } from './log.ts'
+export { MemoryStore, rowId, searchTerms, type Memory, type MemoryStatus, type NewMemory, type WakingProgress } from './store.ts'
+export { AnimaMemory } from './service.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-memory'

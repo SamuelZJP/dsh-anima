@@ -80,19 +80,19 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
   })
   guard.addOwnerAction('outbox.cancel', args => ({ cancelled: guard.outbox.cancel(stringArg(args, 'id')) }))
   // Memory management, while the memory plugin is loaded.
-  ctx.inject(['animaMemory'], (ctx) => {
+  ctx.inject(['animaMemory', 'animaLife'], (ctx) => {
     const store = ctx.animaMemory.store
     guard.addOwnerView('memory', (params) => {
       const status = params.status === 'archived' || params.status === 'superseded' || params.status === 'all' ? params.status : 'active'
       const limit = Math.min(200, Math.max(1, Number(params.limit ?? 50) || 50))
       const offset = Math.max(0, Number(params.offset ?? 0) || 0)
-      const page = store.browse({ query: params.query, scope: params.scope, status, limit, offset })
-      return { ...page, limit, offset, counts: store.counts(), scopes: store.scopes(), pending: store.pendingCount() }
+      const page = store.browse({ query: params.query, source: params.source, status, limit, offset })
+      return { ...page, limit, offset, counts: store.counts(), sources: store.sources(), pending: store.pendingWakings().length }
     }, ctx)
     guard.addOwnerAction('memory.forget', args => ({ forgotten: store.forget(stringArg(args, 'id')) }), ctx)
     guard.addSubcommand({
       name: 'memory',
-      usage: 'memory list [text] | memory forget <id> — inspect or delete memories (all scopes)',
+      usage: 'memory list [text] | memory forget <id> — inspect or delete memories (every source)',
       run: async (args) => {
         const [verb = '', ...rest] = args.split(/\s+/)
         const text = rest.join(' ').trim()
@@ -100,7 +100,7 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
           case 'list': {
             const all = await guard.ownerView('memory', { query: text, status: 'all', limit: '50' }).then(v => (v as { memories: Memory[] }).memories)
             if (all.length === 0) return { kind: 'success', text: 'No memories.' }
-            return { kind: 'success', text: all.map(memory => `${memoryLine(memory, true)}${memory.status === 'active' ? '' : ` [${memory.status}${memory.replacedBy === undefined ? '' : ` by ${memory.replacedBy}`}]`}`).join('\n') }
+            return { kind: 'success', text: all.map(memory => `${memoryLine(memory, key => ctx.animaLife.channel(key))}${memory.status === 'active' ? '' : ` [${memory.status}${memory.replacedBy === undefined ? '' : ` by ${memory.replacedBy}`}]`}`).join('\n') }
           }
           case 'forget': {
             if (text === '') return { kind: 'error', text: 'Usage: /anima memory forget <id>' }

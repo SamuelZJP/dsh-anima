@@ -1,6 +1,6 @@
 # Agent preset anima-consolidation: part of her sleep. When she falls asleep,
 # what she perceived is sorted into memories here (docs/design/memory.md), one
-# session per her day. Anima selects the consolidation model before each run.
+# session per ended waking. Anima selects the consolidation model before each turn.
 # Its tools are memory_write and self_note, root Anima behaviors scoped to this
 # session kind.
 - insert:

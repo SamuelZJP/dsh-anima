@@ -1,6 +1,6 @@
 {
   "name": "@anima/memory",
-  "description": "Anima memory: one store with audience scopes, recall, auto-injection, consolidation and decay",
+  "description": "Anima memory: one memory with source labels, what comes to mind, consolidation in sleep and decay",
   "version": "0.0.0",
   "private": true,
   "type": "module",

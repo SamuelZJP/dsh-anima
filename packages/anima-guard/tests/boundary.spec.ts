@@ -45,9 +45,8 @@ describe('the Anima plugin is the persona only', () => {
  * - `physiology`: her body (asleep, her eyes).
  * - `fact`: what is true of the world or of her own records (unknown id, offline, nothing there).
  * - `plumbing`: load, wiring and argument shape, not a decision about her.
- * - `until-R5`: first-design rules the roadmap removes in that phase.
  */
-const REFUSALS: Record<string, 'physiology' | 'fact' | 'plumbing' | 'until-R5'> = {
+const REFUSALS: Record<string, 'physiology' | 'fact' | 'plumbing'> = {
   'anima/asleep': 'physiology',
   'anima/view-no-note': 'physiology', 'anima/view-timeout': 'physiology', 'anima/no-vision': 'physiology',
   'anima/unknown-channel': 'fact', 'anima/unknown-alarm': 'fact', 'anima/unknown-memory': 'fact', 'anima/unknown-segment': 'fact',
@@ -63,10 +62,9 @@ const REFUSALS: Record<string, 'physiology' | 'fact' | 'plumbing' | 'until-R5'> 
   'anima/delivery-not-durable': 'plumbing', 'anima/delivery-timeout': 'plumbing', 'anima/no-session': 'plumbing', 'anima/no-session-controller': 'plumbing', 'anima/no-sessions': 'plumbing',
   'anima/session-archived': 'plumbing', 'anima/session-id-mismatch': 'plumbing', 'anima/session-missing': 'plumbing', 'anima/session-resolve': 'plumbing', 'anima/state-corrupt': 'plumbing',
   'anima/no-schedule': 'plumbing', 'anima/no-attachments': 'plumbing', 'anima/not-anima-session': 'plumbing', 'anima/wrong-session': 'plumbing',
-  'anima/no-subagents': 'plumbing', 'anima/no-workspace-registry': 'plumbing',
+  'anima/no-subagents': 'plumbing', 'anima/no-workspace-registry': 'plumbing', 'anima/no-session-persistence': 'plumbing', 'anima/memory-old-store': 'plumbing',
   'anima/no-channel': 'plumbing', 'anima/no-run': 'plumbing', 'anima/ffmpeg-missing': 'plumbing', 'anima/qr-too-long': 'plumbing', 'anima/bili-cookie-file': 'plumbing',
   'anima/look-too-large': 'plumbing', 'anima/bili-too-large': 'plumbing',
-  'anima/no-scope': 'until-R5',
 }
 
 describe('inside the persona, nothing refuses her but physiology', () => {

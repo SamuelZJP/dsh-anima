@@ -100,10 +100,10 @@ export type Stimulus =
     readonly ts: number
   }
   | {
-    /** Sort unconsolidated conversation into memories (DESIGN §8), in the day's consolidation session. */
+    /** One piece of an ended waking's log to sort into memories (docs/design/memory.md), in its consolidation session. */
     readonly type: 'consolidate'
-    /** Her day key, naming the consolidation session. */
-    readonly day: string
+    /** The ended waking session id, naming the consolidation session. */
+    readonly waking: string
     readonly text: string
     /** Reference recorded in the message source (the consolidation run id). */
     readonly run: string

@@ -1,6 +1,6 @@
 /**
  * Session identity: her waking sessions are named from her character and the
- * moment the waking was prepared; consolidation sessions from her day.
+ * moment the waking was prepared; a consolidation session from the waking it sorts.
  * @module @anima/life/identity
  */
 
@@ -21,11 +21,11 @@ export function wakingSessionId(characterId: string, at: number): string {
 }
 
 /**
- * Consolidation session id of one of her days (docs/design/memory.md).
+ * Consolidation session id of one ended waking (docs/design/memory.md).
  * @param characterId - character identity.
- * @param day - her day key, `YYYY-MM-DD`.
+ * @param waking - the ended waking session's id.
  * @returns `anima-m-<24 hex>`.
  */
-export function consolidationSessionId(characterId: string, day: string): string {
-  return `anima-m-${digest('consolidation', characterId, day)}`
+export function consolidationSessionId(characterId: string, waking: string): string {
+  return `anima-m-${digest('consolidation', characterId, waking)}`
 }

@@ -11,7 +11,7 @@ When loaded, an adapter:
 3. **Emits stimuli**: normalized messages and platform events (`design/life.md`).
 4. **Registers behaviors**: `<platform>_say` plus platform behaviors, with metadata (`design/body.md`).
 5. **Normalizes content** as segments (text, image, quote, mention, face). Images never ride along on their own: a placeholder carries an id, and she opens it when she wants to see it.
-6. **Provides history** for a channel, for first contact of the day (`design/memory.md`) and `group_read`.
+6. **Provides history** for a channel (`animaLife.provideHistory(platform, provider)`: the latest lines, oldest first, ending before a message id when given), for first contact in a waking (`design/memory.md`) and `group_read`. QQ provides it where its backend has history; the demo platform keeps its own.
 
 Unloading the plugin removes all of it.
 

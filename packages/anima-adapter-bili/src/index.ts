@@ -19,7 +19,6 @@ import { AnimaError, formatLocal, type BehaviorMeta, type Subcommand } from '@an
 import type {} from '@anima/core'
 import type { ExtraBlock } from '@anima/life'
 import type {} from '@anima/life'
-import type {} from '@anima/memory'
 import { BiliApi, checkBvid, type Page, type VideoInfo } from './api.ts'
 import { BiliClient, type ClientOptions } from './client.ts'
 import { Config as ConfigSchema, resolveBiliConfig, type Config as BiliConfig, type ResolvedBiliConfig } from './config.ts'
@@ -38,7 +37,7 @@ export { mixinKey, signQuery } from './wbi.ts'
 
 /** Cordis plugin name. */
 export const name = 'anima-adapter-bili'
-/** Services used by the plugin (`attachments` and `animaMemory` are used when present). */
+/** Services used by the plugin (`attachments` is used when present). What she watched reaches her memory through her waking session's log. */
 export const inject = ['anima', 'animaLife', 'tools']
 
 /** Platform id and tool prefix. */
@@ -107,12 +106,6 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
   // Learn whether the saved login still works; failures only show in status.
   void client.nav().catch((error: unknown) => ctx.logger.warn(`anima bili: login check failed: ${message(error)}`))
 
-  const observe = (text: string, memory?: { importance: number }) => {
-    const memoryService = ctx.get('animaMemory')
-    if (memoryService === undefined) return undefined
-    return memoryService.observe({ text, scope: 'public', source: 'bili', ...memory === undefined ? {} : { memory: { kind: 'episode', importance: memory.importance } } })
-  }
-
   const skim: Omit<BehaviorMeta, 'effect'> & { effect: 'observe' } = { platform: PLATFORM, effect: 'observe', sessions: ['waking'] }
   const listOutput = {
     schema: {
@@ -174,7 +167,6 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
       const info = await api.view(checkBvid(args.bvid))
       const [subtitles, danmaku, comments] = [await soft(api.subtitles(info), { lines: [] as TimedText[], note: 'could not load' }), await soft(api.danmaku(info), []), await soft(api.comments(info, undefined), { items: [] })]
       counts.watched += 1
-      observe(`You watched ${info.bvid} «${plain(info.title)}» by ${plain(info.author)} (${formatDuration(info.durationSeconds)}, ${info.category ?? 'video'}) on Bilibili.`)
       return { text: watchDigest({ item: info, subtitles: subtitles.lines, subtitleNote: subtitles.note, danmaku, comments: comments.items, caps: config.digest }) }
     },
   }), skim)
@@ -210,7 +202,6 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
           if (exec.agent === undefined) throw new AnimaError('anima/no-session', 'looking closely needs her waking session.')
           const note = await closeView(info, args.focus, exec.agent, exec.signal)
           counts.views += 1
-          observe(`You looked closely at ${info.bvid} «${plain(info.title)}» by ${plain(info.author)} on Bilibili. Your viewing note: ${note}`, { importance: 0.5 })
           return { text: `Your viewing note on ${info.bvid} «${plain(info.title)}»:\n${note}` }
         } catch (error) {
           counts.viewsFailed += 1
