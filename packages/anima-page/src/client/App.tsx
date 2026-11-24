@@ -54,7 +54,7 @@ export function AnimaPage() {
       <div className="anima-inner">
         <div className="anima-head">
           <h1>{head.data?.character.name ?? 'Anima'}</h1>
-          <span className="anima-sub">{head.data === undefined ? '' : `${head.data.character.id} · ${head.data.clock.text} · ${head.data.clock.phase}${head.data.paused ? ' · paused' : ''}`}</span>
+          <span className="anima-sub">{head.data === undefined ? '' : `${head.data.character.id} · ${head.data.clock.text} · ${head.data.sleep?.asleep === true ? 'asleep' : 'awake'}${head.data.paused ? ' · paused' : ''}`}</span>
         </div>
         <div className="anima-tabs" role="tablist" aria-label="Anima">
           {TABS.map(t => (

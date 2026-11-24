@@ -37,8 +37,6 @@ export interface ConsolidationConfig {
   model: ModelRoute
   /** Most transcript tokens handed to one consolidation run. */
   maxInputTokens: number
-  /** Run consolidation without her when the oldest pending line is older than this (hours on her clock). */
-  fallbackHours: number
   /** Real seconds a consolidation run may take before it is given up and retried. */
   timeoutSeconds: number
 }
@@ -84,7 +82,6 @@ export const Config: z<Config> = z.object({
   consolidation: z.object({
     model: modelRoute.description('Model of the consolidation session.'),
     maxInputTokens: z.natural().min(200).default(6000).description('Most transcript tokens per consolidation run.'),
-    fallbackHours: z.number().min(0.05).default(24).description('Consolidate without her when the oldest pending line is older than this (her clock).'),
     timeoutSeconds: z.number().min(10).default(600).description('Real seconds before a stuck run is given up.'),
   }),
 }) as z<Config>
@@ -94,6 +91,9 @@ export const Config: z<Config> = z.object({
  * @param input - raw config.
  */
 export function resolveMemoryConfig(input: Partial<Config> | undefined): Readonly<Config> {
+  if ((input as { consolidation?: Record<string, unknown> } | undefined)?.consolidation?.fallbackHours !== undefined) {
+    throw new AnimaError('anima/config-removed', 'consolidation.fallbackHours is gone: consolidation is part of her sleep and starts only when she falls asleep (R4). Remove it from the anima-memory row.')
+  }
   let config: Config
   try {
     config = Config((input ?? {}) as Config)

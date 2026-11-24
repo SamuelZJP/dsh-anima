@@ -1,7 +1,8 @@
-# Agent preset anima-viewing: one short session per close view of a video
-# (DESIGN §11). The adapter selects a vision-capable model and delivers the
-# frames as image blocks; her only tool is viewing_note, a root Anima
-# behavior scoped to this session kind. Only the note goes back to Self.
+# Agent preset anima-viewing: a close look at a video she chose, run as a
+# subagent of her waking session (docs/dsh.md). The adapter picks a
+# vision-capable model and sends the frames as image blocks; the subagent has
+# no Anima behaviors, and its final answer is her viewing note, the only thing
+# that goes back to her waking session.
 - insert:
     - id: anima-preset-viewing
       name: '@deepseek-ai/dsh-agent-preset'

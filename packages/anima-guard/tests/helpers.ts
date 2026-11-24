@@ -53,7 +53,7 @@ export function registerEcho(ctx: Context, name: string, meta: BehaviorMeta): vo
   ctx.anima.registerBehavior(defineTool({
     name,
     description: 'test behavior',
-    parameters: { text: { type: 'string' }, also: { type: 'array', items: { type: 'string' } }, more: { type: 'boolean' } },
+    parameters: { channel: { type: 'string' }, text: { type: 'string' }, also: { type: 'array', items: { type: 'string' } }, more: { type: 'boolean' } },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } },
       render: () => [{ type: 'text', text: 'ok' }],
@@ -75,6 +75,12 @@ export async function callAs(ctx: Context, sessionId: string, name: string, args
     toolSet.dispose()
   }
 }
+
+/** Her waking session, for tables of sessions. */
+export const WAKING: SessionInfo = { kind: 'waking', current: true }
+
+/** A behavior's target: the `channel` argument. */
+export const toChannel = (args: Readonly<Record<string, unknown>>) => typeof args.channel === 'string' ? args.channel : undefined
 
 /** Text of a result's first content block. */
 export function textOf(result: { content: readonly { type: string }[] }): string {

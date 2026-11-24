@@ -27,6 +27,8 @@ export interface Policy {
 
 /** Facts of the moment, computed by the service. */
 export interface GateMoment {
+  /** Whether a say toward a channel would be her speaking first (nobody wrote to her there lately). */
+  readonly speakingFirst?: (channelKey: string) => boolean
   /** Why she may not start a conversation now (quiet hours), or undefined. */
   readonly quiet?: string | undefined
   /** Whether the token budget of the moment is spent. */
@@ -79,11 +81,11 @@ export const OUTSIDE = '（外面拦住了你，不是你自己的身体）'
 
 /** Counter key of one quota rule for a call. */
 function counterKey(index: number, rule: QuotaRule, call: GateCall): string {
-  const { session, meta } = call
+  const { meta } = call
   switch (rule.per) {
     case 'channel': {
       const target = meta.target?.(call.args ?? {})
-      return `${index}|channel:${target ?? (session?.kind === 'conversation' ? session.channelKey : 'self')}`
+      return `${index}|channel:${target ?? 'self'}`
     }
     case 'platform': return `${index}|platform:${meta.platform ?? 'core'}`
     case 'global': return `${index}|global`
@@ -215,7 +217,7 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   const args = call.args ?? {}
   const target = meta.target?.(args)
   // The allowlist is about contact with a chat; what stays inside her (ending a turn, a memory) is never refused by it.
-  const channel = target ?? (call.session?.kind === 'conversation' ? call.session.channelKey : undefined)
+  const channel = target
   if (channel !== undefined && meta.effect !== 'internal' && moment.allowedChannel?.(channel) === false) {
     return deny(GuardCode.notAllowlisted, `${OUTSIDE}主人没有让你接触 ${channel}。`)
   }
@@ -229,7 +231,7 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
   if (moment.overBudget && meta.effect !== 'internal') {
     return deny(GuardCode.overBudget, `${OUTSIDE}${moment.night === true ? '今晚' : '今天'}主人给的 token 预算用完了。在它恢复之前，只有内心里的事（记忆、休息）还能做。`)
   }
-  if (meta.effect === 'initiate') {
+  if (startsConversation(call, moment)) {
     const limit = policy.initiatePerDay
     if (limit !== undefined && moment.initiatesUsed + costOf(meta, args) > limit) {
       return deny(GuardCode.overQuota, `${OUTSIDE}主人定的限制：每天最多主动找人聊 ${limit} 次，今天已经 ${moment.initiatesUsed} 次了。等明天，或者等别人来找你。`)
@@ -261,6 +263,17 @@ export function decide(call: GateCall, policy: Policy, book: QuotaBook, moment: 
 function whyZh(name: string, meta: BehaviorMeta, forced: boolean, others: boolean): string {
   if (forced) return others ? `每次用 ${name} 去找主人以外的人，主人都要先同意` : `每次用 ${name}，主人都要先同意`
   return `${name} 是${meta.effect === 'public' ? '公开的' : '做了就收不回的'}事，主人要先同意`
+}
+
+/**
+ * Whether a call starts a conversation: an `initiate` behavior, or something
+ * she says toward a chat where nobody wrote to her lately (the guard's own
+ * reply window, `initiate.replyWindowMinutes`).
+ */
+export function startsConversation(call: GateCall, moment: GateMoment): boolean {
+  if (call.meta.effect === 'initiate') return true
+  const target = call.meta.target?.(call.args ?? {})
+  return call.meta.effect === 'express' && target !== undefined && moment.speakingFirst?.(target) === true
 }
 
 function deny(code: string, hint: string): Verdict {

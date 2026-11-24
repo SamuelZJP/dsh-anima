@@ -13,7 +13,7 @@ export function StatusTab() {
   if (s === undefined) return <><Problem error={status.error} />{status.loading ? <p className="anima-muted">Loading…</p> : null}</>
   const life = s.parts.life
   const tokens = s.budgets.tokens
-  const mode = s.clock.mode
+  const mode = s.sleep?.asleep === true ? 'night' : 'day'
   const used = mode === 'day' ? tokens.day : tokens.night
   const budget = mode === 'day' ? tokens.dayBudget : tokens.nightBudget
   const tone = (v: number) => v >= 1 ? 'bad' as const : v >= 0.8 ? 'warn' as const : undefined
@@ -26,10 +26,10 @@ export function StatusTab() {
           {s.paused ? 'Resume' : 'Pause'}
         </button>
         {s.sleep === undefined ? null : s.sleep.asleep
-          ? <Pill tone="warn">asleep since {stamp(s.sleep.since ?? 0)}{s.sleep.by === 'latest' ? ' (latest bedtime)' : ''}</Pill>
-          : <Pill tone="ok">awake{s.sleep.wokenAt !== undefined && s.sleep.wokenUntil !== undefined && s.clock.now < s.sleep.wokenUntil ? ` (woken by you, until ${stamp(s.sleep.wokenUntil)})` : ''}</Pill>}
+          ? <Pill tone="warn">asleep since {stamp(s.sleep.since)} ({s.sleep.by === 'overwhelmed' ? 'sleep took her' : 'she went to bed'})</Pill>
+          : <Pill tone="ok">awake since {stamp(s.sleep.since)} ({s.sleep.by})</Pill>}
         {s.sleep?.asleep === true
-          ? <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run('wake', {}, () => 'She is awake now; her Self sees the inbox.')}>Wake her</button>
+          ? <button type="button" className="anima-btn" disabled={act.busy} onClick={() => void act.run('wake', {}, () => 'She is awake now; her waking session opens with her inbox.')}>Wake her</button>
           : null}
         <span className="anima-muted">Updates every 5 s.</span>
       </div>
@@ -38,13 +38,14 @@ export function StatusTab() {
         <Card title="Her clock">
           <div className="anima-big">{s.clock.text}</div>
           <div className="anima-muted">{s.clock.speed === 1 ? 'real time' : `${s.clock.speed}× speed`} · day {s.clock.day}</div>
-          <div className="anima-row" style={{ marginTop: 6 }}><Pill>{s.clock.phase}</Pill><Pill>{mode}</Pill></div>
+          <div className="anima-row" style={{ marginTop: 6 }}><Pill>{s.sleep?.asleep === true ? 'asleep' : 'awake'}</Pill></div>
         </Card>
         <Card title="Heartbeat">
           <dl className="anima-kv">
-            <dt>Next</dt><dd>{life?.nextHeartbeat ?? '—'}{life?.selfActing === true ? ' (Self is acting)' : ''}</dd>
+            <dt>Next</dt><dd>{life?.nextHeartbeat ?? '—'}</dd>
             <dt>Last</dt><dd>{life?.lastHeartbeat ?? '—'}</dd>
-            <dt>Total</dt><dd>{life === undefined ? '—' : `${life.counts.heartbeats} beats, ${life.counts.acts} acted, ${life.counts.rests} rests`}</dd>
+            <dt>Total</dt><dd>{life === undefined ? '—' : `${life.counts.heartbeats} beats, ${life.counts.wakings} wakings, ${life.counts.sleeps} sleeps`}</dd>
+            <dt>Waking session</dt><dd>{life?.sessions.waking ?? '—'}{life !== undefined && !life.sessions.opened ? ' (prepared)' : ''}</dd>
           </dl>
         </Card>
         <Card title="Energy and mood">
@@ -63,7 +64,10 @@ export function StatusTab() {
       </div>
       <div className="anima-section">
         <h2>Sleep and inbox</h2>
-        {s.sleep === undefined ? null : <p>Bedtime window {stamp(s.sleep.earliest).slice(-5)}–{stamp(s.sleep.latest).slice(-5)}; she chooses inside it, and sleeps anyway at the latest.</p>}
+        {s.sleep === undefined ? null : (
+          <div className="anima-row"><span style={{ width: 110 }}>sleep pressure</span><Bar value={s.sleep.pressure} /><span>{s.sleep.pressure.toFixed(2)}</span></div>
+        )}
+        <p className="anima-muted">She goes to bed when she wants; sleep comes when she is sleepy enough and takes her when she cannot stay up. No clock time decides.</p>
         {(life?.inbox ?? []).length === 0 ? <p className="anima-muted">Her inbox is empty.</p> : (
           <table className="anima-table">
             <thead><tr><th>Chat</th><th>Messages</th><th>First</th><th>Last</th></tr></thead>

@@ -32,7 +32,7 @@ export interface WakeRecord {
   readonly type: 'wake'
   readonly at: number
   readonly real: number
-  /** Stimulus type, e.g. `message`, `heartbeat`, `intent`. */
+  /** Stimulus type, e.g. `message`, `burst`, `heartbeat`, `alarm`. */
   readonly stimulus: string
   /** Session kind it went to. */
   readonly session: string
@@ -63,28 +63,27 @@ export interface PlatformRecord {
 }
 
 /**
- * Sleep and the inbox (Phase 9): she fell asleep (`sleep`, by her or at the
- * latest bedtime), the owner woke her (`woken`), a chat message was held while
- * she slept or was paused (`inbox-held`), or held messages went to their chat
- * (`inbox-release`: answered from Self, or joined a new wake).
+ * Sleep and the inbox: she fell asleep (`sleep`: she went to bed, or sleep
+ * overwhelmed her), she woke (`woke`: rested, an alarm, the owner), a waking
+ * session was opened or archived (`waking-open`, `waking-archive`), a chat
+ * message was held while she slept or was paused (`inbox-held`), or held
+ * messages left the inbox (`inbox-release`: she spoke there, or the chat wrote again).
  */
 export interface SleepActivity {
-  readonly type: 'sleep' | 'woken' | 'inbox-held' | 'inbox-release'
+  readonly type: 'sleep' | 'woke' | 'waking-open' | 'waking-archive' | 'inbox-held' | 'inbox-release'
   readonly at: number
   readonly real: number
-  /** `sleep`: how. */
-  readonly by?: 'her' | 'latest'
-  /** `sleep`: her note; `inbox-release`: Self's note. */
+  /** `sleep` and `woke`: how. */
+  readonly by?: string
+  /** `sleep`: her note. */
   readonly note?: string
   readonly sessionId?: string
   /** Inbox records: the channel key. */
   readonly channel?: string
-  /** `inbox-held`: why held (`asleep`, `paused`); `inbox-release`: how (`answer`, `wake`, `intent`). */
+  /** `inbox-held`: why held (`asleep`, `paused`); `inbox-release`: how (`said`, `wrote`). */
   readonly reason?: string
   /** `inbox-release`: how many messages. */
   readonly count?: number
-  /** `woken`: until when (her clock). */
-  readonly until?: number
 }
 
 /** Any activity record. */

@@ -1,6 +1,6 @@
 /**
- * The situation report (DESIGN §7): built by code from numbers and events,
- * shown to her on every heartbeat. It states facts; it never suggests a topic.
+ * Her heartbeat's state (docs/design/body.md): built by code from numbers and
+ * events, carried by every beat. It states facts; it never suggests a topic.
  * @module @anima/life/report
  */
 
@@ -16,9 +16,7 @@ export interface ChannelLine {
 /** Report inputs, all already formatted where they come from core. */
 export interface ReportInput {
   readonly time: string
-  readonly phase: string
-  readonly mode: string
-  /** Self-state lines (energy, mood, needs). */
+  /** Self-state lines (sleep pressure, energy, mood, needs). */
   readonly state: readonly string[]
   /** Open goal lines, due soonest first. */
   readonly goals: readonly string[]
@@ -52,14 +50,13 @@ export function formatSpan(ms: number): string {
  */
 export function buildReport(input: ReportInput): string {
   const lines = [
-    `Time ${input.time}; phase ${input.phase}${input.mode === 'night' ? ' (night: you are asleep)' : ''}.`,
+    `Time ${input.time}.`,
     ...input.state,
     `Open goals: ${input.goals.length === 0 ? 'none' : ''}`,
     ...input.goals.map(goal => `  ${goal}`),
     `Since your last heartbeat: ${input.events.length === 0 ? 'nothing new' : ''}`,
     ...input.events.map(event => `  ${event}`),
-    'Budgets:',
-    ...input.budgets.map(line => `  ${line}`),
+    ...input.budgets.length === 0 ? [] : ['Budgets:', ...input.budgets.map(line => `  ${line}`)],
     `Channels you can reach: ${input.channels.length === 0 ? 'none' : ''}`,
     ...input.channels.map(channel => {
       const contact = channel.lastContact === undefined ? 'no contact yet' : `last message ${formatSpan(input.now - channel.lastContact)} ago`

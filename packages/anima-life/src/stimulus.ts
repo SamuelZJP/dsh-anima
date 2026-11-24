@@ -1,12 +1,10 @@
 /**
- * Stimuli and routing (DESIGN §5): channel stimuli go to that channel's
- * conversation session, heartbeats to the day's triage session or to Self,
- * everything else to the Self session.
+ * Stimuli (docs/design/life.md): what reaches her waking session from the
+ * world, and their model-facing text. Facts only; nothing says whether to answer.
  * @module @anima/life/stimulus
  */
 
 import { channelKey, formatLocal, placeName, type ChannelRef } from '@anima/core'
-import { consolidationSessionId, conversationSessionId, groupTriageSessionId, selfSessionId, triageSessionId, viewingSessionId } from './identity.ts'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 /** Extra content blocks a stimulus carries after its text (images of a close view). */
@@ -47,19 +45,14 @@ export type Stimulus =
     readonly addressed?: boolean
     /** Platform message id, so she can reply to it. */
     readonly messageId?: string | undefined
-    /**
-     * Why an unaddressed group message wakes her (set by life): she chose it in
-     * group triage, with her reason, or it came in the attention window after
-     * she spoke there (DESIGN §5, §6).
-     */
-    readonly via?: { readonly kind: 'triage'; readonly reason: string } | { readonly kind: 'attention' } | undefined
+    /** An unaddressed group message reaches her because it came in the attention window after she spoke there (set by life). */
+    readonly via?: { readonly kind: 'attention' } | undefined
   }
   | {
     /**
-     * Several chat messages handed to her at once (DESIGN §5, "Bursts and the
-     * inbox", Phase 9): a settled private burst, a group burst, an addressed
-     * group message with the buffered messages before it, or messages held in
-     * her inbox. One logged arrival with one answer line; she answers the whole.
+     * Several chat messages handed to her at once: a settled private burst, a
+     * group burst, an addressed group message with the unread lines before it,
+     * or held inbox messages with the new ones. One logged arrival.
      */
     readonly type: 'burst'
     readonly channel: PublishedChannel
@@ -69,17 +62,14 @@ export type Stimulus =
     readonly held?: number | undefined
     /** Why it was held: asleep or paused. */
     readonly heldWhy?: 'asleep' | 'paused' | undefined
-    /** Self's note when she answers from the inbox (`inbox_answer`). */
-    readonly note?: string | undefined
-    /** Why an unaddressed group burst wakes her (attention window, triage). */
-    readonly via?: { readonly kind: 'triage'; readonly reason: string } | { readonly kind: 'attention' } | undefined
+    /** An unaddressed group burst reaches her in the attention window. */
+    readonly via?: { readonly kind: 'attention' } | undefined
     readonly ts: number
   }
   | {
     /**
      * Something that happened in a channel that needs no answer (a recalled
-     * message). Joins that conversation's next turn as context, only when the
-     * session already exists; never wakes, never creates a session.
+     * message). Joins her next turn as context; starts nothing.
      */
     readonly type: 'channel-event'
     readonly channel: PublishedChannel
@@ -87,40 +77,26 @@ export type Stimulus =
     readonly ts: number
   }
   | {
-    /** Buffered group messages for the cheap group triage decision (DESIGN §5). */
-    readonly type: 'group-batch'
-    /** Her day key, naming the group-triage session. */
-    readonly day: string
-    /** Batch id, e.g. `b12`. */
-    readonly batch: string
-    readonly channel: PublishedChannel
-    readonly text: string
-    readonly ts: number
-  }
-  | {
-    /** A notice for her inner life, e.g. from the owner via `/anima self`. */
+    /**
+     * A notice: a platform went down or came back (context, starts nothing),
+     * or the owner's words from outside (`/anima self`), which start a turn.
+     */
     readonly type: 'notice'
     readonly text: string
+    /** Whether it starts a turn. */
+    readonly wake?: boolean | undefined
     readonly ts: number
   }
   | {
-    /** A heartbeat: the situation report, to the triage session of her day or to Self. */
+    /** A beat of her heart, awake: her state (docs/design/body.md). */
     readonly type: 'heartbeat'
-    readonly to: 'triage' | 'self'
-    /** Her day key, naming the triage session. */
-    readonly day: string
     readonly text: string
     readonly ts: number
   }
   | {
-    /** Self decided to start a conversation (DESIGN §5 intent handoff). */
-    readonly type: 'intent'
-    readonly channel: PublishedChannel
-    readonly intentId: string
-    readonly intent: string
-    readonly context?: string | undefined
-    /** Real seconds her message waits in the outbox, where the owner can cancel it; 0 or absent when it goes at once. */
-    readonly heldSeconds?: number | undefined
+    /** She woke (her body, the owner, or her first waking): the first arrival of a waking session. */
+    readonly type: 'waking'
+    readonly text: string
     readonly ts: number
   }
   | {
@@ -133,69 +109,22 @@ export type Stimulus =
     readonly run: string
     readonly ts: number
   }
-  | {
-    /** A close look at a video she chose: text plus frames, to a short viewing session (DESIGN §11). */
-    readonly type: 'view'
-    /** Viewing key, naming the session (e.g. `bili:BV1xx:3`). */
-    readonly key: string
-    /** Session title suffix, e.g. the video title. */
-    readonly title: string
-    readonly text: string
-    /** Frames and their captions, in time order. */
-    readonly parts: readonly ExtraBlock[]
-    readonly ts: number
-  }
-
-/** Where a stimulus goes. */
-export type Route =
-  | { readonly kind: 'conversation'; readonly sessionId: string; readonly channel: PublishedChannel; readonly channelKey: string }
-  | { readonly kind: 'self'; readonly sessionId: string }
-  | { readonly kind: 'triage'; readonly sessionId: string; readonly day: string }
-  | { readonly kind: 'consolidation'; readonly sessionId: string; readonly day: string }
-  | { readonly kind: 'group-triage'; readonly sessionId: string; readonly day: string }
-  | { readonly kind: 'viewing'; readonly sessionId: string; readonly title: string }
 
 /**
- * Whether a stimulus wakes a turn by default. Group messages wake only when
- * they address her or come from the owner (DESIGN §5); channel events never do.
- * (Life sends other group messages through group triage first.)
+ * Whether a stimulus starts a turn. Group messages do only when they address
+ * her or come from the owner; channel events and platform notices never do.
+ * (Life keeps other group messages in the group's unread buffer.)
  */
 export function wakes(stimulus: Stimulus): boolean {
   if (stimulus.type === 'channel-event') return false
+  if (stimulus.type === 'notice') return stimulus.wake === true
   if (stimulus.type !== 'message' || stimulus.channel.kind !== 'group') return true
   return stimulus.addressed === true || stimulus.sender.isOwner
 }
 
-/**
- * Route one stimulus to exactly one session.
- * @param characterId - character identity.
- * @param stimulus - the stimulus.
- * @param selfGeneration - Self session generation.
- * @param conversationGeneration - conversation session generation.
- * @returns the target session.
- */
-export function route(characterId: string, stimulus: Stimulus, selfGeneration = 1, conversationGeneration = 1): Route {
-  switch (stimulus.type) {
-    case 'message':
-    case 'burst':
-    case 'channel-event':
-    case 'intent': {
-      const key = channelKey(stimulus.channel)
-      return { kind: 'conversation', sessionId: conversationSessionId(characterId, key, conversationGeneration), channel: stimulus.channel, channelKey: key }
-    }
-    case 'heartbeat':
-      return stimulus.to === 'triage'
-        ? { kind: 'triage', sessionId: triageSessionId(characterId, stimulus.day), day: stimulus.day }
-        : { kind: 'self', sessionId: selfSessionId(characterId, selfGeneration) }
-    case 'notice':
-      return { kind: 'self', sessionId: selfSessionId(characterId, selfGeneration) }
-    case 'consolidate':
-      return { kind: 'consolidation', sessionId: consolidationSessionId(characterId, stimulus.day), day: stimulus.day }
-    case 'group-batch':
-      return { kind: 'group-triage', sessionId: groupTriageSessionId(characterId, stimulus.day), day: stimulus.day }
-    case 'view':
-      return { kind: 'viewing', sessionId: viewingSessionId(characterId, stimulus.key), title: stimulus.title }
-  }
+/** Where an arrival happened: its place and channel key, e.g. `[QQ 私聊「Sam」 qq:1:private:2]`. */
+export function whereOf(channel: ChannelRef & { readonly display?: string }): string {
+  return `[${placeName(channel)} ${channelKey(channel)}]`
 }
 
 /**
@@ -212,48 +141,33 @@ export function senderLabel(stimulus: Extract<Stimulus, { type: 'message' }>): s
 
 /**
  * Model-facing text of a stimulus, without the clock stamp. In Chinese, like
- * the primer; each states the facts of the arrival (DESIGN §5 table) and never
- * whether she should answer. The router adds the "how to answer here" line to
- * waking conversation arrivals.
- * @returns e.g. `[QQ 私聊「Sam」] Sam（主人）对你说: hello`.
+ * the primer; each states the facts of the arrival and never whether she
+ * should answer.
+ * @returns e.g. `[QQ 私聊「Sam」 qq:1:private:2] Sam（主人）对你说: hello`.
  */
 export function stimulusText(stimulus: Stimulus): string {
   switch (stimulus.type) {
     case 'message': {
       const { channel } = stimulus
-      const where = `[${placeName(channel)}]`
+      const where = whereOf(channel)
       if (channel.kind !== 'group') return `${where} ${senderLabel(stimulus)} 对你说: ${stimulus.text}`
       if (stimulus.addressed === true) return `${where} ${senderLabel(stimulus)} 叫你（群里所有人都会看到你的回答）: ${stimulus.text}`
-      const via = stimulus.via
       const line = `${where} ${senderLabel(stimulus)}: ${stimulus.text}`
-      if (via?.kind === 'triage') return `${line}\n（没有人叫你；是你在扫视群聊时决定来看看${via.reason === '' ? '' : `，你的理由：${via.reason}`}。）`
-      if (via?.kind === 'attention') return `${line}\n（这条没有叫你；你刚在这个群里说过话，所以它直接到了你这里。）`
+      if (stimulus.via?.kind === 'attention') return `${line}\n（这条没有叫你；你刚在这个群里说过话，所以它直接到了你这里。）`
       return line
     }
     case 'burst':
       return burstText(stimulus)
     case 'channel-event':
-      return `[${placeName(stimulus.channel)}] [事件] ${stimulus.text}（只是上下文，不需要回答。）`
-    case 'group-batch':
-      return `[群聊批次 ${stimulus.batch}]\n${stimulus.text}`
+      return `${whereOf(stimulus.channel)} [事件] ${stimulus.text}（只是上下文，不需要回答。）`
     case 'notice':
       return `[通知] ${stimulus.text}`
     case 'heartbeat':
       return `[心跳]\n${stimulus.text}`
-    case 'intent': {
-      const { channel } = stimulus
-      const held = stimulus.heldSeconds ?? 0
-      return [
-        `[来自 Self 的意图]（${stimulus.intentId}）你在自己的内心决定来 ${placeName(channel)} 开口。对方没有发消息给你。`,
-        `你想要的：${stimulus.intent}`,
-        ...stimulus.context === undefined || stimulus.context === '' ? [] : [`背景：${stimulus.context}`],
-        held > 0 ? `你发出的消息会先在发件箱里等 ${held} 秒，主人在这期间可以取消。Self 会知道结果。` : 'Self 会知道结果。',
-      ].join('\n')
-    }
+    case 'waking':
+      return `[醒来]\n${stimulus.text}`
     case 'consolidate':
       return `[整理记忆]\n${stimulus.text}`
-    case 'view':
-      return `[细看]\n${stimulus.text}`
   }
 }
 
@@ -267,7 +181,7 @@ function timeOf(t: number, ref: number): string {
  * The burst format (DESIGN §5): who sent how many, then each message with its
  * time and id, oldest first. Messages from her inbox are marked as arrived
  * while she slept or was paused.
- * @returns e.g. `[QQ 私聊「Sam」] Sam（主人）发来 3 条：\n  08:01 [msg 1] 在吗\n…`.
+ * @returns e.g. `[QQ 私聊「Sam」 qq:1:private:2] Sam（主人）发来 3 条：\n  08:01 [msg 1] 在吗\n…`.
  */
 export function burstText(stimulus: Extract<Stimulus, { type: 'burst' }>): string {
   const { channel, messages } = stimulus
@@ -281,7 +195,7 @@ export function burstText(stimulus: Extract<Stimulus, { type: 'burst' }>): strin
   }
   const who = [...counts.values()].map(({ name, count }) => `${name} ${count} 条`).join('，')
   const group = channel.kind === 'group'
-  const head = `[${placeName(channel)}] ${counts.size === 1 && !group ? `${[...counts.values()][0]!.name}发来 ${messages.length} 条` : `${messages.length} 条消息（${who}）`}：`
+  const head = `${whereOf(channel)} ${counts.size === 1 && !group ? `${[...counts.values()][0]!.name}发来 ${messages.length} 条` : `${messages.length} 条消息（${who}）`}：`
   const held = stimulus.held ?? 0
   const lines = messages.map((message, index) => {
     const label = group ? senderLabel(message) : message.messageId === undefined ? '' : `[msg ${message.messageId}]`
@@ -295,24 +209,8 @@ export function burstText(stimulus: Extract<Stimulus, { type: 'burst' }>): strin
   const now = stimulus.heldWhy === 'paused' ? '主人已经让你继续了' : '你现在已经醒了'
   if (held > 0) notes.push(held === messages.length ? `（这些是${stimulus.heldWhy === 'paused' ? '主人让你暂停时' : '你睡着时'}收到的，发送时间如上；${now}。）` : `（前 ${held} 条是${stimulus.heldWhy === 'paused' ? '暂停时' : '你睡着时'}收到的；${now}。）`)
   if (group && messages.some(m => m.addressed === true)) notes.push('（群里所有人都会看到你的回答。）')
-  const via = stimulus.via
-  if (via?.kind === 'triage') notes.push(`（没有人叫你；是你在扫视群聊时决定来看看${via.reason === '' ? '' : `，你的理由：${via.reason}`}。）`)
-  if (via?.kind === 'attention') notes.push('（你刚在这个群里说过话，所以这些直接到了你这里。）')
-  if (stimulus.note !== undefined && stimulus.note !== '') notes.push(`（你在内心里想的：${stimulus.note}）`)
+  if (stimulus.via?.kind === 'attention') notes.push('（你刚在这个群里说过话，所以这些直接到了你这里。）')
   return [head, ...lines, ...notes].join('\n')
-}
-
-/**
- * The "how to answer here" line of a waking conversation arrival (DESIGN §5),
- * from her actual tools.
- * @param channel - the conversation's channel.
- * @param say - this chat's say tool, when one is registered.
- * @param ender - the closing tool without speech (`end_turn`), when registered.
- */
-export function answerLine(channel: ChannelRef, say: string | undefined, ender: string | undefined): string {
-  const who = channel.kind === 'group' ? '群里所有人都看得到' : '只有对方看得到'
-  const speak = say === undefined ? '这里没有说话的工具' : `用 ${say} 说话（${who}）`
-  return `在这里回应：${speak}${ender === undefined ? '' : `，或用 ${ender} 结束不说`}。只写文字没有人看得到。`
 }
 
 /** One-line summary shown on the collapsed context row. */
@@ -320,21 +218,18 @@ export function stimulusSummary(stimulus: Stimulus): string {
   switch (stimulus.type) {
     case 'message': return `${stimulus.sender.displayName} on ${stimulus.channel.platform}: ${stimulus.text}`
     case 'notice': return `Notice: ${stimulus.text}`
-    case 'heartbeat': return stimulus.to === 'triage' ? 'Heartbeat' : 'Heartbeat: acting'
-    case 'intent': return `Intent: ${stimulus.intent}`
+    case 'heartbeat': return 'Heartbeat'
+    case 'waking': return 'Waking'
     case 'burst': return `${stimulus.messages.length} messages in ${stimulus.channel.display}${stimulus.held === undefined || stimulus.held === 0 ? '' : ` (${stimulus.held} from the inbox)`}`
     case 'consolidate': return 'Consolidating memories'
     case 'channel-event': return `Event in ${stimulus.channel.display}: ${stimulus.text}`
-    case 'group-batch': return `Group batch ${stimulus.batch}: ${stimulus.channel.display}`
-    case 'view': return `Viewing closely: ${stimulus.title}`
   }
 }
 
-/** Reference recorded in the message source, so session events can be tied back (intent id). */
+/** Reference recorded in the message source (the consolidation run id). */
 export function stimulusRef(stimulus: Stimulus): string | undefined {
-  if (stimulus.type === 'intent') return stimulus.intentId
-  if (stimulus.type === 'consolidate') return stimulus.run
-  if (stimulus.type === 'group-batch') return stimulus.batch
-  if (stimulus.type === 'view') return stimulus.key
-  return undefined
+  return stimulus.type === 'consolidate' ? stimulus.run : undefined
 }
+
+/** A chat message stimulus. */
+export type MessageStimulus = Extract<Stimulus, { type: 'message' }>

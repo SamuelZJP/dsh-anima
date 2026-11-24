@@ -105,6 +105,12 @@ export class MediaBook {
    * The entry of an id, only when it belongs to this chat.
    * @param chat - channel key of the asking session.
    */
+  /** An entry by its id alone (ids are unique across chats). */
+  find(id: string): MediaEntry | undefined {
+    const wanted = normalizeMediaId(id)
+    return this.file.entries.find(entry => entry.id === wanted)
+  }
+
   get(chat: string, id: string): MediaEntry | undefined {
     const wanted = normalizeMediaId(id)
     return this.file.entries.find(entry => entry.id === wanted && entry.chat === chat)

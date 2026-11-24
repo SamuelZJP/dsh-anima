@@ -11,10 +11,10 @@
 
 import { join } from 'node:path'
 import {
-  AnimaError, costOf, inWindow, Ledger, quotaExempt, readJson, sayMessages, writeJson,
+  AnimaError, costOf, Ledger, quotaExempt, readJson, sayMessages, writeJson,
   type AdmitRefusal, type AdmitRequest, type FriendRequest, type NewActivity, type OwnerSource, type PlaceFacts, type Subcommand, type ViewParams,
 } from '@anima/core'
-import { OUTBOX_CANCELLED, OUTBOX_EXPIRED } from '@anima/life'
+import { OUTBOX_CANCELLED, OUTBOX_EXPIRED } from './outbox.ts'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
@@ -24,7 +24,7 @@ import { ActivityLog, summarize, type ActivityRecord, type DaySummary } from './
 import { ApprovalBroker, parseOwnerReply, type ApprovalAnswer } from './approvals.ts'
 import { SubcommandTable } from './commands.ts'
 import { onAllowlist, resolveGuardConfig, type Config, type ResolvedGuardConfig } from './config.ts'
-import { decide, GuardCode, OUTSIDE, QuotaBook, windowZh, type GateCall, type GateMoment } from './gate.ts'
+import { decide, startsConversation, GuardCode, OUTSIDE, QuotaBook, windowZh, type GateCall, type GateMoment } from './gate.ts'
 import { Outbox, platformOf } from './outbox.ts'
 import { OwnerRegistry } from './owner.ts'
 import { registerSurface } from './surface.ts'
@@ -79,6 +79,8 @@ export class AnimaGuard extends Service {
   private readonly path: string
   private readonly file: GuardFile
   private pausedState = false
+  /** Calls that start a conversation, waiting for their success (`session|target`). */
+  private readonly starting = new Set<string>()
 
   /**
    * @param ctx - root context with `anima` and `tools`; `animaLife`, when loaded, adds the outbox and report lines.
@@ -171,13 +173,17 @@ export class AnimaGuard extends Service {
         }
         if (this.pausedState && !quotaExempt(meta)) return refuse(GuardCode.paused, PAUSED_HINT)
       }
-      // A message she started herself waits in the outbox first.
-      if (sessionId !== undefined && meta.effect === 'express' && exec.name.endsWith('_say')) {
-        const held = await this.holdOutgoing(sessionId, sayMessages(args).join('\n'))
+      // Where she speaks first, a say waits in the outbox, and the conversation she starts counts.
+      const target = meta.target?.(args)
+      const starts = startsConversation(call, this.moment(call.now))
+      if (starts && sessionId !== undefined && target !== undefined && meta.effect === 'express' && exec.name.endsWith('_say') && this.config.outbox.delaySeconds > 0) {
+        const held = await this.holdOutgoing(sessionId, target, sayMessages(args).join('\n'))
         if (held !== undefined) return refuse(held.code, held.hint)
       }
       const decision = await next()
       if (decision.kind === 'allow') {
+        // It counts as a conversation she started once the call succeeds (`anima/behavior`).
+        if (starts) this.starting.add(`${sessionId ?? ''}|${target ?? exec.name}`)
         this.quota.record(call, this.config.quotas)
         this.save()
         record(verdict.approval === undefined ? 'allowed' : 'approved')
@@ -198,12 +204,13 @@ export class AnimaGuard extends Service {
       if (event.type !== 'assistant/message' || event.data.usage === undefined) return
       if (core.describeSession(session.id) === undefined) return
       const now = core.clock.now()
-      this.today(now).tokens[core.mode(now)] += billableTokens(event.data.usage)
+      this.today(now).tokens[core.asleep() ? 'night' : 'day'] += billableTokens(event.data.usage)
       this.save()
     })
-    // A conversation she started counts once it really started.
+    // A conversation she started counts once the call that started it succeeded.
     ctx.on('anima/behavior', (event) => {
-      if (event.meta.effect !== 'initiate') return
+      const key = `${event.sessionId ?? ''}|${event.meta.target?.(event.args) ?? event.name}`
+      if (!this.starting.delete(key)) return
       this.today(event.at).initiates += costOf(event.meta, event.args)
       this.save()
     })
@@ -212,7 +219,6 @@ export class AnimaGuard extends Service {
     core.addPlaceLines(facts => this.limitLines(facts))
     ctx.inject(['animaLife'], (ctx) => {
       ctx.animaLife.addBudgetLine(() => this.budgetLines())
-      ctx.animaLife.provideHoldSeconds(() => this.config.outbox.delaySeconds)
     })
 
     this.registerOwnSurface()
@@ -243,8 +249,22 @@ export class AnimaGuard extends Service {
 
   /** Whether the token budget of the moment (awake or asleep) is spent. */
   overBudget(t = this.ctx.anima.clock.now()): boolean {
-    const mode = this.ctx.anima.mode(t)
+    const mode = this.ctx.anima.asleep() ? 'night' : 'day'
     return this.todayCounts(t).tokens[mode] >= this.config.budget[mode]
+  }
+
+  /**
+   * Whether a say toward a chat would be her speaking first: nobody there
+   * wrote to her, and she did not speak there, within `initiate.replyWindowMinutes`.
+   * The guard's own rule, outside her; her life only reports when she last heard and spoke.
+   */
+  speakingFirst(channelKey: string, t = this.ctx.anima.clock.now()): boolean {
+    const life = this.ctx.get('animaLife')
+    if (life === undefined) return false
+    const window = this.config.initiate.replyWindowMinutes * 60_000
+    const recent = (at: number | undefined) => at !== undefined && t - at <= window
+    if (life.inbox.peek(channelKey).length > 0) return false
+    return !recent(life.lastHeard(channelKey)) && !recent(life.lastSpoke(channelKey))
   }
 
   /** Whether she may start a conversation in a channel (consent). */
@@ -272,8 +292,9 @@ export class AnimaGuard extends Service {
     const quiet = this.config.quiet.some(window => inWindow(now, window.from, window.to)) ? '现在是主人定的安静时段' : undefined
     return {
       quiet,
+      speakingFirst: key => this.speakingFirst(key, now),
       overBudget: this.overBudget(now),
-      night: core.mode(now) === 'night',
+      night: core.asleep(),
       initiatesUsed: this.todayCounts(now).initiates,
       mayInitiate: key => this.mayInitiate(key),
       ownerLine: core.ownerLine !== undefined,
@@ -329,14 +350,14 @@ export class AnimaGuard extends Service {
   /** A wake that is not a tool call (`group_attention`): pause, then only the quotas that name it. */
   private admitWake(name: string, channelKey: string): AdmitRefusal | undefined {
     const record = (decision: 'allowed' | 'refused', code?: string, hint?: string) => this.log({
-      type: 'gate', behavior: name, decision, session: 'conversation', channel: channelKey,
+      type: 'gate', behavior: name, decision, session: 'waking', channel: channelKey,
       ...code === undefined ? {} : { code }, ...hint === undefined ? {} : { hint },
     })
     if (this.pausedState) {
       record('refused', GuardCode.paused, PAUSED_HINT)
       return { code: GuardCode.paused, reason: 'paused' }
     }
-    const call: GateCall = { name, meta: { effect: 'internal', sessions: ['conversation'], target: () => channelKey }, session: undefined, now: this.ctx.anima.clock.now(), args: {} }
+    const call: GateCall = { name, meta: { effect: 'internal', sessions: ['waking'], target: () => channelKey }, session: undefined, now: this.ctx.anima.clock.now(), args: {} }
     const own = (rule: { behavior?: string | undefined }) => rule.behavior === name
     const over = this.quota.exceeded(call, this.config.quotas, own)
     if (over !== undefined) {
@@ -387,24 +408,23 @@ export class AnimaGuard extends Service {
   // ---- the outbox ----
 
   /**
-   * Hold a say she makes in a conversation she started herself.
+   * Hold a say she makes where she speaks first.
    * @returns a refusal when it must not go out, or undefined to send it.
    */
-  private async holdOutgoing(sessionId: string, text: string): Promise<{ code: string; hint: string } | undefined> {
+  private async holdOutgoing(sessionId: string, channelKey: string, text: string): Promise<{ code: string; hint: string } | undefined> {
     const core = this.ctx.anima
     const life = this.ctx.get('animaLife')
-    const intent = life?.answering(sessionId)
     if (life === undefined) return undefined
-    if (intent === undefined) return undefined
-    const platform = platformOf(intent.channelKey)
+    const platform = platformOf(channelKey)
+    const display = life.channel(channelKey)?.display ?? channelKey
     let done: () => void = () => {}
     const finished = new Promise<void>((resolve) => { done = resolve })
     try {
-      const result = await this.outbox.hold({ sessionId, channelKey: intent.channelKey, display: intent.display, text, intentId: intent.intentId }, {
+      const result = await this.outbox.hold({ sessionId, channelKey, display, text, reason: 'speaking first' }, {
         online: () => life.platformOnline(platform),
         onHeld: (held) => {
-          this.ctx.emit('anima/outgoing-held', { channelKey: intent.channelKey, sendsAt: held.sendsAt, done: finished })
-          if (!this.config.outbox.notifyOwner || core.channelInfo(intent.channelKey)?.isOwner === true) return
+          this.ctx.emit('anima/outgoing-held', { channelKey, sendsAt: held.sendsAt, done: finished })
+          if (!this.config.outbox.notifyOwner || core.channelInfo(channelKey)?.isOwner === true) return
           core.ownerLine?.send(`[Anima outbox ${held.id}] In ${this.config.outbox.delaySeconds} s she sends to ${held.display}: "${text}". Reply "cancel ${held.id}" to stop it.`)
             .catch((error: unknown) => this.ctx.logger.warn(`anima: could not notify the owner about ${held.id}: ${String(error)}`))
         },
@@ -424,7 +444,7 @@ export class AnimaGuard extends Service {
 
   /** The quotas and limits that may stop the tools of a place, as fact lines (Chinese). */
   limitLines(facts: PlaceFacts): string[] {
-    const here = facts.kind === 'conversation'
+    const here = false
     const lines: string[] = []
     for (const rule of this.config.quotas) {
       const matching = facts.tools.filter(tool => !quotaExempt(tool.meta) && (rule.behavior === undefined || rule.behavior === tool.name)
@@ -442,14 +462,17 @@ export class AnimaGuard extends Service {
       if (!facts.tools.some(tool => tool.name === rule.behavior)) continue
       lines.push(rule.fact === 'messages' ? `\`${rule.behavior}\`：一次最多 ${rule.max} 条消息。` : `\`${rule.behavior}\`：${rule.fact} 最多 ${rule.max}。`)
     }
-    if (facts.tools.some(tool => tool.meta.effect === 'initiate')) lines.push(`主动开始对话：每天最多 ${this.config.initiate.perDay} 次。`)
+    if (facts.tools.some(tool => tool.meta.effect === 'express' && tool.meta.target !== undefined)) {
+      const window = this.config.initiate.replyWindowMinutes
+      lines.push(`在 ${window} 分钟里没有人找过你、你也没说过话的聊天里开口，算你主动找人：每天最多 ${this.config.initiate.perDay} 次，只在主人允许的聊天里${this.config.outbox.delaySeconds > 0 ? `；这样的消息会先在发件箱里等 ${this.config.outbox.delaySeconds} 秒，主人可以取消` : ''}。`)
+    }
     return lines
   }
 
   /** Budget lines for her situation report. */
   budgetLines(t = this.ctx.anima.clock.now()): string[] {
     const day = this.todayCounts(t)
-    const mode = this.ctx.anima.mode(t)
+    const mode = this.ctx.anima.asleep() ? 'night' : 'day'
     const perDay = this.config.initiate.perDay
     return [
       `conversations you may still start today: ${Math.max(0, perDay - day.initiates)} of ${perDay}`,
@@ -583,4 +606,14 @@ function deniedHint(name: string, answer: ApprovalAnswer): string {
 
 function refusal(code: string, hint: string): PreToolDecision {
   return { kind: 'deny', reason: `${code}: ${hint}`, info: { name: GUARD_INFO_NAME, code, reason: hint } }
+}
+
+/**
+ * Whether a local time lies inside a window of minutes after midnight (which
+ * may wrap midnight): the owner's quiet hours, a clock rule kept outside her.
+ */
+export function inWindow(t: number, from: number, to: number): boolean {
+  const d = new Date(t)
+  const m = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60
+  return from <= to ? m >= from && m < to : m >= from || m < to
 }

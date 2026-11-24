@@ -1,234 +1,264 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import Tools from '@deepseek-ai/dsh-tools'
-import * as animaCore from '@anima/core'
-import { describe, expect, it, onTestFinished } from 'vitest'
-import { AnimaLife, consolidationSessionId, conversationSessionId, route, selfSessionId, SessionRouter, stimulusText, wakes } from '../src/index.ts'
-import type { PublishedChannel, SessionHost, Stimulus } from '../src/index.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { describe, expect, it } from 'vitest'
+import { stimulusText, wakingSessionId } from '../src/index.ts'
+import { ALICE, ALICE_KEY, at, callAs, event, message, OWNER, OWNER_KEY, settle, setup } from './helpers.ts'
 
-const owner: PublishedChannel = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)' }
-const group: PublishedChannel = { platform: 'qq', account: '10', kind: 'group', id: '42', display: 'Book club' }
+const HOUR = 3_600_000
 
-function message(channel: PublishedChannel, text = 'hello'): Stimulus {
-  return { type: 'message', channel, sender: { platformUserId: 'u1', displayName: 'Sam', isOwner: true }, text, ts: 0 }
-}
-
-function tempDir(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'anima-life-'))
-  onTestFinished(() => rmSync(dir, { recursive: true, force: true }))
-  return dir
-}
-
-interface FakeAgent { id: string; inbox: string[] }
-
-/** In-memory host mimicking DSH: create mints a new id when the named session already exists. */
-class FakeHost implements SessionHost<FakeAgent> {
-  readonly sessions = new Map<string, FakeAgent & { preset: string; cwd: string; title?: string }>()
-  readonly archived = new Set<string>()
-  creates = 0
-
-  async resolve(id: string) {
-    await Promise.resolve()
-    return this.sessions.get(id)
-  }
-  async create(id: string, spec: { agentPreset: string; cwd: string }) {
-    this.creates++
-    await new Promise(resolve => setTimeout(resolve, 5))
-    const actual = this.sessions.has(id) ? `${id}-minted` : id
-    this.sessions.set(actual, { id: actual, inbox: [], preset: spec.agentPreset, cwd: spec.cwd })
-    return actual
-  }
-  isArchived(id: string) { return this.archived.has(id) }
-  rename(agent: FakeAgent, title: string) { this.sessions.get(agent.id)!.title = title }
-  async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
-  async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
-  selectModel() {}
-  isBusy() { return false }
-}
-
-describe('session identity', () => {
-  it('is deterministic per character and channel', () => {
-    const key = 'demo:owner:private:owner'
-    expect(conversationSessionId('anima', key)).toBe(conversationSessionId('anima', key))
-    expect(conversationSessionId('anima', key)).toMatch(/^anima-c-[0-9a-f]{24}$/)
-    expect(conversationSessionId('anima', key)).not.toBe(conversationSessionId('anima', 'demo:owner:private:other'))
-    expect(conversationSessionId('anima', key)).not.toBe(conversationSessionId('mio', key))
+describe('one waking session for everything', () => {
+  it('opens her first waking with what is true when she wakes', async () => {
+    const { ctx, host, current, recorded } = await setup('2026-11-10T08:00')
+    const id = ctx.animaLife.waking.current!
+    expect(id).toBe(wakingSessionId('anima', at('2026-11-10T08:00')))
+    expect(host.order).toEqual([id])
+    expect(current().inbox).toHaveLength(1)
+    expect(current().inbox[0]).toMatch(/^\[Tue 2026-11-10 08:00\] \[醒来\]\n现在是 2026-11-10 08:00。你醒着。这是你第一次在这里醒来。\n收件箱是空的。$/)
+    expect(current().title).toBe('Anima · 11-10 08:00')
+    expect(ctx.anima.describeSession(id)).toEqual({ kind: 'waking', current: true })
+    expect(recorded.filter(r => r.type === 'wake')).toEqual([expect.objectContaining({ stimulus: 'waking', session: 'waking', sessionId: id })])
   })
 
-  it('keeps Self apart from every conversation', () => {
-    expect(selfSessionId('anima')).toMatch(/^anima-self-[0-9a-f]{24}$/)
-    expect(selfSessionId('anima')).not.toBe(selfSessionId('mio'))
-    expect(selfSessionId('anima')).not.toBe(conversationSessionId('anima', ''))
-    expect(selfSessionId('anima', 1)).toBe('anima-self-9ab12293373718feef7e5704')
-    expect(selfSessionId('anima', 2)).toMatch(/^anima-self-[0-9a-f]{24}$/)
-    expect(selfSessionId('anima', 2)).not.toBe(selfSessionId('anima'))
-    expect(route('anima', { type: 'notice', text: 'x', ts: 0 }, 2)).toEqual({ kind: 'self', sessionId: selfSessionId('anima', 2) })
+  it('takes every chat into the same session, each arrival naming its place and channel key', async () => {
+    const { ctx, clock, current, stimuli } = await setup('2026-11-10T08:00')
+    clock.now = at('2026-11-10T09:00')
+    await ctx.animaLife.deliver(message(ALICE, '今天去看展了', clock.now))
+    await ctx.animaLife.deliver(message(OWNER, '在吗', clock.now))
+    await ctx.animaLife.deliver({ type: 'channel-event', channel: ALICE, text: 'Alice 撤回了一条消息', ts: clock.now })
+    expect(current().inbox.slice(1)).toEqual([
+      '[Tue 2026-11-10 09:00] [demo 私聊「Alice」 demo:me:private:alice] Alice 对你说: 今天去看展了',
+      '[Tue 2026-11-10 09:00] [demo 私聊「Sam」 demo:me:private:owner] Sam（主人） 对你说: 在吗',
+      '(inject) [Tue 2026-11-10 09:00] [demo 私聊「Alice」 demo:me:private:alice] [事件] Alice 撤回了一条消息（只是上下文，不需要回答。）',
+    ])
+    expect(stimuli.filter(s => s.type === 'message').map(s => s.delivery)).toEqual(['wake', 'wake'])
+    expect(ctx.animaLife.lastHeard(ALICE_KEY)).toBe(clock.now)
   })
 
-  it('starts fresh conversation sessions with a new generation (Phase 8)', () => {
-    const key = 'demo:owner:private:owner'
-    expect(conversationSessionId('anima', key, 1)).toBe(conversationSessionId('anima', key))
-    expect(conversationSessionId('anima', key, 2)).toMatch(/^anima-c-[0-9a-f]{24}$/)
-    expect(conversationSessionId('anima', key, 2)).not.toBe(conversationSessionId('anima', key))
-    expect(route('anima', message(owner), 1, 2)).toMatchObject({ kind: 'conversation', sessionId: conversationSessionId('anima', key, 2) })
-    const router = new SessionRouter(new FakeHost(), { characterId: 'anima', conversationGeneration: 2, dataDir: '/tmp' })
-    router.know(owner)
-    expect(router.describe(conversationSessionId('anima', key, 2))).toMatchObject({ kind: 'conversation', channelKey: key })
-    expect(router.describe(conversationSessionId('anima', key))).toBeUndefined()
+  it('gives a plain DSH session nothing of hers', async () => {
+    const { ctx } = await setup('2026-11-10T08:00')
+    expect(ctx.anima.describeSession('plain-dsh')).toBeUndefined()
+    expect((await callAs(ctx, 'plain-dsh', 'wait', { seconds: 1 })).isError).toBe(true)
   })
 })
 
-describe('route', () => {
-  it('sends channel messages to that channel’s conversation', () => {
-    expect(route('anima', message(group))).toEqual({
-      kind: 'conversation', sessionId: conversationSessionId('anima', 'qq:10:group:42'), channel: group, channelKey: 'qq:10:group:42',
-    })
-  })
-
-  it('sends notices to Self', () => {
-    expect(route('anima', { type: 'notice', text: 'x', ts: 0 })).toEqual({ kind: 'self', sessionId: selfSessionId('anima') })
-  })
-
-  it('formats messages with channel and sender', () => {
-    expect(stimulusText(message(owner))).toBe('[demo 私聊「Owner」] Sam（主人） 对你说: hello')
-    expect(stimulusText({ ...message(group), addressed: true } as Stimulus)).toBe('[QQ 群「Book club」] Sam（主人） [qq u1] 叫你（群里所有人都会看到你的回答）: hello')
-  })
-})
-
-describe('SessionRouter', () => {
-  function setup() {
-    const host = new FakeHost()
-    const dataDir = tempDir()
-    return { host, dataDir, router: new SessionRouter(host, { characterId: 'anima', dataDir }) }
+describe('falling asleep and waking', () => {
+  async function asleepAt(time: string) {
+    const env = await setup('2026-11-10T08:00')
+    const { ctx, clock, host } = env
+    const first = ctx.animaLife.waking.current!
+    host.alarms.set('s1', first)
+    clock.now = at(time)
+    event(ctx, first, 'turn/start')
+    const slept = await callAs(ctx, first, 'sleep', { note: '今天看了展' })
+    expect(slept.text).toBe('你睡着了。')
+    await settle()
+    return { ...env, first, next: ctx.animaLife.waking.current! }
   }
 
-  it('creates a conversation on first message with the conversation preset', async () => {
-    const { host, router, dataDir } = setup()
-    const id = await router.deliver(message(owner))
-    const session = host.sessions.get(id)!
-    expect(session).toMatchObject({ preset: 'anima-conversation', cwd: join(dataDir, 'conversations'), title: 'Anima · Owner (demo)' })
-    expect(session.inbox).toEqual(['[demo 私聊「Owner」] Sam（主人） 对你说: hello'])
-    expect(existsSync(join(dataDir, 'conversations'))).toBe(true)
+  it('prepares the next waking, moves her alarms, and archives the ended session after its last turn', async () => {
+    const { ctx, host, first, next, recorded } = await asleepAt('2026-11-10T20:00')
+    expect(next).toBe(wakingSessionId('anima', at('2026-11-10T20:00')))
+    expect(host.sessions.get(next)).toMatchObject({ preset: 'anima-waking', inbox: [], title: 'Anima · next waking' })
+    expect(host.alarms.get('s1')).toBe(next)
+    // The sleep call's turn is still running: archive waits for it.
+    expect(host.archived.has(first)).toBe(false)
+    event(ctx, first, 'turn/end')
+    await settle()
+    expect(host.archived.has(first)).toBe(true)
+    expect(recorded.filter(r => r.type === 'waking-open' || r.type === 'waking-archive').map(r => r.type)).toEqual(['waking-open', 'waking-archive'])
   })
 
-  it('reuses the existing session without creating again', async () => {
-    const { host, router } = setup()
-    const first = await router.deliver(message(owner, 'one'))
-    const second = await router.deliver(message(owner, 'two'))
-    expect(second).toBe(first)
-    expect(host.creates).toBe(1)
-    expect(host.sessions.get(first)!.inbox).toHaveLength(2)
-  })
-
-  it('creates once under concurrent deliveries to one id', async () => {
-    const { host, router } = setup()
-    const ids = await Promise.all([1, 2, 3, 4].map(n => router.deliver(message(owner, `m${n}`))))
-    expect(new Set(ids).size).toBe(1)
-    expect(host.creates).toBe(1)
-    expect(host.sessions.size).toBe(1)
-    expect(host.sessions.get(ids[0]!)!.inbox).toHaveLength(4)
-  })
-
-  it('creates Self with the self preset in the workspace directory', async () => {
-    const { host, router, dataDir } = setup()
-    const agent = await router.ensureSelf()
-    expect(agent.id).toBe(selfSessionId('anima'))
-    expect(host.sessions.get(agent.id)).toMatchObject({ preset: 'anima-self', cwd: join(dataDir, 'workspace'), title: 'Anima · self' })
-  })
-
-  it('refuses archived sessions', async () => {
-    const { host, router } = setup()
-    host.archived.add(conversationSessionId('anima', 'demo:owner:private:owner'))
-    await expect(router.deliver(message(owner))).rejects.toThrow(/anima\/session-archived/)
-    expect(host.creates).toBe(0)
-  })
-
-  it('fails loud when DSH would mint another id', async () => {
-    const { host, router } = setup()
-    const id = conversationSessionId('anima', 'demo:owner:private:owner')
-    host.resolve = async () => undefined
-    host.sessions.set(id, { id, inbox: [], preset: 'x', cwd: 'x' })
-    await expect(router.deliver(message(owner))).rejects.toThrow(/anima\/session-id-mismatch/)
-  })
-
-  it('maps session ids back to channels and Self', async () => {
-    const { router } = setup()
-    const forget = router.know(owner)
-    const id = conversationSessionId('anima', 'demo:owner:private:owner')
-    expect(router.describe(id)).toEqual({ kind: 'conversation', channel: owner, channelKey: 'demo:owner:private:owner' })
-    expect(router.describe(selfSessionId('anima'))).toEqual({ kind: 'self' })
-    expect(router.describe('session-123')).toBeUndefined()
-    forget()
-    expect(router.describe(id)).toBeUndefined()
-  })
-})
-
-describe('AnimaLife service', () => {
-  async function setup() {
-    const ctx = new Context()
-    onTestFinished(() => ctx.fiber.dispose())
-    await ctx.plugin(SystemPrompt)
-    await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDir() })
-    ctx.anima.setClock(() => new Date('2026-11-10T10:00').getTime())
-    const host = new FakeHost()
-    const fiber = await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
-    return { ctx, host, fiber }
-  }
-
-  it('provides the core session resolver for published channels', async () => {
-    const { ctx } = await setup()
-    const id = conversationSessionId('anima', 'demo:owner:private:owner')
-    expect(ctx.anima.describeSession(id)).toBeUndefined()
-    const fiber = await ctx.plugin({ name: 'adapter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.publish([owner]) } })
-    expect(ctx.anima.describeSession(id)).toMatchObject({ kind: 'conversation', channelKey: 'demo:owner:private:owner' })
-    expect(ctx.anima.describeSession(selfSessionId('anima'))).toEqual({ kind: 'self' })
-    await fiber.dispose()
-    expect(ctx.anima.describeSession(id)).toBeUndefined()
-  })
-
-  it('withdraws the resolver on unload', async () => {
-    const { ctx, fiber } = await setup()
-    await fiber.dispose()
-    expect(ctx.anima.describeSession(selfSessionId('anima'))).toBeUndefined()
-  })
-
-  it('routes consolidation to the day\'s consolidation session with its preset and model', async () => {
-    const { ctx, host } = await setup()
-    const models: string[] = []
-    host.selectModel = ((_agent: unknown, choice: { model: string }) => { models.push(choice.model) }) as typeof host.selectModel
-    const seen: string[] = []
-    ctx.on('anima/stimulus', event => { seen.push(`${event.stimulus.type} ${event.sessionId}`) })
-    const id = await ctx.animaLife.deliver({ type: 'consolidate', day: '2026-11-10', text: 'segments…', run: 'r1', ts: 0 }, { model: { provider: 'p', model: 'cheap' } })
-    expect(id).toBe(consolidationSessionId('anima', '2026-11-10'))
-    expect(host.sessions.get(id)).toMatchObject({ preset: 'anima-consolidation', title: 'Anima · memory 2026-11-10' })
-    expect(host.sessions.get(id)!.inbox[0]).toContain('[整理记忆]\nsegments…')
-    expect(models).toEqual(['cheap'])
-    expect(seen).toEqual([`consolidate ${id}`])
-    expect(ctx.anima.describeSession(id)).toEqual({ kind: 'consolidation' })
-  })
-
-  it('buffers unaddressed group messages for group triage', async () => {
-    const { ctx, host } = await setup()
-    const bob = { platformUserId: 'b', displayName: 'Bob', isOwner: false }
-    expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0 })).toBe(false)
-    expect(wakes({ type: 'message', channel: group, sender: bob, text: 'hi', ts: 0, addressed: true })).toBe(true)
-    expect(wakes({ type: 'message', channel: owner, sender: bob, text: 'hi', ts: 0 })).toBe(true)
-    const id = await ctx.animaLife.deliver({ type: 'message', channel: group, sender: bob, text: 'hotpot?', ts: 0 })
-    expect(host.sessions.has(id)).toBe(false)
-    expect(ctx.animaLife.triage.open()).toEqual([{ channelKey: 'qq:10:group:42', messages: 1 }])
-  })
-
-  it('adds report lines from other plugins', async () => {
-    const { ctx, host } = await setup()
-    const fiber = await ctx.plugin({ name: 'reporter', inject: ['animaLife'], apply: (child: Context) => { child.animaLife.addReportLine(() => ['Memory: 3 lines pending.']) } })
+  it('holds chats in her inbox while she sleeps, and opens the next waking when she is rested', async () => {
+    const { ctx, clock, host, first, next, stimuli } = await asleepAt('2026-11-10T20:00')
+    event(ctx, first, 'turn/end')
+    clock.now = at('2026-11-10T22:00')
+    await ctx.animaLife.deliver(message(ALICE, '睡了吗', clock.now))
+    expect(host.sessions.get(next)!.inbox).toEqual([])
+    expect(stimuli.at(-1)).toMatchObject({ type: 'message', delivery: 'record' })
+    expect(ctx.animaLife.inbox.size()).toBe(1)
     await ctx.animaLife.beat()
-    const triage = [...host.sessions.values()].find(session => session.preset === 'anima-triage')!
-    expect(triage.inbox[0]).toContain('Memory: 3 lines pending.')
-    await fiber.dispose()
+    expect(host.sessions.get(next)!.inbox).toEqual([])
+    // 0.75 at 20:00 (0.15 at 08:00, rising 0.05 an hour), falling 0.1 an hour: rested at 02:30.
+    clock.now = at('2026-11-11T02:20')
+    ctx.anima.checkSleep()
+    expect(ctx.anima.asleep()).toBe(true)
+    clock.now = at('2026-11-11T02:40')
+    ctx.anima.checkSleep()
+    await settle()
+    expect(ctx.anima.asleep()).toBe(false)
+    const opening = host.sessions.get(next)!.inbox[0]!
+    expect(opening).toContain('[醒来]\n现在是 2026-11-11 02:40。你睡醒了。')
+    expect(opening).toContain('你 2026-11-10 20:00 睡着（你自己上床睡的），睡了 6 h 40 min。睡前你写下：「今天看了展」')
+    expect(opening).toContain('收件箱：Alice 1 条（最后 22:00，channel "demo:me:private:alice"）。')
+    expect(opening).toContain('最近联系过的地方：[demo 私聊「Alice」 demo:me:private:alice]（最后 11-10 22:00）')
+    // The chat writes again: what waited comes with the new message, marked.
+    await ctx.animaLife.deliver(message(ALICE, '醒了没', clock.now))
+    const burst = host.sessions.get(next)!.inbox[1]!
+    expect(burst).toContain('Alice发来 2 条：')
+    expect(burst).toContain('22:00（你睡着时收到） 睡了吗')
+    expect(ctx.animaLife.inbox.size()).toBe(0)
+  })
+
+  it('is woken by the owner at night into the prepared session', async () => {
+    const { ctx, clock, host, next } = await asleepAt('2026-11-10T20:00')
+    clock.now = at('2026-11-10T21:00')
+    expect(ctx.anima.wakeByOwner()).toEqual({ woken: true })
+    await settle()
+    expect(host.sessions.get(next)!.inbox[0]).toContain('现在是 2026-11-10 21:00。主人把你叫醒了。')
+    expect(host.sessions.get(next)!.title).toBe('Anima · 11-10 21:00')
+  })
+
+  it('wakes her by an alarm that rings while she sleeps, with the waking context first', async () => {
+    const { ctx, clock, next } = await asleepAt('2026-11-10T20:00')
+    clock.now = at('2026-11-10T23:00')
+    const alarm = createUserMessage({ content: [{ type: 'text', text: 'reminder_prompt_json: "叫主人起床"' }], source: { kind: 'schedule' } as never })
+    const decision = await (ctx.animaLife as unknown as { preStep: (p: unknown, n: () => Promise<unknown>) => Promise<{ messages: { content: { text: string }[] }[] }> })
+      .preStep({ agent: { id: next }, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [alarm] }))
+    expect(ctx.anima.sleepInfo()).toMatchObject({ asleep: false, by: 'alarm' })
+    const texts = decision.messages.map(m => m.content[0]!.text)
+    expect(texts[0]).toContain('你定的闹钟把你叫醒了。')
+    expect(texts[1]).toBe('reminder_prompt_json: "叫主人起床"')
+    expect(texts[2]).toBe('[Tue 2026-11-10 23:00] [闹钟] 你定的闹钟响了：「叫主人起床」')
+    expect(ctx.animaLife.waking.opened).toBe(true)
+  })
+
+  it('does not take DSH\'s notice that an alarm was moved for an alarm', async () => {
+    const { ctx, clock, next } = await asleepAt('2026-11-10T20:00')
+    clock.now = at('2026-11-10T21:00')
+    const notice = createUserMessage({ content: [{ type: 'text', text: '[SCHEDULE CHANGE]\nA scheduled task involving this session was changed outside this session. This notice is not a delivery of the task and needs no action.' }], source: { kind: 'schedule' } as never })
+    const decision = await (ctx.animaLife as unknown as { preStep: (p: unknown, n: () => Promise<unknown>) => Promise<{ messages: unknown[] }> })
+      .preStep({ agent: { id: next }, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [notice] }))
+    expect(ctx.anima.asleep()).toBe(true)
+    expect(decision.messages).toHaveLength(1)
+  })
+
+  it('rings an alarm that DSH had queued in the ended waking in her new one instead, and it wakes her there', async () => {
+    const { ctx, clock, host, first, next } = await asleepAt('2026-11-10T20:00')
+    clock.now = at('2026-11-10T20:05')
+    const alarm = createUserMessage({ content: [{ type: 'text', text: 'reminder_prompt_json: "看看 Sam 写完没"' }], source: { kind: 'schedule' } as never })
+    const decision = await (ctx.animaLife as unknown as { preStep: (p: unknown, n: () => Promise<unknown>) => Promise<{ kind: string }> })
+      .preStep({ agent: { id: first }, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [alarm] }))
+    await settle()
+    expect(decision).toEqual({ kind: 'reject' })
+    expect(ctx.anima.sleepInfo()).toMatchObject({ asleep: false, by: 'alarm' })
+    const opening = host.sessions.get(next)!.inbox[0]!
+    expect(opening).toContain('你定的闹钟把你叫醒了。')
+    expect(opening).toContain('[闹钟] 你定的闹钟响了：「看看 Sam 写完没」')
+    expect(ctx.animaLife.waking.current).toBe(next)
+  })
+
+  it('makes the next waking hers the moment she falls asleep, before its session exists', async () => {
+    const { ctx, clock } = await setup('2026-11-10T08:00')
+    const first = ctx.animaLife.waking.current!
+    clock.now = at('2026-11-10T20:00')
+    const sleeping = ctx.animaLife.waking.sleep(clock.now, () => true)
+    expect(ctx.animaLife.waking.current).toBe(wakingSessionId('anima', clock.now))
+    expect(ctx.anima.describeSession(first)).toEqual({ kind: 'waking', current: false })
+    await sleeping
+  })
+
+  it('lets overwhelming sleep wait for a turn still running in the waking that just ended', async () => {
+    const { ctx, clock } = await setup('2026-11-10T07:00')
+    const first = ctx.animaLife.waking.current!
+    clock.now = at('2026-11-10T20:00')
+    event(ctx, first, 'turn/start')
+    await callAs(ctx, first, 'sleep', {})
+    await settle()
+    // She woke at once (an alarm, the owner), while the ended session's turn still runs.
+    ctx.anima.wakeByOwner()
+    await settle()
+    clock.now = at('2026-11-11T01:00')
+    ctx.anima.checkSleep()
+    expect(ctx.anima.asleep()).toBe(false)
+    event(ctx, first, 'turn/end')
+    await settle()
+    expect(ctx.anima.sleepInfo().by).toBe('overwhelmed')
+  })
+
+  it('is taken by sleep when it overwhelms her, once her turn ends', async () => {
+    const { ctx, clock, current } = await setup('2026-11-10T07:00')
+    const id = ctx.animaLife.waking.current!
+    event(ctx, id, 'turn/start')
+    clock.now = at('2026-11-10T23:30')
+    ctx.anima.checkSleep()
+    expect(ctx.anima.asleep()).toBe(false)
+    event(ctx, id, 'turn/end')
+    await settle()
+    expect(ctx.anima.sleepInfo().by).toBe('overwhelmed')
+    expect(ctx.animaLife.waking.current).not.toBe(id)
+    expect(current().id).not.toBe(id)
   })
 })
+
+describe('her heartbeat', () => {
+  it('stirs her awake and idle with her state; beats without a turn asleep or while she is in one', async () => {
+    const { ctx, clock, current } = await setup('2026-11-10T08:00')
+    const id = ctx.animaLife.waking.current!
+    clock.now = at('2026-11-10T09:00')
+    await ctx.animaLife.beat()
+    expect(current().inbox[1]).toMatch(/^\[Tue 2026-11-10 09:00\] \[心跳\]\nTime Tue 2026-11-10 09:00\.\nsleep pressure 0\.20; energy/)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:00'))
+    event(ctx, id, 'turn/start')
+    await ctx.animaLife.beat()
+    expect(current().inbox).toHaveLength(2)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:00'))
+  })
+})
+
+describe('wait', () => {
+  it('returns at once when anything arrives, from any chat, and keeps the turn open', async () => {
+    const { ctx, clock } = await setup('2026-11-10T08:00')
+    const id = ctx.animaLife.waking.current!
+    const waiting = callAs(ctx, id, 'wait', { seconds: 600, channel: OWNER_KEY })
+    await settle()
+    await ctx.animaLife.deliver(message(ALICE, '在吗', clock.now))
+    const result = await waiting
+    expect(result).toMatchObject({ isError: false, text: '有新消息到了。', concludes: false })
+  })
+
+  it('ends the turn when the time runs out with nothing new', async () => {
+    const { ctx } = await setup('2026-11-10T08:00')
+    const result = await callAs(ctx, ctx.animaLife.waking.current!, 'wait', { seconds: 1 })
+    expect(result).toMatchObject({ text: '等到了时间，什么也没来。', concludes: true })
+  })
+})
+
+describe('speaking anywhere', () => {
+  it('says on any channel by its key; a chat she speaks in leaves her inbox', async () => {
+    const env = await setup('2026-11-10T08:00')
+    const { ctx, clock, sent, recorded } = env
+    clock.now = at('2026-11-10T20:00')
+    await callAs(ctx, ctx.animaLife.waking.current!, 'sleep', {})
+    await settle()
+    await ctx.animaLife.deliver(message(ALICE, '明天见', clock.now))
+    ctx.anima.wakeByOwner()
+    await settle()
+    const here = ctx.animaLife.waking.current!
+    expect((await callAs(ctx, here, 'inbox_read', {})).text).toContain('[demo 私聊「Alice」 demo:me:private:alice] 1 条：')
+    await callAs(ctx, here, 'demo_say', { channel: ALICE_KEY, text: '明天见！' })
+    expect(sent).toEqual([{ channel: ALICE_KEY, texts: ['明天见！'] }])
+    expect(ctx.animaLife.inbox.size()).toBe(0)
+    expect(recorded.filter(r => r.type === 'inbox-release')).toEqual([expect.objectContaining({ channel: ALICE_KEY, reason: 'said', count: 1 })])
+    expect(ctx.animaLife.lastSpoke(ALICE_KEY)).toBe(clock.now)
+  })
+
+  it('formats a waking arrival as facts', () => {
+    expect(stimulusText({ type: 'waking', text: '你睡醒了。', ts: 0 })).toBe('[醒来]\n你睡醒了。')
+    expect(stimulusText({ type: 'heartbeat', text: 'Time x.', ts: 0 })).toBe('[心跳]\nTime x.')
+  })
+})
+
+describe('restart', () => {
+  it('keeps her waking session across a restart, and does not open it twice', async () => {
+    const first = await setup('2026-11-10T08:00')
+    const id = first.ctx.animaLife.waking.current!
+    first.ctx.fiber.dispose()
+    const second = await setup('2026-11-10T09:00', { dataDir: first.dataDir })
+    expect(second.ctx.animaLife.waking.current).toBe(id)
+    // The new host (a fresh DSH process here) resolves nothing, so it is made again under the same id, but not opened twice.
+    expect(second.host.order).toEqual([id])
+    // A beat that came due while it was down stirs her; the waking is not opened again.
+    expect(second.current().inbox.every(text => !text.includes('[醒来]'))).toBe(true)
+  })
+})
+
+void HOUR

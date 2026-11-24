@@ -13,12 +13,7 @@ import * as persona from '../src/persona.ts'
 import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
 const options = { digestChars: 60 }
-const self = { kind: 'self' as const }
-const localChat = {
-  kind: 'conversation' as const,
-  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'demo:owner:private:owner',
-}
+const waking = { kind: 'waking' as const, current: true }
 
 function store(dir = tempDataDir()) {
   return new SelfModelStore(join(dir, 'self-model.json'), join(dir, 'self-model-log.jsonl'), options)
@@ -76,7 +71,7 @@ describe('self-model store', () => {
     const full = s.digest(true)
     expect(full).toContain('[n1] Old taste note here')
     expect(full).toContain('[n3] Long opinion')
-    expect(full).toMatch(/constitution above always wins/)
+    expect(full).not.toMatch(/always wins/)
     const short = s.digest(false)
     expect(short).not.toContain('[n')
     // Newest first, cut at digestChars (60): the newer taste fits, then the budget runs out.
@@ -88,7 +83,7 @@ describe('self-model store', () => {
 describe('self_note behavior', () => {
   it('takes every change she makes: nothing inside limits how often', async () => {
     const ctx = await setupCore()
-    provideSessions(ctx, { 'self-1': self })
+    provideSessions(ctx, { 'self-1': waking })
     for (let i = 1; i <= 5; i++) {
       const result = await callAs(ctx, 'self-1', 'self_note', { section: 'tastes', text: `taste ${i}`, reason: 'noticed' })
       expect(result.isError).toBe(false)
@@ -98,12 +93,12 @@ describe('self_note behavior', () => {
     expect(ctx.anima.selfModel.diffs()[0]).toMatchObject({ sessionId: 'self-1', by: 'her' })
   })
 
-  it('is offered in Self, conversations and consolidation only', async () => {
+  it('is offered awake and in sleep\'s consolidation, and nowhere else', async () => {
     const ctx = await setupCore()
-    provideSessions(ctx, { 'self-1': self, 'chat-1': localChat, 'triage-1': { kind: 'triage' }, 'cons-1': { kind: 'consolidation' } })
-    expect((await callAs(ctx, 'chat-1', 'self_note', { section: 'other', text: 'x', reason: 'y' })).isError).toBe(false)
+    provideSessions(ctx, { 'w-1': waking, 'cons-1': { kind: 'consolidation' } })
+    expect((await callAs(ctx, 'w-1', 'self_note', { section: 'other', text: 'x', reason: 'y' })).isError).toBe(false)
     expect((await callAs(ctx, 'cons-1', 'self_note', { section: 'habits', text: 'Quiet mornings.', reason: 'from the day' })).isError).toBe(false)
-    expect(textOf(await callAs(ctx, 'triage-1', 'self_note', { section: 'other', text: 'x', reason: 'y' }))).toMatch(/Error/)
+    expect(textOf(await callAs(ctx, 'plain-dsh', 'self_note', { section: 'other', text: 'x', reason: 'y' }))).toMatch(/Error/)
   })
 
   it('unregisters self_note when the plugin is disposed', async () => {
@@ -111,7 +106,7 @@ describe('self_note behavior', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    const fiber = await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
+    const fiber = await ctx.plugin(animaCore, { dataDir: tempDataDir() })
     expect(ctx.tools.get('self_note')).toBeDefined()
     await fiber.dispose()
     expect(ctx.tools.get('self_note')).toBeUndefined()
@@ -138,7 +133,7 @@ describe('persona: self-model digest and live constitution', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
+    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
     return ctx
   }
   // Prompt assembly needs a tool executor this test composition does not load,
@@ -163,27 +158,22 @@ describe('persona: self-model digest and live constitution', () => {
     return entry === undefined ? undefined : (entry.text as (c: object) => string)({})
   }
 
-  it('shows Self the full self-model and a conversation the short digest, live', async () => {
+  it('shows her waking self and sleep\'s consolidation every note with its id, live', async () => {
     const ctx = await setup()
     const captured = capture()
-    await (await agentScope(ctx, 'anima-self-z')).scope.ctx.plugin(persona, { kind: 'self' })
-    await (await agentScope(ctx, 'anima-c-z')).scope.ctx.plugin(persona, { kind: 'conversation' })
-    await (await agentScope(ctx, 'anima-t-z')).scope.ctx.plugin(persona, { kind: 'triage' })
+    await (await agentScope(ctx, 'anima-w-z')).scope.ctx.plugin(persona, { kind: 'waking' })
     await (await agentScope(ctx, 'anima-m-z')).scope.ctx.plugin(persona, { kind: 'consolidation' })
-    // Self, conversation and consolidation register a digest; triage does not.
-    expect(captured.contexts.filter(c => c.name === persona.SELF_MODEL_CONTEXT)).toHaveLength(3)
-    expect(digestOf(captured, 2)).toMatch(/No notes yet/)
+    expect(captured.contexts.filter(c => c.name === persona.SELF_MODEL_CONTEXT)).toHaveLength(2)
     expect(digestOf(captured, 0)).toMatch(/No notes yet/)
-    expect(digestOf(captured, 1)).toBe('')
     ctx.anima.selfModel.note({ section: 'tastes', text: 'Green tea over coffee.', reason: 'r', at: 1, real: 1 })
     expect(digestOf(captured, 0)).toContain('[n1] Green tea over coffee.')
-    expect(digestOf(captured, 1)).toContain('- Green tea over coffee.')
+    expect(digestOf(captured, 1)).toContain('[n1] Green tea over coffee.')
   })
 
   it('applies a saved constitution to running sessions and keeps a backup', async () => {
     const ctx = await setup()
     const captured = capture()
-    await (await agentScope(ctx, 'anima-self-k')).scope.ctx.plugin(persona, { kind: 'self' })
+    await (await agentScope(ctx, 'anima-w-k')).scope.ctx.plugin(persona, { kind: 'waking' })
     const prefixes = () => captured.sections.filter(sec => sec.text.length > 0).map(sec => sec.text)
     expect(prefixes().at(-1)).toContain('You are Anima')
     const before = ctx.anima.constitution()

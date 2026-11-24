@@ -7,6 +7,11 @@
  * @module @anima/guard/outbox
  */
 
+/** Refusal code of a say the owner cancelled while it waited. */
+export const OUTBOX_CANCELLED = 'anima/outbox-cancelled'
+/** Refusal code of a say that could not go out while its platform was down. */
+export const OUTBOX_EXPIRED = 'anima/outbox-expired'
+
 /** A message waiting in the outbox. */
 export interface HeldMessage {
   /** Id shown to the owner, `o<n>`. */
@@ -16,7 +21,8 @@ export interface HeldMessage {
   readonly display: string
   readonly text: string
   /** Intent it answers. */
-  readonly intentId: string
+  /** Why it is held: she speaks first there. */
+  readonly reason?: string
   /** Real epoch ms when it is sent (when its platform is online). */
   readonly sendsAt: number
   /** Real epoch ms when it started waiting for its platform to come back, if it is. */

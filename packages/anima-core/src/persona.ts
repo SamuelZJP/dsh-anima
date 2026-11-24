@@ -10,7 +10,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { PERSONA_PREFIX_SECTION, PERSONA_SUFFIX_SECTION } from '@deepseek-ai/dsh-system-prompt'
-import { primerText, type PlaceFacts } from './primer.ts'
+import { primerText, viewingText, type PlaceFacts } from './primer.ts'
 import type { SessionKind } from './types.ts'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from './service.ts'
@@ -26,16 +26,16 @@ export const inject = ['systemPrompt', 'anima', 'tools']
  */
 export const DEFAULT_HIDDEN_TOOLS: readonly string[] = ['working_directory', 'anima_ping']
 
-/** Child-row config: which session kind this preset serves. */
+/** Child-row config: which session kind this preset serves (`viewing`: a close view's subagent, not an Anima session). */
 export interface Config {
-  kind: SessionKind
+  kind: SessionKind | 'viewing'
   /** Global tools hidden in this session (names that are not registered are skipped). */
   hideTools: string[]
 }
 
 /** Schemastery schema for {@link Config}. */
 export const Config: z<Config> = z.object({
-  kind: z.union([z.const('conversation'), z.const('self'), z.const('triage'), z.const('consolidation'), z.const('group-triage'), z.const('viewing')]).required(),
+  kind: z.union([z.const('waking'), z.const('consolidation'), z.const('viewing')]).required(),
   hideTools: z.array(z.string()).default([...DEFAULT_HIDDEN_TOOLS]).description('Global tools hidden in this session; unregistered names are skipped.'),
 }) as z<Config>
 
@@ -53,12 +53,12 @@ export function personaText(constitution: string, facts: PlaceFacts | SessionKin
 export const SELF_MODEL_CONTEXT = 'anima-self-model'
 const SELF_MODEL_ORDER = 50
 
-function prefixSection(ctx: Context, constitution: string, kind: SessionKind): () => void {
+function prefixSection(ctx: Context, constitution: string, kind: SessionKind | 'viewing'): () => void {
   return ctx.systemPrompt.section({
     name: PERSONA_PREFIX_SECTION,
     order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_PREFIX'),
-    // "This place" is generated per session from its channel and her tools (DESIGN §9).
-    text: context => personaText(constitution, ctx.anima.placeFacts((context as { agent?: { id: string } }).agent?.id, kind)),
+    // "This place" is generated per session from the places she can reach and her tools.
+    text: context => kind === 'viewing' ? viewingText(constitution) : personaText(constitution, ctx.anima.placeFacts((context as { agent?: { id: string } }).agent?.id, kind)),
     interpolate: false,
     complete: true,
   })
@@ -81,9 +81,9 @@ export function apply(ctx: Context, config: Config): void {
     disposePrefix = ctx.effect(() => prefixSection(ctx, current, config.kind), 'anima-persona.section()')
   })
   // Her self-model digest: a logged context snapshot, re-sent only when it changes (DESIGN §9).
-  if (config.kind === 'conversation' || config.kind === 'self' || config.kind === 'consolidation') {
-    // Self and consolidation see every note with its id (they may change one); conversations a short digest.
-    const full = config.kind !== 'conversation'
+  if (config.kind !== 'viewing') {
+    // Every note with its id: she may change one, awake or in sleep's consolidation.
+    const full = true
     ctx.effect(() => ctx.systemPrompt.context({
       name: SELF_MODEL_CONTEXT,
       order: SELF_MODEL_ORDER,

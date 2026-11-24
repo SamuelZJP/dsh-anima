@@ -5,8 +5,17 @@
  * @module @anima/memory/audience
  */
 
-import type { SessionInfo } from '@anima/core'
+import type { ChannelRef } from '@anima/core'
 import type { PersonLink } from './config.ts'
+
+/**
+ * Where a memory is learned or heard: a chat (from the channel of a message or
+ * of her speech), or her inner life (her waking session as a whole, sleep's
+ * consolidation). Until R5 replaces scopes with source labels.
+ */
+export type MemoryPlace =
+  | { readonly kind: 'chat'; readonly channel: ChannelRef; readonly channelKey: string }
+  | { readonly kind: 'inner' }
 
 /** A scope: `private:<personId>`, `group:<channelKey>`, `owner`, `self` or `public`. */
 export type Scope = string
@@ -37,10 +46,10 @@ export function personOf(platform: string, userId: string, isOwner: boolean, per
   return persons.find(person => person.accounts.includes(account))?.id ?? account
 }
 
-/** What a scope decision needs to know about a session. */
+/** What a scope decision needs to know about a place. */
 export interface SessionFacts {
-  readonly info: SessionInfo | undefined
-  /** Whether a conversation's channel is the owner's own. */
+  readonly info: MemoryPlace | undefined
+  /** Whether a chat's channel is the owner's own. */
   readonly isOwner: boolean
 }
 
@@ -51,37 +60,36 @@ export interface SessionFacts {
  */
 export function chatPerson(facts: SessionFacts, persons: readonly PersonLink[]): string | undefined {
   const { info } = facts
-  if (info?.kind !== 'conversation' || info.channel.kind !== 'private') return undefined
+  if (info?.kind !== 'chat' || info.channel.kind !== 'private') return undefined
   return personOf(info.channel.platform, info.channel.id, facts.isOwner, persons)
 }
 
 /**
- * Scope of what she learns in a session.
+ * Scope of what she learns in a place.
  * - private chat: `private:<personId>`, or `owner` in the owner's own chat
  * - any other channel kind (group, thread): `group:<channelKey>`
- * - Self and consolidation: `self`
- * - viewing: nothing (its note comes back through the adapter)
- * @returns the scope, or undefined where she learns nothing (triage, non-Anima sessions).
+ * - her inner life: `self`
+ * @returns the scope, or undefined where she learns nothing (non-Anima sessions).
  */
 export function learnScope(facts: SessionFacts, persons: readonly PersonLink[]): Scope | undefined {
   const { info } = facts
-  if (info === undefined || info.kind === 'triage' || info.kind === 'group-triage' || info.kind === 'viewing') return undefined
-  if (info.kind === 'self' || info.kind === 'consolidation') return SELF
+  if (info === undefined) return undefined
+  if (info.kind === 'inner') return SELF
   const person = chatPerson(facts, persons)
   if (person !== undefined) return person === 'owner' ? OWNER : `private:${person}`
   return `group:${info.channelKey}`
 }
 
 /**
- * Scopes that may be heard in a session.
- * - a conversation hears its own scope and `public`
- * - Self hears everything
- * - triage, consolidation and non-Anima sessions hear nothing (consolidation gets its input explicitly)
+ * Scopes that may be heard in a place.
+ * - a chat hears its own scope and `public`
+ * - her inner life (her waking session: one stream of attention) hears everything
+ * - non-Anima sessions hear nothing
  */
 export function audienceOf(facts: SessionFacts, persons: readonly PersonLink[]): Audience {
   const { info } = facts
-  if (info?.kind === 'self') return EVERYONE
-  if (info?.kind !== 'conversation') return []
+  if (info?.kind === 'inner') return EVERYONE
+  if (info?.kind !== 'chat') return []
   const own = learnScope(facts, persons)
   return own === undefined ? [PUBLIC] : [own, PUBLIC]
 }

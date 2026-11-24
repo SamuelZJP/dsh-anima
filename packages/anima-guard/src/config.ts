@@ -79,6 +79,11 @@ export interface Config {
     timeoutSeconds: number
   }
   initiate: {
+    /**
+     * Minutes: a say counts as her speaking first when nobody in that chat wrote
+     * to her, and she did not speak there, within this many minutes (her clock).
+     */
+    replyWindowMinutes: number
     /** Conversations she may start per day. */
     perDay: number
     /** Windows when she may not start one. */
@@ -158,6 +163,7 @@ export const Config: z<Config> = z.object({
     timeoutSeconds: z.number().min(1).default(600).description('Real seconds before an unanswered approval request counts as denied.'),
   }).description('Owner approvals over the owner line.'),
   initiate: z.object({
+    replyWindowMinutes: z.number().min(0).default(30).description('A say counts as her speaking first when nobody in that chat wrote to her, and she did not speak there, within this many minutes of her clock.'),
     perDay: z.number().min(0).default(3).description('Conversations she may start per day.'),
     quietHours: z.array(z.object({ from: hhmm.required(), to: hhmm.required() })).default([]),
     consent: z.object({

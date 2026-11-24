@@ -2,8 +2,6 @@
  * Her self-model (DESIGN §9): short entries about her tastes, habits and
  * opinions that she edits with `self_note`. Every change is a diff in an
  * append-only log with time and reason; the owner reviews and reverts diffs.
- * The constitution always wins: the digest is framed beneath it, and nothing
- * here can change it.
  * @module @anima/core/selfmodel
  */
 
@@ -168,7 +166,7 @@ export class SelfModelStore {
    * @returns the text, or empty when she has no notes yet.
    */
   digest(full: boolean): string {
-    const lines = ['# Your self-model', 'What you have learned about yourself. Your constitution above always wins over this.']
+    const lines = ['# Your self-model', 'What you have learned about yourself.']
     if (this.file.entries.length === 0) {
       return full ? [...lines, '(No notes yet. Use `self_note` when you notice something lasting about your tastes, habits or opinions.)'].join('\n') : ''
     }

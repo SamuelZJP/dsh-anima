@@ -40,7 +40,7 @@ export function apply(ctx) {
   const outbox = outboxPath(ctx.anima.config.dataDir)
   ctx.anima.registerBehavior(defineTool({
     name: 'demo_say',
-    description: 'Say something in this chat: one message, or a list of messages sent in order. They see only what you send this way. A say ends your turn unless more: true.',
+    description: 'Say something in a demo chat, by its channel key: one message, or a list of messages sent in order. They see only what you send this way. A say ends your turn unless more: true.',
     parameters: { ...SAY_PARAMETERS },
     output: {
       schema: {
@@ -55,18 +55,16 @@ export function apply(ctx) {
     },
     async execute(args, exec) {
       const sessionId = exec.agent?.id
-      const session = sessionId === undefined ? undefined : ctx.anima.describeSession(sessionId)
-      if (session?.kind !== 'conversation' || session.channel.platform !== PLATFORM) {
-        throw new AnimaError('anima/no-channel', 'this session is not bound to a demo channel.')
-      }
+      const channel = String(args.channel ?? '').trim()
+      if (!channel.startsWith(`${PLATFORM}:`)) throw new AnimaError('anima/no-channel', `「${channel}」 is not a demo chat; use the channel key shown on its arrivals.`)
       const messages = sayMessages(args)
       if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
       const at = new Date(ctx.anima.clock.now()).toISOString()
       mkdirSync(dirname(outbox), { recursive: true })
-      for (const text of messages) appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel: session.channelKey, text })}\n`)
+      for (const text of messages) appendFileSync(outbox, `${JSON.stringify({ at, sessionId, channel, text })}\n`)
       return { sent: messages.length, at }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['waking'], ...SAY_META })
 }
 
 /**

@@ -17,7 +17,7 @@ The persona never imports `anima-guard`; the guard imports the persona's types a
 - **`anima/record`**: the persona emits what happened; the guard keeps the log.
 - **`anima/outgoing-held`**: the guard tells adapters a message she started is being held, so QQ can show typing.
 - **Read and act methods** on the persona's services (state, sleep, goals, self-model, inbox, memory store), and platforms' self-descriptions (`providePlatform`: view, actions, subcommands).
-- **Facts in her context**: `anima.addPlaceLines` (owner rules under "外面可能拦住你的事") and `animaLife.addBudgetLine`.
+- **Facts in her context**: `anima.addPlaceLines` (owner rules under "外面可能拦住你的事", the speaking-first rule and the outbox hold among them) and `animaLife.addBudgetLine`. The token budget's day and night follow whether she is awake or asleep.
 
 ### The gate
 
@@ -26,7 +26,7 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 | Check | Default |
 |---|---|
 | **Allowlist** | `allowlist.<platform>`: `open`, or `users` and `groups`; the owner's own channels always pass, and a platform not listed lets only them through. Default: empty, so only the owner's own channels. Adapters publish every chat; a stimulus from a chat not on the list does not reach her and is not kept (`reach` with `drop`), and a call toward one that is not `internal` is refused (`anima/not-allowlisted`) |
-| **Consent to initiate** | She may speak first only on the owner's channels and channels listed in `consent` (`anima/no-consent`) |
+| **Speaking first** | A say toward a chat counts as her speaking first when nobody there wrote to her (inbox included), and she did not speak there, within `initiate.replyWindowMinutes` (30) of her clock. Her life reports only when she last heard and spoke (`lastHeard`, `lastSpoke`); the rule is the guard's. Speaking first: only on the owner's channels and channels listed in `consent` (`anima/no-consent`), not in `quietHours`, at most `initiate.perDay` a day (counted once the say succeeds) |
 | **Approval** | `public` and `irreversible` calls, and behaviors listed in `approve`, wait for the owner (below) |
 | **Rate limits** | Per channel, platform or day, set in `quotas`, and fact `limits` (close-view length and frames, 5 messages per say). Until R6 the first design's defaults stay (`express` 30 an hour per channel, 200 calls a day, platform protection for `qq_*` and `bili_*`); R6 replaces the speech limits with tiredness and keeps only platform protection |
 | **Token budget** | Daily caps on billable tokens, awake and asleep (`budget.day` 300,000, `budget.night` 20,000). Over it, the gate refuses her behaviors except internal ones; her body runs on |
@@ -43,14 +43,15 @@ One listener on DSH's `tools/pre-execute` waterfall checks every behavior call a
 
 ### Outbox hold
 
-- **When it applies:** a message she sends first, toward someone who did not write to her, waits `outbox.delaySeconds` (45) before it goes out.
+- **When it applies:** a say where she speaks first (above) waits `outbox.delaySeconds` (45) before it goes out. Replies go at once.
 - **Cancelling:** the owner can cancel it with `/anima outbox cancel <id>` or `cancel <id>` on the owner line. A cancelled say returns `anima/outbox-cancelled`.
 - **While the platform is offline,** it waits up to `outbox.offlineHoldMinutes`, then expires.
 
 ### Owner commands
 
 `ctx.commands` command `anima`, no model turn:
-- `status`, `pause`, `resume`, `wake`;
+- `status`, `pause`, `resume`, `wake` (her body records the waking; her waking session opens with her inbox);
+- `self [text]` (with text, the owner's words reach her waking session and start a turn);
 - `goal add|list|close`, `inbox`, `outbox [cancel <id>]`, `approve <id>`, `deny <id>`;
 - `memory list [text]`, `memory forget <id>`;
 - `selfmodel [revert <id>]`.

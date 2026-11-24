@@ -4,13 +4,9 @@ import * as animaCore from '@anima/core'
 import { resolveGuardConfig } from '../src/index.ts'
 import { callAs, invoke, provideSessions, registerEcho, setupGuarded, setupGuardedFiber, textOf } from './helpers.ts'
 
-const localChat = {
-  kind: 'conversation' as const,
-  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'demo:owner:private:owner',
-}
-const say = { platform: 'demo', effect: 'express' as const, sessions: ['conversation' as const] }
-const self = { kind: 'self' as const }
+const localChat = { kind: 'waking' as const, current: true }
+const say = { platform: 'demo', effect: 'express' as const, sessions: ['waking' as const] }
+const self = { kind: 'waking' as const, current: true }
 const T = new Date('2026-11-10T10:00').getTime()
 
 describe('guard gate on tools/pre-execute', () => {
@@ -43,11 +39,11 @@ describe('guard gate on tools/pre-execute', () => {
 
   it('leaves what her body refuses to her body', async () => {
     const ctx = await setupGuarded({ quotas: [{ per: 'global', limit: 1, windowMinutes: 60 }] })
-    provideSessions(ctx, { self })
+    provideSessions(ctx, { self, m: { kind: 'consolidation' } })
     registerEcho(ctx, 'demo_say', say)
-    // A say in Self is the body's refusal, not the guard's, and it counts nothing.
-    expect(textOf(await callAs(ctx, 'self', 'demo_say'))).toMatch(/^Error: anima\/wrong-session: /)
-    registerEcho(ctx, 'goals_x', { effect: 'internal', sessions: ['self'] })
+    // A say from sleep's consolidation is the body's refusal, not the guard's, and it counts nothing.
+    expect(textOf(await callAs(ctx, 'm', 'demo_say'))).toMatch(/^Error: anima\/wrong-session: /)
+    registerEcho(ctx, 'goals_x', { effect: 'internal', sessions: ['waking'] })
     expect((await callAs(ctx, 'self', 'goals_x')).isError).toBe(false)
   })
 
@@ -128,7 +124,7 @@ describe('budgets and conversations she starts', () => {
     ctx.anima.setClock(() => T)
     provideSessions(ctx, { self })
     ctx.anima.provideChannels(key => key === 'demo:owner:private:owner' ? { isOwner: true } : undefined, () => ['demo:owner:private:owner'])
-    registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['self'], target: args => args.text as string })
+    registerEcho(ctx, 'open_conversation', { effect: 'initiate', sessions: ['waking'], target: args => args.text as string })
     expect((await callAs(ctx, 'self', 'open_conversation', { text: 'demo:owner:private:owner' })).isError).toBe(false)
     expect(ctx.animaGuard.todayCounts().initiates).toBe(1)
     expect(textOf(await callAs(ctx, 'self', 'open_conversation', { text: 'demo:owner:private:owner' }))).toMatch(/^Error: anima\/over-quota: （外面拦住了你，不是你自己的身体）主人定的限制：每天最多主动找人聊 1 次/)
@@ -156,7 +152,7 @@ describe('budgets and conversations she starts', () => {
     const ctx = await setupGuarded()
     ctx.anima.setClock(() => T)
     const status = (await invoke(ctx, 'status')).text ?? ''
-    expect(status).toContain('Clock: 2026-11-10 10:00 (real time); phase day, mode day')
+    expect(status).toContain('Clock: 2026-11-10 10:00 (real time); day 2026-11-10')
     expect(status).toContain('conversations you may still start today: 3 of 3')
     expect(status).toContain('needs, highest first:')
   })

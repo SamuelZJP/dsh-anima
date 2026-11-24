@@ -7,19 +7,15 @@ import { personaText } from '../src/persona.ts'
 import { HER_WORLD, SESSION_RULES } from '../src/primer.ts'
 import { callAs, fakeAgent, provideSessions, registerEcho, setupCore, tempDataDir, textOf } from './helpers.ts'
 
-const localChat = {
-  kind: 'conversation' as const,
-  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'demo:owner:private:owner',
-}
-const say = { platform: 'demo', effect: 'express' as const, sessions: ['conversation' as const] }
-const self = { kind: 'self' as const }
+const waking = { kind: 'waking' as const, current: true }
+const say = { platform: 'demo', effect: 'express' as const, sessions: ['waking' as const] }
+const self = waking
 const T = new Date('2026-11-10T10:00').getTime()
 
 describe('body check on tools/pre-execute', () => {
   it('hides behaviors outside Anima sessions', async () => {
     const ctx = await setupCore()
-    provideSessions(ctx, { 'chat-1': localChat })
+    provideSessions(ctx, { 'chat-1': waking })
     registerEcho(ctx, 'demo_say', say)
     for (const [sessionId, visible] of [['plain', false], ['chat-1', true]] as const) {
       const agent = fakeAgent(sessionId)
@@ -31,7 +27,7 @@ describe('body check on tools/pre-execute', () => {
 
   it('has no limits of its own: without anything outside, she can say as much as she likes', async () => {
     const ctx = await setupCore()
-    provideSessions(ctx, { 'chat-1': localChat })
+    provideSessions(ctx, { 'chat-1': waking })
     registerEcho(ctx, 'demo_say', say)
     for (let i = 0; i < 40; i++) expect((await callAs(ctx, 'chat-1', 'demo_say')).isError).toBe(false)
   })
@@ -47,9 +43,9 @@ describe('body check on tools/pre-execute', () => {
     const ctx = await setupCore()
     const seen: unknown[] = []
     ctx.on('anima/record', record => { seen.push(record) })
-    provideSessions(ctx, { self })
+    provideSessions(ctx, { m: { kind: 'consolidation' } })
     registerEcho(ctx, 'demo_say', say)
-    await callAs(ctx, 'self', 'demo_say')
+    await callAs(ctx, 'm', 'demo_say')
     expect(seen).toEqual([expect.objectContaining({ type: 'gate', behavior: 'demo_say', decision: 'refused', code: 'anima/wrong-session', day: '2026-11-10' })])
   })
 })
@@ -75,7 +71,7 @@ describe('config and constitution', () => {
   it('fails loud on invalid config, and on safety keys that moved outside', () => {
     expect(() => animaCore.resolveConfig({ characterId: 'Bad Id' })).toThrow(/anima\/config-invalid/)
     expect(() => animaCore.resolveConfig({ quotas: [] } as never)).toThrow(/anima\/config-moved: quotas moved to the anima-guard row/)
-    expect(() => animaCore.resolveConfig({ modes: { day: { tokenBudget: 5 } } } as never)).toThrow(/anima\/config-moved: modes\.\*\.tokenBudget/)
+    expect(() => animaCore.resolveConfig({ modes: { day: { tokenBudget: 5 } } } as never)).toThrow(/anima\/config-removed: modes is gone/)
   })
 
   it('writes the default constitution once and keeps owner edits', async () => {
@@ -91,11 +87,11 @@ describe('config and constitution', () => {
   })
 
   it('builds the persona from constitution and session rules', () => {
-    const text = personaText('You are Rin.\n', 'conversation')
+    const text = personaText('You are Rin.\n', 'waking')
     expect(text.startsWith(`You are Rin.\n\n${HER_WORLD}\n\n## 此处\n`)).toBe(true)
     expect(text).toContain('你写下的普通文字不会到达任何人')
-    expect(text.trimEnd().endsWith(SESSION_RULES.conversation)).toBe(true)
-    expect(personaText('X', 'self')).toContain(SESSION_RULES.self)
+    expect(text.trimEnd().endsWith(SESSION_RULES.waking)).toBe(true)
+    expect(personaText('X', 'consolidation')).toContain(SESSION_RULES.consolidation)
   })
 })
 
@@ -104,7 +100,7 @@ describe('core service', () => {
     const dataDir = tempDataDir()
     const ctx = await setupCore({ dataDir })
     ctx.anima.setClock(() => T)
-    provideSessions(ctx, { 'chat-1': { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } })
+    provideSessions(ctx, { 'chat-1': waking })
     registerEcho(ctx, 'qq_say', { ...say, platform: 'qq' })
     const before = ctx.anima.selfState().needs.connect!
     await callAs(ctx, 'chat-1', 'qq_say')
@@ -114,7 +110,7 @@ describe('core service', () => {
 
   it('sets her alarms in the session she calls from, timed on her clock', async () => {
     const ctx = await setupCore({ clock: { speed: 60, start: '2026-11-10T10:00' } })
-    provideSessions(ctx, { self, 'other-self': self })
+    provideSessions(ctx, { self, 'other-self': waking })
     const tasks: { id: string; title: string; prompt: string; status: string; target: { kind: string; sessionId: string }; after: number }[] = []
     ctx.provide('schedule')
     ctx.set('schedule', {
@@ -150,7 +146,8 @@ describe('core service', () => {
     const ctx = await setupCore()
     ctx.anima.setClock(() => T)
     const lines = ctx.anima.statusLines().join('\n')
-    expect(lines).toContain('Clock: 2026-11-10 10:00 (real time); phase day, mode day')
+    expect(lines).toContain('Clock: 2026-11-10 10:00 (real time); day 2026-11-10')
+    expect(lines).toMatch(/Sleep: awake since 2026-11-10 10:00 \(start\); sleep pressure 0\.15/)
     expect(lines).toContain('needs, highest first:')
   })
 })

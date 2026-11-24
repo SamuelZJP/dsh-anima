@@ -38,12 +38,13 @@ export interface DaySummary {
    */
   readonly sleep: {
     readonly byHer: number
-    readonly atLatest: number
+    readonly overwhelmed: number
     readonly woken: number
+    readonly wakings: number
     readonly held: number
     readonly answered: number
     readonly released: number
-    readonly backstop: { readonly night: number; readonly paused: number }
+    readonly backstop: { readonly asleep: number; readonly paused: number }
   }
 }
 
@@ -122,13 +123,14 @@ export function summarize(day: string, records: readonly ActivityRecord[], ledge
     initiates: ledger.initiates,
     sleep: {
       byHer: records.filter(r => r.type === 'sleep' && r.by === 'her').length,
-      atLatest: records.filter(r => r.type === 'sleep' && r.by === 'latest').length,
-      woken: records.filter(r => r.type === 'woken').length,
+      overwhelmed: records.filter(r => r.type === 'sleep' && r.by === 'overwhelmed').length,
+      woken: records.filter(r => r.type === 'woke' && (r as SleepActivity).by === 'owner').length,
+      wakings: records.filter(r => r.type === 'waking-open').length,
       held: records.filter(r => r.type === 'inbox-held').length,
-      answered: records.filter(r => r.type === 'inbox-release' && r.reason === 'answer').reduce((n, r) => n + ((r as SleepActivity).count ?? 0), 0),
+      answered: records.filter(r => r.type === 'inbox-release' && r.reason === 'said').reduce((n, r) => n + ((r as SleepActivity).count ?? 0), 0),
       released: records.filter(r => r.type === 'inbox-release').reduce((n, r) => n + ((r as SleepActivity).count ?? 0), 0),
       backstop: {
-        night: gates.filter(r => r.decision === 'refused' && r.code === 'anima/night').length,
+        asleep: gates.filter(r => r.decision === 'refused' && r.code === 'anima/asleep').length,
         paused: gates.filter(r => r.decision === 'refused' && r.code === 'anima/paused' && r.session !== undefined).length,
       },
     },

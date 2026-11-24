@@ -30,7 +30,7 @@ export function PersonaTab() {
     <>
       <div className="anima-section">
         <h2>Self-model</h2>
-        <p className="anima-muted">What she has learned about herself with <code>self_note</code>. Conversations see a short digest; her Self session sees all of it. The constitution always wins.</p>
+        <p className="anima-muted">What she has learned about herself with <code>self_note</code>. Her waking sessions and sleep's consolidation see all of it.</p>
         <Problem error={model.error} />
         {model.data === undefined ? null : model.data.entries.length === 0 ? <p className="anima-muted">No notes yet.</p> : (
           <table className="anima-table">

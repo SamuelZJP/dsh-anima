@@ -15,10 +15,10 @@ export const EFFECT_CLASSES: readonly EffectClass[] = ['observe', 'internal', 'w
  * `group-triage` sorts buffered group chatter: ignore, remember, or wake (DESIGN §5);
  * `viewing` looks closely at frames of a video she chose and writes a note (DESIGN §11).
  */
-export type SessionKind = 'conversation' | 'self' | 'triage' | 'consolidation' | 'group-triage' | 'viewing'
+export type SessionKind = 'waking' | 'consolidation'
 
 /** All session kinds. */
-export const SESSION_KINDS: readonly SessionKind[] = ['conversation', 'self', 'triage', 'consolidation', 'group-triage', 'viewing']
+export const SESSION_KINDS: readonly SessionKind[] = ['waking', 'consolidation']
 
 /** A place she can talk, identified by `platform:account:kind:id` (DESIGN §3). */
 export interface ChannelRef {
@@ -43,12 +43,10 @@ export function channelKey(ref: ChannelRef): string {
 
 /** What Anima knows about a DSH session; `undefined` means it is not an Anima session. */
 export type SessionInfo =
-  | { readonly kind: 'self' }
-  | { readonly kind: 'triage' }
+  /** One of her waking sessions (docs/design/life.md); `current` while it is the one she is awake in or will wake in. */
+  | { readonly kind: 'waking'; readonly current: boolean }
+  /** A consolidation session of her sleep (docs/design/memory.md). */
   | { readonly kind: 'consolidation' }
-  | { readonly kind: 'group-triage' }
-  | { readonly kind: 'viewing' }
-  | { readonly kind: 'conversation'; readonly channel: ChannelRef; readonly channelKey: string }
 
 /** Behavior metadata read by the gate and tool scoping (DESIGN §6). */
 export interface BehaviorMeta {
@@ -69,12 +67,10 @@ export interface BehaviorMeta {
   readonly closes?: boolean | ((args: Readonly<Record<string, unknown>>) => boolean)
   /** Session kinds that may call it. */
   readonly sessions: readonly SessionKind[]
-  /** Heartbeat modes it works in; all when omitted. */
-  readonly modes?: readonly ('day' | 'night')[]
   /**
-   * The channel key the call targets, read from its arguments. Used for
-   * initiate consent and the allowlist, and as the counter of `per: channel`
-   * quotas when the calling session is not that channel's conversation.
+   * The channel key the call targets, read from its arguments. The body
+   * checks it exists; the outside reads it for consent, the allowlist and
+   * `per: channel` quotas.
    */
   readonly target?: (args: Readonly<Record<string, unknown>>) => string | undefined
   /**
@@ -83,8 +79,6 @@ export interface BehaviorMeta {
    * facts refuses the call with the error's message.
    */
   readonly facts?: (args: Readonly<Record<string, unknown>>) => Promise<Readonly<Record<string, number>>>
-  /** Only from the earliest bedtime on (`sleep`, Phase 9); refused before it with `anima/not-bedtime`. */
-  readonly bedtime?: boolean
 }
 
 /** Quota weight of one call (DESIGN §10). */
@@ -120,6 +114,7 @@ export function sayMessages(args: Readonly<Record<string, unknown>>): string[] {
  * it sends as the `messages` fact (owner `limits`, 5 by default).
  */
 export const SAY_PARAMETERS = {
+  channel: { type: 'string', required: true, description: 'Where to say it: the channel key shown on its arrivals, e.g. qq:1:private:2.' },
   text: { type: 'string', required: true, description: 'The message, exactly as it should appear.' },
   also: { type: 'array', items: { type: 'string' }, description: 'Optional further messages, sent one after another after text.' },
   more: { type: 'boolean', description: 'true keeps this turn open after sending (you want to do something else first). Omit it for a normal reply: the say ends your turn.' },
@@ -128,6 +123,7 @@ export const SAY_PARAMETERS = {
 /** Say metadata shared by every platform (see {@link SAY_PARAMETERS}). */
 export const SAY_META = {
   closes: (args: Readonly<Record<string, unknown>>) => args.more !== true,
+  target: (args: Readonly<Record<string, unknown>>) => typeof args.channel === 'string' ? args.channel.trim() : undefined,
   facts: async (args: Readonly<Record<string, unknown>>) => ({ messages: sayMessages(args).length }),
 } satisfies Partial<BehaviorMeta>
 

@@ -4,30 +4,26 @@ import { describe, expect, it } from 'vitest'
 import { ActivityLog, summarize } from '../src/index.ts'
 import { callAs, invoke, provideSessions, registerEcho, setupGuarded, tempDataDir } from './helpers.ts'
 
-const self = { kind: 'self' as const }
-const localChat = {
-  kind: 'conversation' as const,
-  channel: { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' },
-  channelKey: 'demo:owner:private:owner',
-}
+const self = { kind: 'waking' as const, current: true }
+const localChat = { kind: 'waking' as const, current: true }
 
 describe('owner surface and activity log', () => {
   it('records gate decisions with codes, keeps her records, and summarizes the day', async () => {
     const ctx = await setupGuarded({ quotas: [{ effect: 'express', per: 'channel', limit: 1, windowMinutes: 10 }] })
     provideSessions(ctx, { 'chat-1': localChat })
-    registerEcho(ctx, 'demo_say', { platform: 'demo', effect: 'express', sessions: ['conversation'] })
+    registerEcho(ctx, 'demo_say', { platform: 'demo', effect: 'express', sessions: ['waking'] })
     await callAs(ctx, 'chat-1', 'demo_say')
     await callAs(ctx, 'chat-1', 'demo_say')
     // What the persona reports reaches the log through anima/record.
-    ctx.anima.recordActivity({ type: 'wake', stimulus: 'message', session: 'conversation', sessionId: 'chat-1' })
+    ctx.anima.recordActivity({ type: 'wake', stimulus: 'message', session: 'waking', sessionId: 'chat-1' })
     const day = ctx.anima.dayKey()
     const gates = ctx.animaGuard.activity.read(day).filter(r => r.type === 'gate')
     expect(gates).toEqual([
-      expect.objectContaining({ behavior: 'demo_say', decision: 'allowed', session: 'conversation', sessionId: 'chat-1' }),
+      expect.objectContaining({ behavior: 'demo_say', decision: 'allowed', session: 'waking', sessionId: 'chat-1' }),
       expect.objectContaining({ behavior: 'demo_say', decision: 'refused', code: 'anima/over-quota' }),
     ])
     const summary = ctx.animaGuard.daySummary(day)
-    expect(summary).toMatchObject({ calls: { allowed: 1, refused: 1 }, refusals: [{ code: 'anima/over-quota', count: 1 }], wakes: { total: 1, bySession: { conversation: 1 } } })
+    expect(summary).toMatchObject({ calls: { allowed: 1, refused: 1 }, refusals: [{ code: 'anima/over-quota', count: 1 }], wakes: { total: 1, bySession: { waking: 1 } } })
     const view = await ctx.animaGuard.ownerView('activity', {}) as { day: string; days: string[]; records: unknown[] }
     expect(view.days).toEqual([day])
     expect(view.records).toHaveLength(3)
@@ -59,7 +55,7 @@ describe('owner surface and activity log', () => {
       actions: { ping: () => ({ pong: true }) },
     })
     const status = await ctx.animaGuard.ownerView('status') as Record<string, unknown>
-    expect(status).toMatchObject({ paused: false, clock: { day: '2026-11-10', mode: 'day' }, budgets: { initiates: { used: 0, perDay: 3 } }, parts: { life: { nextHeartbeat: '2026-11-10 11:00' } } })
+    expect(status).toMatchObject({ paused: false, clock: { day: '2026-11-10' }, budgets: { initiates: { used: 0, perDay: 3 } }, parts: { life: { nextHeartbeat: '2026-11-10 11:00' } } })
     expect(await ctx.animaGuard.ownerView('platforms')).toEqual([{ platform: 'qq', title: 'QQ', view: { health: 'ok', summary: 'connected', details: { account: '1' } } }])
     expect(await ctx.animaGuard.ownerAction('qq.ping', {}, 'page')).toEqual({ pong: true })
     expect(ctx.animaGuard.ownerNames().actions).toContain('qq.ping')

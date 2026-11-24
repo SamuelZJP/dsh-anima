@@ -4,20 +4,21 @@ import { DEFAULT_QUOTAS } from '../src/config.ts'
 import { decide, GuardCode, QuotaBook } from '../src/gate.ts'
 import type { GateCall, GateMoment, Policy } from '../src/gate.ts'
 
-const local = { platform: 'demo', account: 'owner', kind: 'private', id: 'owner' }
-const qq = { platform: 'qq', account: '1', kind: 'private', id: '2' }
-const localChat: SessionInfo = { kind: 'conversation', channel: local, channelKey: 'demo:owner:private:owner' }
-const qqChat: SessionInfo = { kind: 'conversation', channel: qq, channelKey: 'qq:1:private:2' }
-const self: SessionInfo = { kind: 'self' }
+/** A chat, by its channel key: the call comes from her waking session with `channel` set to it. */
+const localChat = 'demo:owner:private:owner'
+const qqChat = 'qq:1:private:2'
+const self: SessionInfo = { kind: 'waking', current: true }
+const target = (args: Readonly<Record<string, unknown>>) => args.channel as string | undefined
 
-const say: BehaviorMeta = { platform: 'demo', effect: 'express', sessions: ['conversation'] }
-const remember: BehaviorMeta = { effect: 'internal', sessions: ['conversation', 'self'] }
+const say: BehaviorMeta = { platform: 'demo', effect: 'express', sessions: ['waking'], target }
+const remember: BehaviorMeta = { effect: 'internal', sessions: ['waking'] }
 
 const openPolicy: Policy = { quotas: [], allow: [] }
 const T0 = Date.UTC(2026, 10, 9, 12)
 
-function call(name: string, meta: BehaviorMeta, session: SessionInfo | undefined, now = T0): GateCall {
-  return { name, meta, session, now }
+function call(name: string, meta: BehaviorMeta, where: SessionInfo | string | undefined, now = T0): GateCall {
+  if (typeof where === 'string') return { name, meta, session: self, now, args: { channel: where } }
+  return { name, meta, session: where, now }
 }
 
 describe('decide', () => {
@@ -26,15 +27,15 @@ describe('decide', () => {
     expect(decide(call('demo_say', say, localChat), openPolicy, book)).toEqual({ allowed: true })
   })
   it('refuses public without an owner rule, and allows it with one', () => {
-    const post: BehaviorMeta = { effect: 'public', sessions: ['self'] }
+    const post: BehaviorMeta = { effect: 'public', sessions: ['waking'] }
     expect(decide(call('core_post', post, self), openPolicy, book)).toMatchObject({ allowed: false, code: GuardCode.needsApproval })
     expect(decide(call('core_post', post, self), { quotas: [], allow: [{ behavior: 'core_post' }] }, book)).toEqual({ allowed: true })
   })
   it('refuses irreversible without a rule', () => {
-    expect(decide(call('core_delete', { effect: 'irreversible', sessions: ['self'] }, self), openPolicy, book)).toMatchObject({ allowed: false, code: GuardCode.needsApproval })
+    expect(decide(call('core_delete', { effect: 'irreversible', sessions: ['waking'] }, self), openPolicy, book)).toMatchObject({ allowed: false, code: GuardCode.needsApproval })
   })
   it('says a refusal comes from outside', () => {
-    const verdict = decide(call('core_delete', { effect: 'irreversible', sessions: ['self'] }, self), openPolicy, book)
+    const verdict = decide(call('core_delete', { effect: 'irreversible', sessions: ['waking'] }, self), openPolicy, book)
     if (!verdict.allowed) expect(verdict.hint.startsWith('（外面拦住了你，不是你自己的身体）')).toBe(true)
   })
 })
@@ -57,7 +58,7 @@ describe('quotas', () => {
 
   it('keeps one counter per channel', () => {
     const book = new QuotaBook()
-    const other: SessionInfo = { kind: 'conversation', channel: { ...local, id: 'friend' }, channelKey: 'demo:owner:private:friend' }
+    const other = 'demo:owner:private:friend'
     for (let i = 0; i < 2; i++) book.record(call('demo_say', say, localChat), policy.quotas)
     expect(decide(call('demo_say', say, localChat), policy, book).allowed).toBe(false)
     expect(decide(call('demo_say', say, other), policy, book).allowed).toBe(true)
@@ -81,8 +82,8 @@ describe('quotas', () => {
 
   it('gives qq_poke and qq_react their own per-channel keys by default', () => {
     const book = new QuotaBook()
-    const poke: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['conversation'] }
-    const at = (name: string, n: number): GateCall => ({ name, meta: poke, session: qqChat, now: T0 + n })
+    const poke: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['waking'], target }
+    const at = (name: string, n: number): GateCall => ({ name, meta: poke, session: self, now: T0 + n, args: { channel: qqChat } })
     for (let i = 0; i < 3; i++) {
       expect(decide(at('qq_poke', i), { quotas: DEFAULT_QUOTAS, allow: [] }, book).allowed).toBe(true)
       book.record(at('qq_poke', i), DEFAULT_QUOTAS)
@@ -98,7 +99,7 @@ describe('quotas', () => {
 
 describe('conversations she starts', () => {
   const policy: Policy = { quotas: [], allow: [], initiatePerDay: 3 }
-  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
+  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['waking'], target: args => args.channel as string }
   const day: GateMoment = { overBudget: false, initiatesUsed: 0, mayInitiate: key => key === 'demo:owner:private:owner' }
   const book = new QuotaBook()
   const to = (channel: string): GateCall => ({ ...call('open_conversation', openConversation, self), args: { channel } })
@@ -124,7 +125,7 @@ describe('conversations she starts', () => {
 
 describe('approve rules', () => {
   const book = new QuotaBook()
-  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['self'], target: args => args.channel as string }
+  const openConversation: BehaviorMeta = { effect: 'initiate', sessions: ['waking'], target: args => args.channel as string }
   const owner = 'qq:1:private:2'
   const friend = 'qq:1:private:3'
   const moment: GateMoment = { overBudget: false, initiatesUsed: 0, mayInitiate: () => true, ownerLine: true, ownerChannel: key => key === owner }

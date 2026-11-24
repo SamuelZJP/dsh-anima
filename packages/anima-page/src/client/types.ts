@@ -7,9 +7,9 @@
 export interface StatusView {
   character: { id: string; name: string; dataDir: string }
   paused: boolean
-  /** Awake or asleep and since when (Phase 9); absent from an older core. */
-  sleep?: { earliest: number; latest: number; asleep: boolean; since?: number; by?: 'her' | 'latest'; wokenAt?: number; wokenUntil?: number }
-  clock: { now: number; text: string; speed: number; phase: string; mode: 'day' | 'night'; day: string }
+  /** Awake or asleep, since when and why, and her sleep pressure. */
+  sleep?: { asleep: boolean; since: number; by: string; note?: string; pressure: number }
+  clock: { now: number; text: string; speed: number; day: string }
   energy: number
   mood: { valence: number; arousal: number }
   needs: { name: string; description: string; value: number }[]
@@ -29,13 +29,14 @@ export interface StatusView {
 export interface LifePart {
   nextHeartbeat: string | null
   lastHeartbeat: string | null
-  selfActing: boolean
-  counts: { heartbeats: number; acts: number; rests: number; intents: number }
-  intents: { id: string; display: string }[]
-  outboxHeld: number
-  /** Her inbox per channel (Phase 9). */
+  counts: { heartbeats: number; wakings: number; sleeps: number }
+  outboxHeld?: number
+  /** Her inbox per channel. */
   inbox?: { key: string; display: string; count: number; first: number; last: number }[]
-  sessions: { self: string; triage: string; conversations: { sessionId: string; display: string; channelKey: string }[] }
+  /** Unread lines per group. */
+  groupsUnread?: Record<string, number>
+  /** Her waking session, and ended ones. */
+  sessions: { waking: string | null; opened: boolean; pendingArchive: string[]; past: string[] }
 }
 
 export interface PlatformEntry {
@@ -62,7 +63,7 @@ export interface MemoryView {
 
 export interface Goal { id: string; text: string; owner: string; status: string; due?: number; notes: { at: number; text: string }[] }
 export interface ApprovalsView { ownerLine: string | null; pending: { id: string; summary: string }[] }
-export interface OutboxView { delaySeconds: number; held: { id: string; display: string; channelKey: string; intentId: string; text: string; sendsAt: number }[] }
+export interface OutboxView { delaySeconds: number; held: { id: string; display: string; channelKey: string; text: string; sendsAt: number }[] }
 
 export type ActivityRecord =
   | { type: 'gate'; at: number; real: number; behavior: string; session?: string; sessionId?: string; decision: 'allowed' | 'refused' | 'approved' | 'denied'; code?: string; hint?: string }

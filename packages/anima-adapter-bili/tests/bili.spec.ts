@@ -10,7 +10,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
-import { AnimaLife, conversationSessionId, type ExtraBlock, type SessionHost } from '@anima/life'
+import { AnimaLife, type ExtraBlock, type SessionHost } from '@anima/life'
 import * as animaMemory from '@anima/memory'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as bili from '../src/index.ts'
@@ -33,6 +33,8 @@ class FakeHost implements SessionHost<FakeAgent> {
   async resolve(id: string) { return this.sessions.get(id) }
   async create(id: string) { this.sessions.set(id, { id, inbox: [] }); return id }
   isArchived() { return false }
+  async archive() { return 'archived' as const }
+  async moveAlarms() { return 0 }
   rename() {}
   async deliver(agent: FakeAgent, text: string, _s: string, _t: string, _r?: string, extra: readonly ExtraBlock[] = []) {
     agent.inbox.push({ text, extra })
@@ -40,7 +42,6 @@ class FakeHost implements SessionHost<FakeAgent> {
   }
   async inject() {}
   selectModel() {}
-  isBusy() { return false }
 }
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
@@ -77,7 +78,7 @@ async function setup(options: { core?: Record<string, unknown>; bili?: Record<st
   onTestFinished(() => ctx.fiber.dispose())
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
+  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
   const host = new FakeHost()
   await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
   await ctx.plugin(animaMemory, {})
@@ -89,7 +90,8 @@ async function setup(options: { core?: Record<string, unknown>; bili?: Record<st
     config: { minGapMs: 0, closeView: { enabled: hasFfmpeg, framesPerView: 4, fallbackEverySeconds: 5, frameWidth: 160 }, ...options.bili },
     client: { origins: { api: 'http://api.test', passport: 'http://passport.test', www: 'http://www.test' }, fetch: api.fetch },
   })
-  return { ctx, host, api, saved, fiber, dataDir, self: ctx.animaLife.router.selfId }
+  await new Promise(resolve => setTimeout(resolve, 5))
+  return { ctx, host, api, saved, fiber, dataDir, self: ctx.animaLife.waking.current! }
 }
 
 let n = 0
@@ -107,13 +109,12 @@ async function call(ctx: Context, sessionId: string, name: string, args: Record<
 }
 
 describe('Bilibili adapter', () => {
-  it('offers its observe behaviors to Self only, by day, and never to a conversation', async () => {
+  it('offers its observe behaviors in her waking session, and never in a plain DSH session', async () => {
     const { ctx, self } = await setup()
     const popular = await call(ctx, self, 'bili_popular')
     expect(popular.visible).toEqual(expect.arrayContaining(['bili_feed', 'bili_popular', 'bili_search', 'bili_watch', 'bili_comments']))
     expect(popular.text).toBe(`${SHORT} «猫弹琴» — Mao · 0:20, 1.2万 views, 600 likes, 3 danmaku — a cat plays`)
-    ctx.animaLife.publish([{ platform: 'demo', account: 'owner', kind: 'private', id: 'owner', display: 'Owner (demo)', isOwner: true }])
-    const inChat = await call(ctx, conversationSessionId('anima', 'demo:owner:private:owner'), 'bili_popular')
+    const inChat = await call(ctx, 'plain-dsh-session', 'bili_popular')
     expect(inChat.isError).toBe(true)
     expect(inChat.visible.filter((name: string) => name.startsWith('bili_'))).toEqual([])
   })
@@ -157,26 +158,32 @@ describe('Bilibili adapter', () => {
     expect(api.seen).not.toContain('/x/player/wbi/playurl')
   })
 
-  it.skipIf(!hasFfmpeg)('views closely: frames with subtitles go to a viewing session; only the note comes back; files are deleted', async () => {
+  it.skipIf(!hasFfmpeg)('views closely: frames with subtitles go to a subagent; only the note comes back; files are deleted', async () => {
     const work = temp()
     const video = join(work, 'v.mp4')
     execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=320x180:rate=10:duration=12', '-f', 'lavfi', '-i', 'smptebars=size=320x180:rate=10:duration=8', '-filter_complex', '[0][1]concat=n=2:v=1', '-pix_fmt', 'yuv420p', video])
-    const { ctx, self, host, saved, dataDir } = await setup({ video })
-    let delivered: FakeAgent | undefined
-    host.onDeliver = (agent) => {
-      if (!agent.id.startsWith('anima-v-')) return
-      delivered = agent
-      void call(ctx, agent.id, 'viewing_note', { note: 'Test patterns, then colour bars; the cat never shows up.' })
-    }
+    const { ctx, self, saved, dataDir } = await setup({ video })
+    const started: { request: { parent: { id: string }; agentPreset: string; prompt: { type: string; text?: string }[] } }[] = []
+    ctx.provide('subagents' as never)
+    ctx.set('subagents' as never, {
+      startActivation: async (spec: never) => {
+        started.push(spec)
+        return { result: Promise.resolve({ output: [{ type: 'text', text: 'Test patterns, then colour bars; the cat never shows up.' }], stopReason: 'completed' }), dispose: async () => {} }
+      },
+    } as never)
     const result = await call(ctx, self, 'bili_view_closely', { bvid: SHORT, focus: 'is there a cat' })
     expect(result.text).toBe('Your viewing note on BV1xx411c7mD «猫弹琴»:\nTest patterns, then colour bars; the cat never shows up.')
-    const message = delivered!.inbox[0]!
-    expect(message.text).toContain('What you wanted to look at: is there a cat')
-    expect(message.text).toContain('Subtitles: AI 中文（自动生成）')
-    const captions = message.extra.filter(block => block.type === 'text').map(block => (block as { text: string }).text)
+    const { request } = started[0]!
+    expect(request.parent.id).toBe(self)
+    expect(request.agentPreset).toBe('anima-viewing')
+    const [first, ...parts] = request.prompt
+    expect(first!.text).toContain('What you wanted to look at: is there a cat')
+    expect(first!.text).toContain('Subtitles: AI 中文（自动生成）')
+    expect(first!.text).toContain('write your viewing note in your own voice')
+    const captions = parts.filter(block => block.type === 'text').map(block => block.text!)
     expect(captions[0]).toBe('Frame 1 of 4, at 0:00 — said: "大家好"')
     expect(captions.some(text => /at 0:12 — said: "换一个画面"/.test(text))).toBe(true)
-    expect(message.extra.filter(block => block.type === 'image')).toHaveLength(4)
+    expect(parts.filter(block => block.type === 'image')).toHaveLength(4)
     expect(saved).toHaveLength(4)
     expect(readdirSync(join(dataDir, 'bili', 'cache'))).toEqual([])
     expect(ctx.animaMemory.store.recall('colour bars', ['public']).map(m => m.scope)).toEqual(['public'])
@@ -199,7 +206,7 @@ describe('Bilibili adapter', () => {
     }
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+    await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
     await ctx.plugin(AnimaLife, { host: new FakeHost() as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     let polls = 0
     let loggedIn = false

@@ -1,10 +1,10 @@
 /**
- * Self state (DESIGN §7): needs, energy and mood. Code moves these numbers only
+ * Self state (docs/design/body.md): needs, energy, mood and sleep pressure. Code moves these numbers only
  * by time and by declared behavior effects; it never reads message words. Pure.
  * @module @anima/core/state
  */
 
-import { modeAt, type Rhythm } from './rhythm.ts'
+import { INITIAL_PRESSURE, movePressure, type SleepGenes } from './sleep.ts'
 
 /** One need, defined in config. */
 export interface NeedSpec {
@@ -45,9 +45,9 @@ export interface StateModel {
   readonly needs: readonly NeedSpec[]
   readonly energy: EnergyConfig
   readonly mood: MoodConfig
-  readonly rhythm: Rhythm
-  /** Whether she slept at a time, from when she actually went to sleep (Phase 9); the plain rhythm when omitted. */
-  readonly asleep?: ((t: number) => boolean) | undefined
+  readonly sleep: SleepGenes
+  /** Whether she is asleep now: her phase changes only when she falls asleep or wakes, never inside {@link advance}. */
+  readonly asleep: () => boolean
 }
 
 /** Her current numbers. */
@@ -55,6 +55,8 @@ export interface SelfState {
   needs: Record<string, number>
   energy: number
   mood: { valence: number; arousal: number }
+  /** Sleep pressure, 0–1 (docs/design/body.md). */
+  sleepPressure: number
   /** Simulated time these numbers describe. */
   updatedAt: number
 }
@@ -81,43 +83,37 @@ export function initialState(model: StateModel, now: number): SelfState {
     needs: Object.fromEntries(model.needs.map(need => [need.name, need.baseline])),
     energy: 1,
     mood: { valence: model.mood.valence, arousal: model.mood.arousal },
+    sleepPressure: INITIAL_PRESSURE,
     updatedAt: now,
   }
 }
 
 /**
- * Move the state forward in time, in steps of at most five minutes: needs drift
- * and energy drains while awake; at night energy restores; at wake the `rest`
- * need resets to its baseline; mood decays toward baseline throughout.
+ * Move the state forward in time, in steps of at most five minutes, in her
+ * current phase: awake, needs drift, energy drains and sleep pressure rises;
+ * asleep, energy restores and sleep pressure falls; mood decays toward its
+ * baseline throughout.
  * @param state - state at `state.updatedAt`.
  * @param to - target time; earlier times leave the state unchanged.
  * @param model - state model.
  * @returns a new state at `to`.
  */
 export function advance(state: SelfState, to: number, model: StateModel): SelfState {
-  const next: SelfState = { needs: { ...state.needs }, energy: state.energy, mood: { ...state.mood }, updatedAt: state.updatedAt }
+  const next: SelfState = { needs: { ...state.needs }, energy: state.energy, mood: { ...state.mood }, sleepPressure: state.sleepPressure ?? INITIAL_PRESSURE, updatedAt: state.updatedAt }
   for (const need of model.needs) next.needs[need.name] ??= need.baseline
   for (const name of Object.keys(next.needs)) if (!model.needs.some(need => need.name === name)) delete next.needs[name]
-  const sleeping = model.asleep ?? ((at: number) => modeAt(at, model.rhythm) === 'night')
+  const asleep = model.asleep()
   let t = state.updatedAt
-  let asleep = sleeping(t)
   while (t < to) {
     const step = Math.min(STEP_MS, to - t)
     const hours = step / 3_600_000
-    const mid = t + step / 2
-    if (sleeping(mid)) {
+    if (asleep) {
       next.energy = clamp(next.energy + model.energy.restorePerHour * hours)
-      asleep = true
     } else {
-      if (asleep) {
-        // Woke up: a night's sleep satisfies `rest`.
-        const rest = model.needs.find(need => need.name === 'rest')
-        if (rest !== undefined) next.needs.rest = rest.baseline
-        asleep = false
-      }
       for (const need of model.needs) next.needs[need.name] = clamp(next.needs[need.name]! + need.driftPerHour * hours)
       next.energy = clamp(next.energy - model.energy.drainPerHour * hours)
     }
+    next.sleepPressure = movePressure(next.sleepPressure, hours, asleep, model.sleep)
     const decay = model.mood.halfLifeHours > 0 ? 0.5 ** (hours / model.mood.halfLifeHours) : 0
     next.mood.valence = model.mood.valence + (next.mood.valence - model.mood.valence) * decay
     next.mood.arousal = model.mood.arousal + (next.mood.arousal - model.mood.arousal) * decay
@@ -125,6 +121,12 @@ export function advance(state: SelfState, to: number, model: StateModel): SelfSt
   }
   next.updatedAt = Math.max(state.updatedAt, to)
   return next
+}
+
+/** She woke: sleep satisfied her `rest` need. */
+export function wokeUp(state: SelfState, model: StateModel): SelfState {
+  const rest = model.needs.find(need => need.name === 'rest')
+  return rest === undefined ? state : { ...state, needs: { ...state.needs, rest: rest.baseline } }
 }
 
 /**

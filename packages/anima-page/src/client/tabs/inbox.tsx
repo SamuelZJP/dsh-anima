@@ -46,7 +46,7 @@ export function InboxTab() {
           <table className="anima-table">
             <thead><tr><th>Id</th><th>To</th><th>Message</th><th>Sends in</th><th /></tr></thead>
             <tbody>{outbox.data!.held.map(m => (
-              <tr key={m.id}><td>{m.id}</td><td>{m.display}<div className="anima-muted">intent {m.intentId}</div></td><td>{m.text}</td>
+              <tr key={m.id}><td>{m.id}</td><td>{m.display}<div className="anima-muted">she speaks first</div></td><td>{m.text}</td>
                 <td>{Math.max(0, Math.round((m.sendsAt - Date.now()) / 1000))} s</td>
                 <td><button type="button" className="anima-btn small danger" disabled={cancel.busy} onClick={() => { void cancel.run<{ cancelled: boolean }>('outbox.cancel', { id: m.id }, v => v.cancelled ? `Cancelled ${m.id}; it will not be sent.` : `${m.id} already went out.`) }}>Cancel</button></td></tr>
             ))}</tbody>

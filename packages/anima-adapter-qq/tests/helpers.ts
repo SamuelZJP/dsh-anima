@@ -10,7 +10,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import Tools from '@deepseek-ai/dsh-tools'
 import { executeToolFixture } from '@deepseek-ai/dsh-tool-testkit'
 import * as animaCore from '@anima/core'
-import { AnimaLife, conversationSessionId, type SessionHost } from '@anima/life'
+import { AnimaLife, type SessionHost } from '@anima/life'
 import { expect, onTestFinished, vi } from 'vitest'
 import * as qq from '../src/index.ts'
 import { FakeBackend, type Ability } from './fake-backend.ts'
@@ -22,9 +22,16 @@ export const GROUP = '40004'
 export const ownerKey = `qq:${ACCOUNT}:private:${OWNER}`
 export const friendKey = `qq:${ACCOUNT}:private:${FRIEND}`
 export const groupKey = `qq:${ACCOUNT}:group:${GROUP}`
-export const ownerSession = conversationSessionId('anima', ownerKey)
-export const friendSession = conversationSessionId('anima', friendKey)
-export const groupSession = conversationSessionId('anima', groupKey)
+/**
+ * Her chats, as tests address them: `callAs(ctx, ownerSession, 'qq_say', …)` calls
+ * from her waking session with `channel` set to that chat, and `host.inbox(ownerSession)`
+ * lists the arrivals of that chat (each names its channel key).
+ */
+export const ownerSession = ownerKey
+export const friendSession = friendKey
+export const groupSession = groupKey
+/** A session that is not hers. */
+export const plainSession = 'plain-dsh-session'
 
 interface FakeAgent { id: string; inbox: string[] }
 
@@ -33,12 +40,18 @@ export class FakeHost implements SessionHost<FakeAgent> {
   async resolve(id: string) { return this.sessions.get(id) }
   async create(id: string) { this.sessions.set(id, { id, inbox: [] }); return id }
   isArchived() { return false }
+  async archive() { return 'archived' as const }
+  async moveAlarms() { return 0 }
   rename() {}
   async deliver(agent: FakeAgent, text: string) { agent.inbox.push(text) }
   async inject(agent: FakeAgent, text: string) { agent.inbox.push(`(inject) ${text}`) }
   selectModel() {}
-  isBusy() { return false }
-  inbox(id: string) { return this.sessions.get(id)?.inbox ?? [] }
+  /** Arrivals in her waking session(s) from one chat, by its channel key. */
+  inbox(key: string) { return [...this.sessions.values()].flatMap(agent => agent.inbox).filter(text => text.includes(` ${key}]`) && !text.includes('[醒来]')) }
+  /** Every chat arrival (no waking context, no platform notices). */
+  all() { return [...this.sessions.values()].flatMap(agent => agent.inbox).filter(text => !text.includes('[醒来]') && !text.includes('[通知]')) }
+  /** Platform notices she got. */
+  notices() { return [...this.sessions.values()].flatMap(agent => agent.inbox).filter(text => text.includes('[通知]')) }
 }
 
 export interface SetupOptions {
@@ -75,9 +88,9 @@ export async function setup(options: SetupOptions = {}) {
   } })
   ctx.provide('llm')
   ctx.set('llm', { resolveModelInfo: async (_provider: string, model: string) => ({ inputModalities: model === 'blind' ? ['text'] : ['text', 'image'] }) })
-  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
+  await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' }, ...options.core })
   const host = new FakeHost()
-  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, groupTriage: { windowSeconds: 0.05 }, platforms: { noticeAfterSeconds: 0 }, ...options.life } })
+  await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 }, platforms: { noticeAfterSeconds: 0 }, ...options.life } })
   const config = qq.resolveQqConfig({ backend: { url: 'ws://fake' }, account: ACCOUNT, owner: OWNER, ownerName: 'Sam', ...options.qq })
   const fiber = await ctx.plugin({ name: 'anima-adapter-qq', inject: qq.inject, apply: (child: Context) => qq.attach(child, config, backend) })
   if (options.ready !== false) {
@@ -90,9 +103,18 @@ export async function setup(options: SetupOptions = {}) {
   return { ctx, host, backend, fiber, dataDir, saved, recorded }
 }
 
+const CHAT_TOOLS = new Set(['qq_say', 'qq_history', 'qq_poke'])
+
 let calls = 0
-/** Call a tool as a session, on a model that can see unless `model` is 'blind'. */
+/**
+ * Call a tool as a session, on a model that can see unless `model` is 'blind'. A
+ * chat's channel key as `sessionId` means her waking session, in that chat.
+ */
 export async function callAs(ctx: Context, sessionId: string, name: string, args: Record<string, unknown> = {}, model = 'vision') {
+  if (sessionId.startsWith('qq:')) {
+    if (CHAT_TOOLS.has(name) && args.channel === undefined) args = { channel: sessionId, ...args }
+    sessionId = ctx.animaLife.waking.current!
+  }
   const agent = { id: sessionId, session: { requestHeader: () => ({ config: { provider: 't', model } }) } } as unknown as Agent
   const signal = new AbortController().signal
   const toolSet = await ctx.tools.resolve({ agent, modelSelection: { provider: 't', model }, signal })

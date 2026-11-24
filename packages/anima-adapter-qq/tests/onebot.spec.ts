@@ -204,7 +204,7 @@ describe('the adapter over OneBot v11, end to end', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
+    await ctx.plugin(animaCore, { dataDir, clock: { speed: 1, start: '2026-11-10T10:00' } })
     const host = new FakeHost()
     await ctx.plugin(AnimaLife, { host: host as unknown as SessionHost<Agent>, config: { conversation: { settleSeconds: 0 } } })
     const fiber = await ctx.plugin(qq, { backend: { url, accessToken: 'tok', callTimeoutSeconds: 2, reconnect: { maxSeconds: 1 } }, account: ACCOUNT, owner: OWNER, ownerName: 'Sam' })

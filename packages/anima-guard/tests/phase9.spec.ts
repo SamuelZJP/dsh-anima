@@ -4,9 +4,9 @@ import { decide, GuardCode, QuotaBook, summarize } from '../src/index.ts'
 import { invoke, setupGuarded } from './helpers.ts'
 
 describe('refusals from outside, in her language', () => {
-  const chat = { kind: 'conversation', channel: { platform: 'qq', account: '1', kind: 'private', id: '2' }, channelKey: 'qq:1:private:2' } as const
-  const say: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['conversation'] }
-  const call = (name: string, meta: BehaviorMeta) => ({ name, meta, session: chat, now: 0, args: {} })
+  const chat = { kind: 'waking', current: true } as const
+  const say: BehaviorMeta = { platform: 'qq', effect: 'express', sessions: ['waking'], target: args => args.channel as string }
+  const call = (name: string, meta: BehaviorMeta) => ({ name, meta, session: chat, now: 0, args: { channel: 'qq:1:private:2' } })
 
   it('says a spent chat quota as an owner rule, from outside, with the code in front', () => {
     const book = new QuotaBook()
@@ -28,27 +28,33 @@ describe('refusals from outside, in her language', () => {
   })
 })
 
-describe('day summary (Phase 9)', () => {
-  it('counts sleeps, wakes, inbox holds and releases, and backstop refusals', () => {
+describe('day summary', () => {
+  it('counts sleeps, wakes, wakings, inbox holds and releases, and backstop refusals', () => {
     const base = { at: 0, real: 0 }
     const records: ActivityRecord[] = [
       { ...base, type: 'sleep', by: 'her' },
-      { ...base, type: 'woken', until: 1 },
-      { ...base, type: 'sleep', by: 'latest' },
+      { ...base, type: 'waking-open', sessionId: 'w2' },
+      { ...base, type: 'woke', by: 'owner' },
+      { ...base, type: 'sleep', by: 'overwhelmed' },
+      { ...base, type: 'waking-open', sessionId: 'w3' },
+      { ...base, type: 'woke', by: 'rested' },
       { ...base, type: 'inbox-held', channel: 'c', reason: 'asleep' },
       { ...base, type: 'inbox-held', channel: 'c', reason: 'asleep' },
-      { ...base, type: 'inbox-release', channel: 'c', reason: 'answer', count: 2 },
-      { ...base, type: 'gate', behavior: 'qq_say', decision: 'refused', code: 'anima/paused', session: 'conversation' },
+      { ...base, type: 'inbox-release', channel: 'c', reason: 'said', count: 2 },
+      { ...base, type: 'gate', behavior: 'qq_say', decision: 'refused', code: 'anima/paused', session: 'waking' },
+      { ...base, type: 'gate', behavior: 'qq_say', decision: 'refused', code: 'anima/asleep', session: 'waking' },
     ]
-    expect(summarize('d', records, { tokens: { day: 0, night: 0 }, initiates: 0, nightWakes: 0 }).sleep).toEqual({ byHer: 1, atLatest: 1, woken: 1, held: 2, answered: 2, released: 2, backstop: { night: 0, paused: 1 } })
+    expect(summarize('d', records, { tokens: { day: 0, night: 0 }, initiates: 0, nightWakes: 0 }).sleep).toEqual({ byHer: 1, overwhelmed: 1, woken: 1, wakings: 2, held: 2, answered: 2, released: 2, backstop: { asleep: 1, paused: 1 } })
   })
 })
 
 describe('wake from outside', () => {
-  it('logs a deliberate wake as an owner action', async () => {
-    const ctx = await setupGuarded({}, { clock: { speed: 1, start: '2026-11-11T02:00' } })
-    expect((await invoke(ctx, 'wake')).text).toMatch(/^She is awake now, until she sleeps again or 2026-11-11 02:30\./)
+  it('wakes her from outside and logs it as an owner action', async () => {
+    const ctx = await setupGuarded({}, { clock: { speed: 1, start: '2026-11-11T02:00' }, sleep: { risePerHour: 0.05, fallPerHour: 0.1, fallAsleepAbove: 0.12, overwhelmAbove: 0.95, wakeBelow: 0.01 } })
     expect((await invoke(ctx, 'wake')).text).toBe('She is not asleep.')
-    expect(ctx.animaGuard.daySummary('2026-11-10').sleep).toMatchObject({ woken: 1 })
+    expect(ctx.anima.goToBed()).toBe(true)
+    expect((await invoke(ctx, 'wake')).text).toMatch(/^She is awake now/)
+    expect(ctx.anima.asleep()).toBe(false)
+    expect(ctx.animaGuard.daySummary('2026-11-11').sleep).toMatchObject({ woken: 1 })
   })
 })

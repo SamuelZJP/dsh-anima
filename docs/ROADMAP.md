@@ -2,17 +2,6 @@
 
 One phase at a time. A phase is done when its exit check passes and is demonstrated in a DSH dev profile. Sped-up exit demos run on the fake demo platform (`scripts/demo/demo-platform.mjs`, development only); QQ is her only real channel. Each phase starts with a plan: what changes, which files, how it is verified. Finished phases are in git and `history/`.
 
-## R3 — QQ backend
-
-NapCat is gone; her QQ backend is now NotRainMeow (OneBot v11, on another machine, reached through the owner's SSH tunnel). The adapter's protocol calls move behind one `QqBackend` interface, so a later backend is one new implementation.
-- `QqBackend`, in QQ terms: connect and health, normalized events (message, @, reply, poke, recall, friend request, typing), friend and group lists, send segments, history, image bytes, forwarded messages, poke, react, and which of these it supports.
-- One implementation, OneBot v11 (the current code, moved). A runtime's dialect differences stay inside it.
-- Behaviors, channels, placeholders and media ids sit above the interface; a behavior the backend cannot do is not registered.
-
-**Exit:**
-- The QQ tests pass against a fake backend.
-- A short supervised check on NotRainMeow, with the owner's go-ahead: receive, send, history, an image.
-
 ## R4 — Waking sessions, sleep and the heartbeat
 
 One DSH session per period of wakefulness, and sleep as physiology.

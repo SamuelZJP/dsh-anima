@@ -1,15 +1,13 @@
 /**
- * Her inbox (DESIGN §5, "Bursts and the inbox", Phase 9): chat messages that
- * arrived while she was asleep or paused, held per channel in
- * `<dataDir>/inbox.json` so they survive a restart. Nothing expires on a timer;
- * a channel's messages leave when she answers from the inbox or when that chat
- * reaches her again.
+ * Her inbox (docs/design/life.md): chat messages that arrived while she was
+ * asleep or paused, held per channel in `<dataDir>/inbox.json` so they survive
+ * a restart. Nothing expires on a timer; a channel's messages leave when she
+ * says something there or when that chat reaches her again.
  * @module @anima/life/inbox
  */
 
 import { channelKey, formatLocal, readJson, writeJson } from '@anima/core'
-import type { MessageStimulus } from './group-triage.ts'
-import type { PublishedChannel, Sender } from './stimulus.ts'
+import type { MessageStimulus, PublishedChannel, Sender } from './stimulus.ts'
 
 /** One held message. */
 export interface HeldMessage {
@@ -98,8 +96,8 @@ export class Inbox {
 }
 
 /**
- * The inbox summary line of her report (DESIGN §5): who sent how many, per
- * channel, with the last time, e.g. `收件箱：Sam 3 条（最后 01:12），测试群 @你 1 条`.
+ * The inbox summary line: who sent how many, per channel, with the last time
+ * and the channel key, e.g. `收件箱：Sam 3 条（最后 01:12，channel "qq:1:private:2"）`.
  * @returns undefined when the inbox is empty.
  */
 export function inboxSummary(entries: readonly (InboxEntry & { key: string })[]): string | undefined {
@@ -109,5 +107,5 @@ export function inboxSummary(entries: readonly (InboxEntry & { key: string })[])
     const name = channel.kind === 'group' ? `${channel.display} @你` : channel.display
     return `${name} ${messages.length} 条（最后 ${last}，channel "${channelKey(channel)}"）`
   })
-  return `收件箱：${parts.join('，')}。用 inbox_read 看，用 inbox_answer 交给那个聊天去回。`
+  return `收件箱：${parts.join('，')}。`
 }

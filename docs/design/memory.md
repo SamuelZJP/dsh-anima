@@ -20,8 +20,8 @@ Each memory keeps its **source**: which channel, which person, when. That is a l
 
 Code adds a `[memory]` message at the start of a turn (`agent/pre-step`, step 1), logged with source `anima-memory/recall`:
 
-1. **At waking:** open goals, the latest episodes from before this sleep, facts about the people in her inbox.
-2. **On each stimulus:** memories cued by it: the person, the channel, full-text hits on what arrived.
+1. **At waking:** open goals, the latest episodes from before this sleep, facts about the people in her inbox (R5; until then, cues from the waking context's text).
+2. **On each stimulus:** memories cued by it: the person, the channel, full-text hits on what arrived. In her waking session they come from every channel, each with its source (until R5 replaces scopes with source labels, her waking session hears every scope).
 3. **First contact of this waking with a channel:** the last few lines of that chat from before she woke (`recall.firstContactLines`, from the adapter's history), so she knows where they left off.
 
 - **No repeats.** A memory already shown in this waking session is not shown again.
@@ -37,7 +37,7 @@ There is no behavior to forget. Only decay forgets.
 
 ## Consolidation in sleep (physiology)
 
-1. When she falls asleep, the log of the waking session that just ended is read through DSH's session persistence (`docs/dsh.md`): the whole log, not the compacted surface. It runs after every sleep, a nap included, and only in sleep: no behavior starts it and no clock triggers it.
+1. When she falls asleep (`anima/sleep`), consolidation starts. It runs after every sleep, a nap included, and only in sleep: no behavior starts it and no clock triggers it. From R5 its input is the log of the waking session that just ended, read through DSH's session persistence (`docs/dsh.md`): the whole log, not the compacted surface. Until then it is the transcript memory keeps from her arrivals and her speech.
 2. Only what entered her context counts: messages delivered to her, what she said, what she looked at and read. Group lines she never looked at are not in it.
 3. The log is cut into pieces of at most `consolidation.maxInputTokens`. Each piece goes, with the existing memories about the same people and channels, to a short consolidation turn on `consolidation.model` (a cheap model).
 4. There she writes memories with `memory_write(kind, text, about?, replaces?, importance?)`. The source comes from the piece. `replaces` marks an older memory superseded; it stays as history. Lasting self-knowledge goes to `self_note`.

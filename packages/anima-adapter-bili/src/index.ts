@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-attachment'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AnimaError, formatLocal, type BehaviorMeta, type Subcommand } from '@anima/core'
 import type {} from '@anima/core'
@@ -112,7 +113,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
     return memoryService.observe({ text, scope: 'public', source: 'bili', ...memory === undefined ? {} : { memory: { kind: 'episode', importance: memory.importance } } })
   }
 
-  const skim: Omit<BehaviorMeta, 'effect'> & { effect: 'observe' } = { platform: PLATFORM, effect: 'observe', sessions: ['self'], modes: ['day'] }
+  const skim: Omit<BehaviorMeta, 'effect'> & { effect: 'observe' } = { platform: PLATFORM, effect: 'observe', sessions: ['waking'] }
   const listOutput = {
     schema: {
       type: 'object' as const, additionalProperties: false as const,
@@ -197,7 +198,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
   if (config.closeView.enabled) {
     core.registerBehavior(defineTool({
       name: 'bili_view_closely',
-      description: `Look closely at a Bilibili video: you see ${config.closeView.framesPerView} frames sampled across it (at scene changes), each with what was being said then, and write a viewing note. No sound. Your most expensive way to watch: only a few per day, for shorter videos you really want to see. Say in \`focus\` what you want to look at. You remember the note.`,
+      description: `Look closely at a Bilibili video: you see ${config.closeView.framesPerView} frames sampled across it (at scene changes), each with what was being said then, and write a viewing note. No sound. Say in \`focus\` what you want to look at. You remember the note.`,
       parameters: {
         bvid: { type: 'string', required: true, description: 'The video\'s bvid.' },
         focus: { type: 'string', description: 'What you want to look at or find out, in your own words.' },
@@ -206,7 +207,8 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
       execute: async (args, exec) => {
         const info = await api.view(checkBvid(args.bvid))
         try {
-          const note = await closeView(info, args.focus, exec.signal)
+          if (exec.agent === undefined) throw new AnimaError('anima/no-session', 'looking closely needs her waking session.')
+          const note = await closeView(info, args.focus, exec.agent, exec.signal)
           counts.views += 1
           observe(`You looked closely at ${info.bvid} «${plain(info.title)}» by ${plain(info.author)} on Bilibili. Your viewing note: ${note}`, { importance: 0.5 })
           return { text: `Your viewing note on ${info.bvid} «${plain(info.title)}»:\n${note}` }
@@ -222,8 +224,8 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
     })
   }
 
-  /** Download, extract frames, run the viewing session, clean up. */
-  async function closeView(info: VideoInfo, focus: string | undefined, signal: AbortSignal | undefined): Promise<string> {
+  /** Download, extract frames, look at them as a subagent of her waking session, clean up. */
+  async function closeView(info: VideoInfo, focus: string | undefined, parent: Agent, signal: AbortSignal | undefined): Promise<string> {
     const attachments = ctx.get('attachments')
     if (attachments === undefined) throw new AnimaError('anima/no-attachments', 'DSH has no attachment service, so frames cannot be shown to a model.')
     const stream = await api.playUrl(info, config.quality)
@@ -253,10 +255,10 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
         `What you wanted to look at: ${focus === undefined || focus.trim() === '' ? '(nothing in particular)' : focus.trim()}`,
         `Description: ${plain(info.description).slice(0, 300) || '(none)'}`,
         `Subtitles: ${subtitles.note}. Frames follow in time order (${frames.length} of ${candidates.length} candidates, ${stream.quality === 16 ? '360p' : `quality ${stream.quality}`}).`,
-        'When you have looked, call viewing_note(note).',
+        'When you have looked, write your viewing note in your own voice: what you saw, what stood out, what you think. It is all you keep from it.',
       ].join('\n')
       return await life.view({
-        key: `bili:${info.bvid}:${Date.now().toString(36)}`, title: plain(info.title).slice(0, 40), text, parts,
+        parent, title: plain(info.title).slice(0, 40), text, parts,
         model: config.closeView.model, timeoutSeconds: config.closeView.timeoutSeconds, ...signal === undefined ? {} : { signal },
       })
     } finally {
@@ -442,7 +444,7 @@ export function apply(ctx: Context, input: Partial<Config> | BiliOptions | undef
     const report: string[] = []
     if (client.risk.until !== undefined && Date.now() < client.risk.until) report.push(`Bilibili's risk control is refusing requests; Anima backs off until about ${formatLocal(core.clock.now() + (client.risk.until - Date.now()) * core.clock.speed)}. Browse later.`)
     else {
-      report.push(`Bilibili: from your Self session you can skim (bili_feed, bili_popular, bili_search), watch a video as text (bili_watch), or look closely at one through its frames (bili_view_closely, only a few a day).${client.login.isLogin || client.login.checkedAt === undefined ? '' : ' You are not logged in, so your feed is unavailable.'}`)
+      report.push(`Bilibili: you can skim (bili_feed, bili_popular, bili_search), watch a video as text (bili_watch), or look closely at one through its frames (bili_view_closely).${client.login.isLogin || client.login.checkedAt === undefined ? '' : ' You are not logged in, so your feed is unavailable.'}`)
     }
     return report
   })

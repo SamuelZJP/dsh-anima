@@ -1,12 +1,11 @@
 /** The QQ adapter over a fake backend: channels, stimuli, speech, history, friend requests, health, unload. */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { conversationSessionId, groupTriageSessionId, selfSessionId } from '@anima/life'
 import { describe, expect, it, vi } from 'vitest'
 import * as qq from '../src/index.ts'
 import type { QqSegment } from '../src/backend.ts'
 import { textMessage } from './fake-backend.ts'
-import { ACCOUNT, callAs, FRIEND, GROUP, groupKey, groupSession, nextId, OWNER, ownerKey, ownerSession, setup } from './helpers.ts'
+import { ACCOUNT, callAs, FRIEND, friendKey, GROUP, groupKey, groupSession, nextId, OWNER, ownerKey, ownerSession, plainSession, setup } from './helpers.ts'
 
 const fromOwner = (text: string, messageId = nextId()) => textMessage('private', OWNER, OWNER, text, { messageId, displayName: 'sam' })
 const inGroup = (userId: string, segments: QqSegment[], messageId = nextId(), group = GROUP) => textMessage('group', group, userId, segments, { messageId, displayName: 'Bob' })
@@ -16,7 +15,7 @@ describe('QQ adapter', () => {
   it('verifies the account and publishes every friend and group', async () => {
     const { ctx, backend } = await setup()
     expect(backend.callsOf('login')).toHaveLength(1)
-    expect(ctx.anima.describeSession(ownerSession)).toMatchObject({ kind: 'conversation', channelKey: ownerKey })
+    expect(ctx.anima.describeSession(ctx.animaLife.waking.current!)).toEqual({ kind: 'waking', current: true })
     expect(ctx.anima.channelInfo(ownerKey)).toMatchObject({ isOwner: true, display: 'Sam (QQ)' })
     // Every chat of the account, with its name; which ones may reach her is decided outside.
     expect(ctx.anima.channelInfo(groupKey)).toMatchObject({ isOwner: false, display: 'Test group (QQ)' })
@@ -30,23 +29,25 @@ describe('QQ adapter', () => {
     const { ctx, host, backend } = await setup()
     backend.push(fromOwner('morning!'))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    expect(host.inbox(ownerSession)[0]).toMatch(/\[QQ 私聊「Sam」\] Sam（主人） \[msg \d+\] 对你说: morning!\n在这里回应：用 qq_say 说话（只有对方看得到），或用 end_turn 结束不说。只写文字没有人看得到。$/)
+    expect(host.inbox(ownerSession)[0]).toMatch(/\[QQ 私聊「Sam」 qq:10001:private:20002\] Sam（主人） \[msg \d+\] 对你说: morning!$/)
     backend.push(textMessage('private', FRIEND, FRIEND, 'hi there'))
-    await vi.waitFor(() => expect(host.inbox(conversationSessionId('anima', `qq:${ACCOUNT}:private:${FRIEND}`))).toHaveLength(1))
+    await vi.waitFor(() => expect(host.inbox(friendKey)).toHaveLength(1))
     backend.push(textMessage('private', '55555', '55555', 'spam', { displayName: 'someone' }))
     backend.push(inGroup('2002', [{ type: 'mention', userId: ACCOUNT }], nextId(), '999'))
     backend.push(textMessage('private', OWNER, ACCOUNT, 'my own echo'))
-    await vi.waitFor(() => expect([...host.sessions.keys()]).toHaveLength(4))
+    // Every chat arrives in the one waking session; her own echo does not.
+    await vi.waitFor(() => expect(host.all()).toHaveLength(4))
+    expect([...host.sessions.keys()]).toHaveLength(1)
     expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:private:55555`)).toMatchObject({ display: 'someone (QQ)' })
     expect(ctx.anima.channelInfo(`qq:${ACCOUNT}:group:999`)).toMatchObject({ display: 'group 999 (QQ)' })
   })
 
-  it('wakes a group when she is @-mentioned or replied to, and triages other chatter', async () => {
-    const { ctx, host, backend } = await setup({ life: { groupTriage: { windowSeconds: 30 } } })
+  it('reaches her from a group when she is @-mentioned or replied to; other chatter waits unread', async () => {
+    const { ctx, host, backend } = await setup({ life: { groups: { attentionSeconds: 0 } } })
     backend.push(inGroup('2002', [{ type: 'text', text: 'lunch?' }]))
     backend.push(inGroup('2002', [{ type: 'mention', userId: ACCOUNT }, { type: 'text', text: ' you in?' }]))
     await vi.waitFor(() => expect(host.inbox(groupSession)).toHaveLength(1))
-    expect(host.inbox(groupSession)[0]).toMatch(/2 条消息（Bob 2 条）：\n  \d\d:\d\d Bob \[qq 2002, msg \d+\]: lunch\?\n  \d\d:\d\d Bob \[qq 2002, msg \d+\] 叫你: @Anima you in\?\n（群里所有人都会看到你的回答。）\n在这里回应：用 qq_say 说话（群里所有人都看得到）/)
+    expect(host.inbox(groupSession)[0]).toMatch(/2 条消息（Bob 2 条）：\n  \d\d:\d\d Bob \[qq 2002, msg \d+\]: lunch\?\n  \d\d:\d\d Bob \[qq 2002, msg \d+\] 叫你: @Anima you in\?\n（群里所有人都会看到你的回答。）$/)
     // The chat that woke her is marked read (Phase 9).
     await vi.waitFor(() => expect(backend.callsOf('markRead').map(c => c.args)).toEqual([['group', GROUP]]))
 
@@ -62,15 +63,8 @@ describe('QQ adapter', () => {
     // A reply to someone else's message is chatter (the backend says it is not hers).
     backend.respond('message', () => ({ kind: 'group', chatId: GROUP, userId: '2002', displayName: 'Bob', messageId: '1', segments: [] }))
     backend.push(inGroup('2002', [{ type: 'reply', messageId: '1' }, { type: 'text', text: 'lol' }]))
-    await vi.waitFor(() => expect(ctx.animaLife.triage.open()).toEqual([{ channelKey: groupKey, messages: 1 }]))
-  })
-
-  it('sends chatter batches to group triage', async () => {
-    const { host, backend } = await setup()
-    backend.push(inGroup('2002', [{ type: 'text', text: 'anyone seen the match?' }]))
-    const triage = groupTriageSessionId('anima', '2026-11-10')
-    await vi.waitFor(() => expect(host.inbox(triage)).toHaveLength(1))
-    expect(host.inbox(triage)[0]).toContain('qq group "Test group (QQ)", 1 message nobody addressed to you')
+    await vi.waitFor(() => expect(ctx.animaLife.groups.unread()).toEqual({ [groupKey]: 1 }))
+    expect(host.inbox(groupSession)).toHaveLength(2)
   })
 
   it('turns pokes into waking messages and recalls into context', async () => {
@@ -82,10 +76,10 @@ describe('QQ adapter', () => {
     backend.push({ type: 'recall', kind: 'private', chatId: OWNER, operatorId: OWNER, messageId: '5' })
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(2))
     expect(host.inbox(ownerSession)[1]).toMatch(/^\(inject\) .*\[事件\] Sam recalled a message \(msg 5\)\.（只是上下文，不需要回答。）$/)
-    expect(host.sessions.has(groupSession)).toBe(false)
+    expect(host.inbox(groupSession)).toHaveLength(0)
   })
 
-  it('reads chat history for the current chat', async () => {
+  it('reads a chat\'s history by its channel key', async () => {
     const { ctx, backend } = await setup()
     backend.respond('history', () => [
       { kind: 'private', chatId: OWNER, userId: OWNER, displayName: 'sam', messageId: '1', time: 1_762_740_000_000, segments: [{ type: 'text', text: 'old one' }] },
@@ -116,12 +110,12 @@ describe('QQ adapter', () => {
     expect(partial.text).toContain('anima/partly-sent: 1 of 3 messages went out (msg 9501); message 2 failed')
   })
 
-  it('refuses qq_say outside QQ sessions and mentions in private chats', async () => {
+  it('refuses qq_say outside her sessions, to a chat that does not exist, and mentions in private chats', async () => {
     const { ctx } = await setup()
-    expect((await callAs(ctx, selfSessionId('anima'), 'qq_say', { text: 'x' })).text).toContain('anima/wrong-session')
+    expect((await callAs(ctx, plainSession, 'qq_say', { channel: ownerKey, text: 'x' })).text).toContain('anima/not-anima-session')
     expect((await callAs(ctx, ownerSession, 'qq_say', { text: 'x', mention: ['2002'] })).text).toContain('mention works only in group chats')
-    // open_conversation to a QQ group nobody published is refused by the body check, listing the real channels.
-    expect((await callAs(ctx, selfSessionId('anima'), 'open_conversation', { channel: `qq:${ACCOUNT}:group:999`, intent: 'hi' })).text).toContain(`anima/unknown-channel: 没有「qq:${ACCOUNT}:group:999」这个地方。你能去的地方：qq:${ACCOUNT}:private:${OWNER}`)
+    // A QQ group nobody published is refused by the body check, listing the real channels.
+    expect((await callAs(ctx, ownerSession, 'qq_say', { channel: `qq:${ACCOUNT}:group:999`, text: 'hi' })).text).toContain(`anima/unknown-channel: 没有「qq:${ACCOUNT}:group:999」这个地方。你能去的地方：qq:${ACCOUNT}:private:${OWNER}`)
   })
 
   it('hands friend requests and owner replies to the outside', async () => {
@@ -179,7 +173,7 @@ describe('QQ adapter', () => {
     await vi.waitFor(() => expect(status(ctx)).toContain('QQ problem: the runtime is logged in as 99999'))
     backend.push(fromOwner('hi'))
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(host.sessions.size).toBe(0)
+    expect(host.all()).toEqual([])
   })
 
   it('registers no behavior the backend cannot do', async () => {

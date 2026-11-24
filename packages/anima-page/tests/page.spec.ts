@@ -27,7 +27,7 @@ async function setup(editor?: ConfigEditorLike) {
   if (editor !== undefined) ctx.provide('configEditor', editor as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(Tools)
-  await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDir(), clock: { speed: 1, start: '2026-11-10T10:00' } })
+  await ctx.plugin(animaCore, { dataDir: tempDir(), clock: { speed: 1, start: '2026-11-10T10:00' } })
   await ctx.plugin(animaGuard, {})
   const fiber = await ctx.plugin(page)
   const get = async (query: string) => routes.get(page.VIEW_PATH)!.fetch(new Request(`http://h${page.VIEW_PATH}?${query}`))

@@ -31,7 +31,7 @@ Unloading the plugin removes all of it.
 - **OneBot v11** (`backend.protocol: onebot11`, the only one now): a WebSocket client of a OneBot v11 forward WebSocket server (NotRainMeow, or any OneBot v11 runtime), on Node's built-in `WebSocket`. The `backend` config section has the URL and token; the token goes in the `Authorization: Bearer` header. Lost heartbeats and `bot_offline` count as offline. It uses the NapCat-style extensions NotRainMeow also implements (`notify/input_status`, `*_msg_history`, `mark_*_as_read`, `set_msg_emoji_like` with code points, pokes).
 - **In:** private and group messages, @, replies, pokes, recalls, friend requests, typing notices where the runtime sends them (`notify/input_status`).
 - **Placeholders:** `[image #i3: summary]`, `[sticker #i4: summary]`, `[forwarded messages #f2]`; quoted replies show who wrote the original and a snippet. Ids survive restarts (`<dataDir>/qq/media.json`).
-- **Behaviors:** `qq_say(channel, text, also?, replyTo?, mention?, more?)`, `qq_history(channel)`, `qq_look(id)` (the picture itself, in a tool result, on a vision-capable model), `qq_read_forward(id)`, `qq_poke(channel, userId?)`, `qq_react(messageId, emoji)`.
+- **Behaviors:** `qq_say(channel, text, also?, replyTo?, mention?, more?)`, `qq_history(channel, count?)`, `qq_look(id)` (the picture itself, in a tool result, on a vision-capable model), `qq_read_forward(id)`, `qq_poke(channel, userId?)`, `qq_react(messageId, emoji)`. `channel` is the chat's key, as its arrivals show it; it is also what the guard sees as the target. Media ids are unique across chats, so `qq_look` and `qq_read_forward` find the chat from the id.
 - **Typing:** in a private chat QQ shows "typing" during the typing time between her messages.
 
 ## Bilibili: `anima-adapter-bili`
@@ -44,7 +44,7 @@ A place she watches, not one where she talks. She picks the depth herself.
 | Watch | `bili_watch(bvid)`, `bili_comments(bvid, page?)` | A text digest: metadata, subtitles, danmaku sample, top comments |
 | Look closely | `bili_view_closely(bvid, focus?)` | What she saw, as text |
 
-- **Looking closely is her eyes (physiology).** The adapter downloads a 360p stream, `ffmpeg` extracts frames (first frame, scene changes, a fallback interval), and the frames with their subtitle lines go to a short perception turn on a vision model. Only its description returns to the day session; the files are deleted. `ffmpeg` is required while close views are enabled (`anima/ffmpeg-missing` at load).
+- **Looking closely is her eyes (physiology).** The adapter downloads a 360p stream, `ffmpeg` extracts frames (first frame, scene changes, a fallback interval), and the frames with their subtitle lines go to a DSH subagent of her waking session (`animaLife.view`, preset `anima-viewing`, a vision model). Only its note returns to her waking session; the files are deleted. `ffmpeg` is required while close views are enabled (`anima/ffmpeg-missing` at load).
 - **Account:** a dedicated account, logged in by the owner with a QR code. The cookie is in `<dataDir>/bili/cookie.json` (0600). WBI signing uses `node:crypto`.
 - **Transport:** one request at a time with a minimum gap; on Bilibili's risk control (`-352`) it backs off, doubling from 60 s.
 
@@ -54,7 +54,7 @@ QQ is her only real channel where people talk to her. DSH's web UI is not one: a
 
 ## Demo platform (development only)
 
-Sped-up exit demos need scripted people on several channels, which a real platform cannot give. `scripts/demo/demo-platform.mjs` is a fake platform `demo`, loaded by path from a demo overlay and never shipped or bundled: a demo driver delivers scripted messages as people on it, and her `demo_say` goes to `<dataDir>/demo/outbox.jsonl`. It follows the adapter contract like any other platform; code never decides what she says.
+Sped-up exit demos need scripted people on several channels, which a real platform cannot give. `scripts/demo/demo-platform.mjs` is a fake platform `demo`, loaded by path from a demo overlay and never shipped or bundled: a demo driver delivers scripted messages as people on it, and her `demo_say(channel, …)` goes to `<dataDir>/demo/outbox.jsonl`. It follows the adapter contract like any other platform; code never decides what she says.
 
 ## WeChat
 

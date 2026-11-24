@@ -396,19 +396,18 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
     life.note(taken ? `${who} asked to be your friend on QQ; the owner was asked to decide.` : `${who} asked to be your friend on QQ; it stays unanswered.`)
   }
 
-  function sessionChannel(sessionId: string | undefined): PublishedChannel {
-    const session = sessionId === undefined ? undefined : core.describeSession(sessionId)
-    if (session?.kind !== 'conversation' || session.channel.platform !== PLATFORM) {
-      throw new AnimaError('anima/no-channel', 'this session is not bound to a QQ chat.')
-    }
-    const channel = byKey.get(session.channelKey)
-    if (channel === undefined) throw new AnimaError('anima/no-channel', 'this QQ chat is not known to the adapter.')
+  /** The QQ chat a call names by its channel key. */
+  function chatOf(key: unknown): PublishedChannel {
+    const wanted = typeof key === 'string' ? key.trim() : ''
+    const channel = byKey.get(wanted)
+    if (channel === undefined) throw new AnimaError('anima/no-channel', `「${wanted}」 is not a QQ chat of yours; use the channel key shown on its arrivals (qq:${config.account}:private:… or qq:${config.account}:group:…).`)
     return channel
   }
+  const targetOf = (args: Readonly<Record<string, unknown>>) => typeof args.channel === 'string' ? args.channel.trim() : undefined
 
   core.registerBehavior(defineTool({
     name: SAY_TOOL,
-    description: 'Send a message in this QQ chat, or a list of messages sent in order. They see only what you send this way. In groups you can reply to a message id and mention people by user id (both apply to the first message). A say ends your turn unless more: true.',
+    description: 'Send a message in a QQ chat, by its channel key, or a list of messages sent in order. They see only what you send this way. In groups you can reply to a message id and mention people by user id (both apply to the first message). A say ends your turn unless more: true.',
     parameters: {
       ...SAY_PARAMETERS,
       replyTo: { type: 'string', description: 'Optional message id to reply to (the "msg" number shown with each message).' },
@@ -425,8 +424,8 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       },
       render: (_args, value) => [{ type: 'text', text: value.messageIds === undefined ? `sent (msg ${value.messageId})` : `sent ${value.messageIds.length} messages (msg ${value.messageIds.join(', ')})` }],
     },
-    async execute(args, exec) {
-      const channel = sessionChannel(exec.agent?.id)
+    async execute(args) {
+      const channel = chatOf(args.channel)
       const messages = sayMessages(args)
       if (messages.length === 0) throw new AnimaError('anima/empty-message', 'text is empty; to end the turn without speaking, call end_turn instead.')
       const mention = args.mention ?? []
@@ -451,20 +450,21 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       })
       return { sent: true, messageId: ids.at(-1)!, ...ids.length > 1 ? { messageIds: ids } : {} }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'], ...SAY_META })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['waking'], ...SAY_META })
 
   if (backend.history !== undefined) core.registerBehavior(defineTool({
     name: HISTORY_TOOL,
-    description: 'Read recent messages of this QQ chat, oldest first, including ones that did not reach you.',
+    description: 'Read recent messages of a QQ chat, oldest first, including ones that did not reach you.',
     parameters: {
+      channel: { type: 'string', required: true, description: 'The chat\'s channel key.' },
       count: { type: 'integer', description: `How many recent messages, 1–${HISTORY_MAX} (default 15).` },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { lines: { type: 'array', items: { type: 'string' }, required: true, description: 'One line per message.' } } },
       render: (_args, value) => [{ type: 'text', text: value.lines.length === 0 ? 'No messages.' : value.lines.join('\n') }],
     },
-    async execute(args, exec) {
-      const channel = sessionChannel(exec.agent?.id)
+    async execute(args) {
+      const channel = chatOf(args.channel)
       const session = { channelKey: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
       const count = Math.max(1, Math.min(HISTORY_MAX, Math.round(args.count ?? 15)))
       const messages: readonly QqMessage[] = (await backend.history!(channel.kind as ChatKind, channel.id, count)).slice(-count)
@@ -478,13 +478,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       })
       return { lines }
     },
-  }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
-
-  /** The channel key of the calling conversation, and the channel. */
-  function sessionChat(exec: ToolExecution): { channel: PublishedChannel; key: string } {
-    const channel = sessionChannel(exec.agent?.id)
-    return { channel, key: qqChannelKey(config.account, channel.kind as 'private' | 'group', channel.id) }
-  }
+  }), { platform: PLATFORM, effect: 'observe', sessions: ['waking'], target: targetOf })
 
   /** Refuse when the chat's model route cannot take images (as DSH's read_image does), before anything enters history. */
   async function assertVision(exec: ToolExecution): Promise<void> {
@@ -535,7 +529,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
 
   core.registerBehavior(defineTool({
     name: LOOK_TOOL,
-    description: 'Look at an image or sticker someone sent in this chat, by the id in its placeholder (e.g. "#i3" in "[image #i3: …]"). You see the picture itself. Only open what you want to see; each look costs.',
+    description: 'Look at an image or sticker someone sent you on QQ, by the id in its placeholder (e.g. "#i3" in "[image #i3: …]"). You see the picture itself.',
     parameters: {
       id: { type: 'string', required: true, description: 'The image id from the placeholder, e.g. "#i3".' },
     },
@@ -565,10 +559,9 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       ],
     },
     async execute(args, exec) {
-      const { key } = sessionChat(exec)
-      const entry = media.get(key, args.id)
+      const entry = media.find(args.id)
       if (entry === undefined || entry.kind === 'forward') {
-        throw new AnimaError('anima/no-image', `there is no image "${normalizeMediaId(args.id)}" in this chat. Use the id shown in an image placeholder here, e.g. #i3.`)
+        throw new AnimaError('anima/no-image', `there is no image "${normalizeMediaId(args.id)}". Use the id shown in an image placeholder, e.g. #i3.`)
       }
       await assertVision(exec)
       let ref = entry.ref as ImageAttachmentRef | undefined
@@ -591,7 +584,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
         image: { attachmentId: String(ref.attachmentId), mediaType: ref.mediaType, bytes: ref.bytes, width: ref.width, height: ref.height, ...ref.name === undefined ? {} : { name: ref.name } },
       }
     },
-  }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'observe', sessions: ['waking'] })
 
   /** Lines of forwarded messages, capped; nested forwards are shown inline. */
   function forwardLines(nodes: readonly ForwardNode[], chat: string, depth: number, out: string[], budget: { messages: number; chars: number; hidden: number }): void {
@@ -613,7 +606,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
 
   core.registerBehavior(defineTool({
     name: FORWARD_TOOL,
-    description: 'Read a forwarded chat record someone sent in this chat, by the id in its placeholder (e.g. "#f2" in "[forwarded messages #f2]").',
+    description: 'Read a forwarded chat record someone sent you on QQ, by the id in its placeholder (e.g. "#f2" in "[forwarded messages #f2]").',
     parameters: {
       id: { type: 'string', required: true, description: 'The forward id from the placeholder, e.g. "#f2".' },
     },
@@ -621,12 +614,12 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       schema: { type: 'object', additionalProperties: false, properties: { lines: { type: 'array', items: { type: 'string' }, required: true, description: 'One line per forwarded message.' } } },
       render: (args, value) => [{ type: 'text', text: value.lines.length === 0 ? 'The forward is empty.' : `Forwarded messages #${normalizeMediaId(args.id)}:\n${value.lines.join('\n')}` }],
     },
-    async execute(args, exec) {
-      const { key } = sessionChat(exec)
-      const entry = media.get(key, args.id)
+    async execute(args) {
+      const entry = media.find(args.id)
       if (entry === undefined || entry.kind !== 'forward') {
-        throw new AnimaError('anima/no-forward', `there is no forward "${normalizeMediaId(args.id)}" in this chat. Use the id shown in a forward placeholder here, e.g. #f2.`)
+        throw new AnimaError('anima/no-forward', `there is no forward "${normalizeMediaId(args.id)}". Use the id shown in a forward placeholder, e.g. #f2.`)
       }
+      const key = entry.chat
       let messages = media.content(entry.id) as readonly ForwardNode[] | undefined
       if (messages === undefined) {
         if (entry.forwardId === undefined || backend.forward === undefined) throw new AnimaError('anima/forward-failed', 'this forward can no longer be fetched.')
@@ -643,20 +636,21 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       if (budget.hidden > 0) lines.push(`(${budget.hidden} more message${budget.hidden === 1 ? '' : 's'} not shown)`)
       return { lines }
     },
-  }), { platform: PLATFORM, effect: 'observe', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'observe', sessions: ['waking'] })
 
   if (backend.poke !== undefined) core.registerBehavior(defineTool({
     name: POKE_TOOL,
-    description: 'Poke someone in this QQ chat (a light nudge, no text). In a private chat it pokes the other person; in a group give their user id.',
+    description: 'Poke someone in a QQ chat (a light nudge, no text). In a private chat it pokes the other person; in a group give their user id.',
     parameters: {
+      channel: { type: 'string', required: true, description: 'The chat\'s channel key.' },
       userId: { type: 'string', description: 'QQ user id to poke (groups: required; private chats: only the other person).' },
     },
     output: {
       schema: { type: 'object', additionalProperties: false, properties: { poked: { type: 'string', required: true, description: 'Who was poked.' } } },
       render: (_args, value) => [{ type: 'text', text: `poked ${value.poked}` }],
     },
-    async execute(args, exec) {
-      const { channel } = sessionChat(exec)
+    async execute(args) {
+      const channel = chatOf(args.channel)
       const userId = args.userId?.trim() || (channel.kind === 'private' ? channel.id : '')
       if (!/^\d{4,12}$/.test(userId)) throw new AnimaError('anima/bad-args', channel.kind === 'group' ? 'in a group, qq_poke needs the user id of the person (digits, as shown with each message).' : 'userId must be digits.')
       if (channel.kind === 'private' && userId !== channel.id) throw new AnimaError('anima/bad-args', 'in a private chat you can only poke the person you are talking with.')
@@ -665,11 +659,11 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       await backend.poke!(channel.kind as ChatKind, channel.id, userId)
       return { poked: whoIs(userId) }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['waking'], target: targetOf })
 
   if (backend.react !== undefined) core.registerBehavior(defineTool({
     name: REACT_TOOL,
-    description: 'React to a message in this QQ chat with one emoji (e.g. "👍", "😂", "❤️"), by its msg id. Lighter than a reply.',
+    description: 'React to a QQ message with one emoji (e.g. "👍", "😂", "❤️"), by its msg id. Lighter than a reply.',
     parameters: {
       messageId: { type: 'string', required: true, description: 'The "msg" number shown with the message.' },
       emoji: { type: 'string', required: true, description: 'One emoji character, or a QQ face id (1–3 digits).' },
@@ -678,8 +672,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       schema: { type: 'object', additionalProperties: false, properties: { reacted: { type: 'string', required: true, description: 'The emoji.' } } },
       render: (args, value) => [{ type: 'text', text: `reacted ${value.reacted} to msg ${args.messageId}` }],
     },
-    async execute(args, exec) {
-      sessionChat(exec)
+    async execute(args) {
       if (!/^-?\d{1,20}$/.test(args.messageId.trim())) throw new AnimaError('anima/bad-args', 'messageId is the "msg" number shown with a message.')
       const reaction = reactionOf(args.emoji)
       if (reaction === undefined) throw new AnimaError('anima/bad-args', 'emoji must be exactly one emoji character (like 👍) or a QQ face id of 1–3 digits.')
@@ -687,7 +680,7 @@ export function attach(ctx: Context, config: ResolvedQqConfig, backend: QqBacken
       await backend.react!(args.messageId.trim(), reaction)
       return { reacted: reaction }
     },
-  }), { platform: PLATFORM, effect: 'express', sessions: ['conversation'] })
+  }), { platform: PLATFORM, effect: 'express', sessions: ['waking'] })
 
   core.addStatus(() => [
     ...offline.down ? [`QQ OFFLINE since ${formatLocal(offline.since)}: ${offline.reason}`] : [],

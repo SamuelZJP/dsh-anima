@@ -10,14 +10,11 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { conversationSessionId, selfSessionId } from '@anima/life'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { QqSegment } from '../src/backend.ts'
 import { MediaBook, reactionOf } from '../src/media.ts'
 import { textMessage } from './fake-backend.ts'
-import { ACCOUNT, callAs, FRIEND, friendSession, GROUP, groupKey, groupSession, nextId, OWNER, ownerKey, ownerSession, setup } from './helpers.ts'
-
-const selfId = selfSessionId('anima')
+import { ACCOUNT, callAs, FRIEND, friendSession, GROUP, groupKey, groupSession, nextId, OWNER, ownerKey, ownerSession, plainSession, setup } from './helpers.ts'
 
 /** A 1×1 PNG. */
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64')
@@ -103,16 +100,18 @@ describe('images she chooses to look at', () => {
     expect(backend.callsOf('image')[0]!.args).toEqual(['b.png'])
   })
 
-  it('refuses another chat\'s image, a model that cannot see, and images over the size cap', async () => {
+  it('opens any image she was sent, from any chat; refuses an unknown id, a model that cannot see, images over the size cap', async () => {
     const images = await imageServer()
     const { ctx, host, backend } = await setup({ qq: { look: { maxBytes: 1_000_000 } }, without: ['image'] })
-    backend.push(privateMessage(FRIEND, [image('secret.png', `${images.base}/a.png`)]))
+    backend.push(privateMessage(FRIEND, [image('cat.png', `${images.base}/a.png`)]))
     backend.push(privateMessage(OWNER, [image('big.png', `${images.base}/big.png`)]))
     await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i1' })).text).toContain('anima/no-image')
+    // One stream of attention: an image from Cat's chat opens while she talks with Sam.
+    expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i1' })).isError).toBe(false)
+    expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i9' })).text).toContain('anima/no-image')
     expect((await callAs(ctx, friendSession, 'qq_look', { id: 'i1' }, 'blind')).text).toContain('anima/no-vision')
     expect((await callAs(ctx, ownerSession, 'qq_look', { id: 'i2' })).text).toContain('anima/look-too-large')
-    expect((await callAs(ctx, selfId, 'qq_look', { id: 'i1' })).text).toContain('anima/wrong-session')
+    expect((await callAs(ctx, plainSession, 'qq_look', { id: 'i1' })).text).toContain('anima/not-anima-session')
   })
 
   it('has no limit of its own on looks (limits are the outside\'s)', async () => {
@@ -139,7 +138,7 @@ describe('forwards and quoted replies', () => {
     const result = await callAs(ctx, ownerSession, 'qq_read_forward', { id: '#f1' })
     expect(result.text).toBe('Forwarded messages #f1:\nAnn: first\nBen: [image #i1]\n(1 more message not shown)')
     expect(backend.callsOf('forward')[0]!.args).toEqual(['res-7'])
-    expect((await callAs(ctx, friendSession, 'qq_read_forward', { id: 'f1' })).text).toContain('anima/no-forward')
+    expect((await callAs(ctx, friendSession, 'qq_read_forward', { id: 'f9' })).text).toContain('anima/no-forward')
   })
 
   it('uses inline forward content without a call, nested forwards included', async () => {
@@ -194,9 +193,8 @@ describe('pokes and reactions', () => {
     expect((await callAs(ctx, ownerSession, 'qq_poke')).isError).toBe(false)
     expect((await callAs(ctx, ownerSession, 'qq_react', { messageId: '1', emoji: '😂' })).isError).toBe(false)
     expect((await callAs(ctx, friendSession, 'qq_poke')).isError).toBe(false)
-    expect((await callAs(ctx, selfId, 'qq_poke')).text).toContain('anima/wrong-session')
-    const stranger = conversationSessionId('anima', `qq:${ACCOUNT}:private:55555`)
-    expect((await callAs(ctx, stranger, 'qq_react', { messageId: '1', emoji: '😂' })).isError).toBe(true)
+    expect((await callAs(ctx, plainSession, 'qq_poke', { channel: ownerKey })).text).toContain('anima/not-anima-session')
+    expect((await callAs(ctx, ownerSession, 'qq_poke', { channel: `qq:${ACCOUNT}:private:55555` })).text).toContain('anima/unknown-channel')
     expect(backend.callsOf('poke')).toHaveLength(2)
   })
 })
@@ -225,19 +223,19 @@ describe('typing while the outside holds her message', () => {
 })
 
 describe('offline notices', () => {
-  it('tells her Self session when QQ goes down and comes back, and the page says why', async () => {
+  it('tells her when QQ goes down and comes back, as context, and the page says why', async () => {
     const { ctx, host, backend, recorded } = await setup()
-    await host.create(selfId)
     backend.setOnline(false, 'bot offline: kicked')
-    await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('[notice] QQ went offline') && line.includes('the runtime reports the QQ account offline (bot offline: kicked)'))).toBe(true))
+    await vi.waitFor(() => expect(host.notices().some(line => line.includes('[通知] QQ went offline') && line.includes('the runtime reports the QQ account offline (bot offline: kicked)'))).toBe(true))
     const qqView = await ctx.anima.platforms().find(p => p.platform === 'qq')!.view() as { summary: string; details: { offline: { reason: string } | null; backend: string } }
     expect(qqView.summary).toMatch(/^OFFLINE since .*: the runtime reports the QQ account offline/)
     expect(qqView.details.backend).toBe('fake QQ backend')
     expect(qqView.details.offline?.reason).toContain('kicked')
     expect(ctx.anima.statusLines().join('\n')).toContain('QQ OFFLINE since')
     backend.setOnline(true)
-    await vi.waitFor(() => expect(host.inbox(selfId).some(line => line.includes('[notice] QQ is back online'))).toBe(true))
-    expect(host.inbox(selfId).every(line => line.startsWith('(inject)'))).toBe(true)
+    // The first notice is the startup connect; this one is the return after the drop.
+    await vi.waitFor(() => expect(host.notices().filter(line => line.includes('[通知] QQ is back online')).length).toBeGreaterThan(1))
+    expect(host.notices().every(line => line.startsWith('(inject)'))).toBe(true)
     // Each transition after connecting is reported for the log outside.
     const records = recorded.filter(record => record.type === 'platform')
     expect(records.map(r => r.online)).toEqual([false, true])
@@ -246,28 +244,11 @@ describe('offline notices', () => {
 
   it('stays quiet about drops shorter than noticeAfterSeconds', async () => {
     const { host, backend } = await setup({ life: { platforms: { noticeAfterSeconds: 5 } } })
-    await host.create(selfId)
     backend.drop()
     await new Promise(resolve => setTimeout(resolve, 300))
     backend.connect()
     await new Promise(resolve => setTimeout(resolve, 100))
-    expect(host.inbox(selfId).filter(line => line.includes('QQ'))).toEqual([])
-  })
-})
-
-describe('duplicate replies', () => {
-  it('puts a reply her conversation already sent into the Self report', async () => {
-    const { ctx, host, backend } = await setup()
-    backend.push(privateMessage(OWNER, [text('hello?')]))
-    await vi.waitFor(() => expect(host.inbox(ownerSession)).toHaveLength(1))
-    event(ctx, ownerSession, 'tool/call', { callId: 'r1', name: 'qq_say', arguments: '{"text":"hi!"}' })
-    event(ctx, ownerSession, 'tool/result', { message: { toolCallId: 'r1', isError: false, content: [{ type: 'text', text: 'sent (msg 9001)' }] } })
-    event(ctx, ownerSession, 'tool/call', { callId: 'r2', name: 'qq_say', arguments: '{"text":"more"}' })
-    event(ctx, ownerSession, 'tool/result', { message: { toolCallId: 'r2', isError: false, content: [{ type: 'text', text: 'sent (msg 9002)' }] } })
-    await ctx.animaLife.beat()
-    const report = host.inbox(Object.keys(Object.fromEntries(host.sessions)).find(id => id.startsWith('anima-t-'))!).at(-1)!
-    expect(report).toContain('Sam (owner) wrote to you in Sam (QQ)')
-    expect(report.match(/You responded in Sam \(QQ\) at .* \(qq_say\); that conversation already handled what came in there\./g)).toHaveLength(1)
+    expect(host.notices()).toEqual([])
   })
 })
 
@@ -299,8 +280,9 @@ describe('Phase 9: typing keeps the window open, spaced messages, read marks', (
     expect(backend.callsOf('typing')).toHaveLength(2)
   })
 
-  it('marks a chat read when it wakes her, and leaves messages held at night unread', async () => {
-    const { host, backend } = await setup({ core: { clock: { speed: 1, start: '2026-11-11T02:00' } } })
+  it('marks a chat read when it reaches her, and leaves messages held while she sleeps unread', async () => {
+    const { ctx, host, backend } = await setup({ core: { sleep: { risePerHour: 0.05, fallPerHour: 0.1, fallAsleepAbove: 0.12, overwhelmAbove: 0.95, wakeBelow: 0.01 } } })
+    expect((await callAs(ctx, ctx.animaLife.waking.current!, 'sleep')).text).toBe('你睡着了。')
     backend.push(privateMessage(OWNER, [text('睡了吗')]))
     await new Promise(resolve => setTimeout(resolve, 100))
     expect(host.inbox(ownerSession)).toEqual([])

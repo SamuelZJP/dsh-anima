@@ -1,18 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import { AnimaClock, formatLocal, parseWhen } from '../src/clock.ts'
 import { resolveConfig } from '../src/config.ts'
-import { dayKey, modeAt, nextWake, phaseAt, resolveRhythm } from '../src/rhythm.ts'
-import { advance, DEFAULT_NEEDS, feel, initialState, satisfy, spendTurn, type StateModel } from '../src/state.ts'
+import { advance, DEFAULT_NEEDS, feel, initialState, satisfy, spendTurn, wokeUp, type StateModel } from '../src/state.ts'
 import { Ledger } from '../src/ledger.ts'
 import { GoalStore } from '../src/goals.ts'
 
 const at = (text: string) => new Date(text).getTime()
-const rhythm = resolveRhythm({ wake: '07:30', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 60, evening: '18:00', windDownMinutes: 60 })
+const sleep = { risePerHour: 0.05, fallPerHour: 0.1, fallAsleepAbove: 0.6, overwhelmAbove: 0.95, wakeBelow: 0.1 }
+const phase = { asleep: false }
 const model: StateModel = {
   needs: DEFAULT_NEEDS,
   energy: { drainPerHour: 0.04, perTurn: 0.03, restorePerHour: 0.15 },
   mood: { valence: 0, arousal: 0.3, halfLifeHours: 3 },
-  rhythm,
+  sleep,
+  asleep: () => phase.asleep,
 }
 
 describe('clock', () => {
@@ -47,48 +48,6 @@ describe('clock', () => {
   })
 })
 
-describe('rhythm', () => {
-  it('derives phase and mode from the clock', () => {
-    const cases: [string, string][] = [
-      ['2026-11-10T03:00', 'asleep'],
-      ['2026-11-10T07:29', 'asleep'],
-      ['2026-11-10T07:30', 'waking'],
-      ['2026-11-10T08:29', 'waking'],
-      ['2026-11-10T08:30', 'day'],
-      ['2026-11-10T18:00', 'evening'],
-      ['2026-11-10T22:30', 'winding-down'],
-      ['2026-11-10T23:30', 'asleep'],
-    ]
-    for (const [time, phase] of cases) expect([time, phaseAt(at(time), rhythm)]).toEqual([time, phase])
-    expect(modeAt(at('2026-11-10T02:00'), rhythm)).toBe('night')
-    expect(modeAt(at('2026-11-10T12:00'), rhythm)).toBe('day')
-  })
-
-  it('handles a sleep time after midnight', () => {
-    const late = resolveRhythm({ wake: '09:00', bedtime: { earliest: '23:00', latest: '01:00', wokenMinutes: 30 }, wakingMinutes: 30, evening: '19:00', windDownMinutes: 30 })
-    expect(phaseAt(at('2026-11-10T00:45'), late)).toBe('winding-down')
-    expect(phaseAt(at('2026-11-10T01:30'), late)).toBe('asleep')
-    expect(phaseAt(at('2026-11-10T23:00'), late)).toBe('evening')
-  })
-
-  it('counts the night as part of the day before it', () => {
-    expect(dayKey(at('2026-11-10T08:00'), rhythm)).toBe('2026-11-10')
-    expect(dayKey(at('2026-11-11T00:30'), rhythm)).toBe('2026-11-10')
-    expect(dayKey(at('2026-11-11T07:29'), rhythm)).toBe('2026-11-10')
-    expect(dayKey(at('2026-11-11T07:30'), rhythm)).toBe('2026-11-11')
-  })
-
-  it('finds the next wake', () => {
-    expect(formatLocal(nextWake(at('2026-11-10T23:45'), rhythm))).toBe('2026-11-11 07:30')
-    expect(formatLocal(nextWake(at('2026-11-11T03:00'), rhythm))).toBe('2026-11-11 07:30')
-  })
-
-  it('rejects a rhythm that does not fit', () => {
-    expect(() => resolveRhythm({ wake: '07:30', bedtime: { earliest: '07:30', latest: '07:30', wokenMinutes: 30 }, wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/anima\/config-invalid/)
-    expect(() => resolveRhythm({ wake: '7h', bedtime: { earliest: '22:30', latest: '23:30', wokenMinutes: 30 }, wakingMinutes: 0, evening: '18:00', windDownMinutes: 0 })).toThrow(/rhythm.wake/)
-  })
-})
-
 describe('self state', () => {
   const morning = at('2026-11-10T08:00')
 
@@ -104,16 +63,40 @@ describe('self state', () => {
     expect(state.needs.connect).toBe(1)
   })
 
-  it('restores energy at night, freezes needs, and resets rest at wake', () => {
+  it('raises sleep pressure while awake and lowers it asleep, clamped to 0–1', () => {
+    const start = initialState(model, morning)
+    expect(start.sleepPressure).toBeCloseTo(0.15)
+    const day = advance(start, morning + 10 * 3_600_000, model)
+    expect(day.sleepPressure).toBeCloseTo(0.15 + 10 * 0.05)
+    expect(advance(day, morning + 30 * 3_600_000, model).sleepPressure).toBe(1)
+    phase.asleep = true
+    try {
+      const night = advance(day, morning + 15 * 3_600_000, model)
+      expect(night.sleepPressure).toBeCloseTo(0.65 - 5 * 0.1)
+      expect(advance(day, morning + 30 * 3_600_000, model).sleepPressure).toBe(0)
+    } finally {
+      phase.asleep = false
+    }
+  })
+
+  it('restores energy and freezes needs asleep; waking satisfies rest', () => {
     const evening = at('2026-11-10T23:00')
     const tired = { ...initialState(model, evening), energy: 0.2, needs: { ...initialState(model, evening).needs, rest: 0.9, connect: 0.7 } }
-    const asleep = advance(tired, at('2026-11-11T03:30'), model)
-    expect(asleep.needs.connect).toBeCloseTo(0.7 + 0.5 * 0.05)
-    expect(asleep.energy).toBeCloseTo(0.2 - 0.5 * 0.04 + 4 * 0.15)
-    const woke = advance(asleep, at('2026-11-11T08:00'), model)
-    expect(woke.energy).toBeCloseTo(1 - 0.5 * 0.04)
-    expect(woke.needs.rest).toBeCloseTo(0.2 + 0.5 * 0.04)
-    expect(woke.needs.connect).toBeCloseTo(asleep.needs.connect! + 0.5 * 0.05)
+    phase.asleep = true
+    let slept
+    try {
+      slept = advance(tired, at('2026-11-11T03:00'), model)
+    } finally {
+      phase.asleep = false
+    }
+    expect(slept.needs.connect).toBeCloseTo(0.7)
+    expect(slept.energy).toBeCloseTo(0.2 + 4 * 0.15)
+    expect(wokeUp(slept, model).needs.rest).toBeCloseTo(0.2)
+  })
+
+  it('reads an old state file without sleep pressure as a fresh one', () => {
+    const { sleepPressure: _, ...old } = initialState(model, morning)
+    expect(advance(old as never, morning + 3_600_000, model).sleepPressure).toBeCloseTo(0.2)
   })
 
   it('decays mood toward baseline with the half-life', () => {
@@ -153,11 +136,11 @@ describe('ledger', () => {
 })
 
 describe('config defaults', () => {
-  it('fills Phase 2 defaults', () => {
+  it('fills the defaults: her genes, no clock times', () => {
     const config = resolveConfig({})
-    expect(config.rhythm).toMatchObject({ wake: '07:30', bedtime: { earliest: '22:30', latest: '00:30', wokenMinutes: 30 }, evening: '18:00' })
-    expect(config.modes.day).toMatchObject({ triageModel: { provider: 'deepseek-official', model: 'deepseek-flash' } })
-    expect(config.modes.night).toMatchObject({ allowedEffects: ['observe', 'internal'] })
+    expect(config.sleep).toEqual({ risePerHour: 0.055, fallPerHour: 0.11, fallAsleepAbove: 0.6, overwhelmAbove: 0.98, wakeBelow: 0.1 })
+    expect(config).not.toHaveProperty('rhythm')
+    expect(config).not.toHaveProperty('modes')
     expect(config.heartbeat.restingMinutes).toBe(60)
     expect(config.selfModel).toEqual({ digestChars: 600 })
     expect(config.clock.speed).toBe(1)
@@ -165,8 +148,11 @@ describe('config defaults', () => {
   })
 
   it('fails loud on removed rules and duplicate needs', () => {
-    expect(() => resolveConfig({ modes: { day: { minIntervalMinutes: 20 } } } as never)).toThrow(/anima\/config-removed: modes\.day\.minIntervalMinutes is gone: her heartbeat is her self-drive/)
-    expect(() => resolveConfig({ modes: { night: { maxWakes: 1 } } } as never)).toThrow(/anima\/config-removed/)
+    expect(() => resolveConfig({ rhythm: { wake: '07:30' } } as never)).toThrow(/anima\/config-removed: rhythm is gone: no clock time decides when she sleeps or wakes/)
+    expect(() => resolveConfig({ modes: { day: {} } } as never)).toThrow(/anima\/config-removed: modes is gone/)
+    expect(() => resolveConfig({ selfGeneration: 2 } as never)).toThrow(/anima\/config-removed: selfGeneration is gone/)
+    expect(() => resolveConfig({ conversationGeneration: 2 } as never)).toThrow(/anima\/config-removed: conversationGeneration is gone/)
+    expect(() => resolveConfig({ sleep: { wakeBelow: 0.7 } } as never)).toThrow(/anima\/config-invalid: sleep: wakeBelow/)
     expect(() => resolveConfig({ selfModel: { changesPerDay: 3 } } as never)).toThrow(/anima\/config-removed: selfModel\.changesPerDay/)
     expect(() => resolveConfig({ needs: [DEFAULT_NEEDS[0]!, DEFAULT_NEEDS[0]!] })).toThrow(/defined twice/)
   })

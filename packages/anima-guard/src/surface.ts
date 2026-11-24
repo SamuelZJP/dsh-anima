@@ -6,7 +6,7 @@
  * @module @anima/guard/surface
  */
 
-import { AnimaError, channelKey, describeDiff, describeGoal, formatLocal, optionalStringArg, parseWhen, stringArg, type Goal, type PlatformView, type SelfDiff } from '@anima/core'
+import { AnimaError, describeDiff, describeGoal, formatLocal, optionalStringArg, parseWhen, stringArg, type Goal, type PlatformView, type SelfDiff } from '@anima/core'
 import type { Memory } from '@anima/memory'
 import { memoryLine } from '@anima/memory'
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,7 +39,7 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
   guard.addOwnerView('owner', () => guard.ownerNames())
   guard.addOwnerView('outbox', () => ({
     delaySeconds: guard.config.outbox.delaySeconds,
-    held: guard.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, intentId: m.intentId, text: m.text, sendsAt: m.sendsAt, offlineSince: m.offlineSince ?? null })),
+    held: guard.outbox.list().map(m => ({ id: m.id, display: m.display, channelKey: m.channelKey, text: m.text, sendsAt: m.sendsAt, offlineSince: m.offlineSince ?? null })),
   }))
   // ---- actions ----
   guard.addOwnerAction('pause', () => {
@@ -51,9 +51,8 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
     return { paused: false }
   })
   guard.addOwnerAction('wake', () => {
-    const result = core.wakeByOwner()
-    if (result.woken) guard.log({ type: 'woken', ...result.until === undefined ? {} : { until: result.until } })
-    return result
+    // Her body records the waking itself (`woke`, by the owner).
+    return core.wakeByOwner()
   })
   guard.addOwnerAction('approve', args => ({ answered: guard.approvals.answer(stringArg(args, 'id').toLowerCase(), true) }))
   guard.addOwnerAction('deny', args => ({ answered: guard.approvals.answer(stringArg(args, 'id').toLowerCase(), false) }))
@@ -127,7 +126,7 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
     name: 'wake', usage: 'wake — wake her on purpose while she sleeps (only the owner can)',
     run: async () => {
       const result = await action('wake') as { woken: boolean; until?: number }
-      return { kind: 'success', text: result.woken ? `She is awake now, until she sleeps again or ${formatLocal(result.until!)}.` : 'She is not asleep.' }
+      return { kind: 'success', text: result.woken ? 'She is awake now; her waking session opens. Her own sleepiness decides when sleep comes again.' : 'She is not asleep.' }
     },
   })
   const answer = async (args: string, approve: boolean): Promise<CommandResult> => {
@@ -202,7 +201,7 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
       if (verb === '') {
         const held = guard.outbox.list()
         if (held.length === 0) return { kind: 'success', text: `The outbox is empty (delay ${guard.config.outbox.delaySeconds} s).` }
-        return { kind: 'success', text: held.map(m => `${m.id} → ${m.display} in ${Math.max(0, Math.round((m.sendsAt - Date.now()) / 1000))} s (intent ${m.intentId}): ${m.text}`).join('\n') }
+        return { kind: 'success', text: held.map(m => `${m.id} → ${m.display} in ${Math.max(0, Math.round((m.sendsAt - Date.now()) / 1000))} s: ${m.text}`).join('\n') }
       }
       if (verb.toLowerCase() !== 'cancel' || id === '') return { kind: 'error', text: 'Usage: /anima outbox [cancel <id>]' }
       const { cancelled } = await action('outbox.cancel', { id }) as { cancelled: boolean }
@@ -220,17 +219,14 @@ export function registerSurface(guard: AnimaGuard, ctx: Context): void {
     }), ctx)
 
     guard.addSubcommand({
-      name: 'self', usage: 'self [text] — open her Self session; with text, deliver it there as an owner notice',
+      name: 'self', usage: 'self [text] — her waking session; with text, deliver it there as an owner notice',
       run: async (args) => {
         if (args === '') {
-          const agent = await life.router.ensureSelf()
-          return { kind: 'success', text: `Self session: ${agent.id}. It shows in the sidebar after its first turn; use /anima self <text> to start one.` }
+          return { kind: 'success', text: `Waking session: ${life.waking.current ?? 'none yet'}${core.asleep() ? ' (she is asleep; it opens when she wakes)' : ''}.` }
         }
-        // A notice comes without a situation report, so it names the channels she can reach.
-        const reachable = life.router.known().map(({ channel }) => `${channel.display}: "${channelKey(channel)}"`)
-        const text = `The owner says: ${args}\nChannels you can reach: ${reachable.join('; ') || 'none'}.`
-        const id = await life.deliver({ type: 'notice', text, ts: core.clock.now() })
-        return { kind: 'success', text: `Delivered to the Self session ${id}.` }
+        const text = `The owner says: ${args}`
+        const id = await life.deliver({ type: 'notice', wake: true, text, ts: core.clock.now() })
+        return { kind: 'success', text: core.asleep() ? 'She is asleep; it waits for her waking.' : `Delivered to her waking session ${id}.` }
       },
     }, ctx)
     guard.addSubcommand({

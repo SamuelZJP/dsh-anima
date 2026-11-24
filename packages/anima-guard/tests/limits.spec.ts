@@ -9,12 +9,12 @@ import { decide, GuardCode, QuotaBook, resolveGuardConfig } from '../src/index.t
 import { callAs, provideSessions, registerEcho, setupGuarded, tempDataDir, textOf } from './helpers.ts'
 
 const SELF = 'self-1'
-const watch: BehaviorMeta = { platform: 'bili', effect: 'observe', sessions: ['self'] }
+const watch: BehaviorMeta = { platform: 'bili', effect: 'observe', sessions: ['waking'] }
 
 describe('fact limits (DESIGN §10)', () => {
   it('refuses a call whose facts exceed an owner limit, before it runs', async () => {
     const ctx = await setupGuarded({ limits: [{ behavior: 'bili_view_closely', fact: 'durationSeconds', max: 1200 }] })
-    provideSessions(ctx, { [SELF]: { kind: 'self' } })
+    provideSessions(ctx, { [SELF]: { kind: 'waking', current: true } })
     const seen: unknown[] = []
     registerEcho(ctx, 'bili_view_closely', { ...watch, facts: async (args) => { seen.push(args); return { durationSeconds: Number(args.text) } } })
     const long = await callAs(ctx, SELF, 'bili_view_closely', { text: '1500' })
@@ -27,7 +27,7 @@ describe('fact limits (DESIGN §10)', () => {
 
   it('turns a failure to find facts into a refusal with its code', async () => {
     const ctx = await setupGuarded()
-    provideSessions(ctx, { [SELF]: { kind: 'self' } })
+    provideSessions(ctx, { [SELF]: { kind: 'waking', current: true } })
     registerEcho(ctx, 'bili_view_closely', { ...watch, facts: async () => { throw new animaCore.AnimaError('anima/bad-args', 'not a bvid.') } })
     const result = await callAs(ctx, SELF, 'bili_view_closely', { text: 'x' })
     expect(textOf(result)).toBe('Error: anima/bad-args: not a bvid.')
@@ -40,7 +40,7 @@ describe('fact limits (DESIGN §10)', () => {
       { behavior: 'bili_view_closely', fact: 'durationSeconds', max: 1200 },
       { behavior: 'qq_say', fact: 'messages', max: 5 },
     ])
-    const verdict = decide({ name: 'bili_view_closely', meta: watch, session: { kind: 'self' }, now: 0, facts: { frames: 13 } }, { quotas: [], allow: [], limits: config.limits }, new QuotaBook())
+    const verdict = decide({ name: 'bili_view_closely', meta: watch, session: { kind: 'waking', current: true }, now: 0, facts: { frames: 13 } }, { quotas: [], allow: [], limits: config.limits }, new QuotaBook())
     expect(verdict).toMatchObject({ allowed: false, code: GuardCode.overLimit })
   })
 })
@@ -49,7 +49,7 @@ describe('platform quotas', () => {
   it('counts every behavior of a platform against a per-platform rule', () => {
     const book = new QuotaBook()
     const quotas = [{ platform: 'bili', per: 'platform' as const, limit: 2, windowMinutes: 60 }]
-    const call = (name: string, platform = 'bili') => ({ name, meta: { ...watch, platform }, session: { kind: 'self' as const }, now: 1000 })
+    const call = (name: string, platform = 'bili') => ({ name, meta: { ...watch, platform }, session: { kind: 'waking' as const, current: true }, now: 1000 })
     for (const name of ['bili_popular', 'bili_watch']) {
       expect(decide(call(name), { quotas, allow: [] }, book)).toEqual({ allowed: true })
       book.record(call(name), quotas)
@@ -70,7 +70,7 @@ describe('platform quotas', () => {
       await ctx.plugin(Tools)
       await ctx.plugin(animaCore, config)
       const fiber = await ctx.plugin(animaGuard, guard)
-      provideSessions(ctx, { [SELF]: { kind: 'self' } })
+      provideSessions(ctx, { [SELF]: { kind: 'waking', current: true } })
       registerEcho(ctx, 'bili_view_closely', watch)
       return { ctx, fiber }
     }

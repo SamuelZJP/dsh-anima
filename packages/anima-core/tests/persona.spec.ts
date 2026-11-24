@@ -22,7 +22,7 @@ describe('persona tool hiding', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
+    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
     ctx.tools.register(defineTool({
       name: 'working_directory',
       description: 'cd',
@@ -30,8 +30,8 @@ describe('persona tool hiding', () => {
       output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true } } }, render: () => [{ type: 'text', text: 'ok' }] },
       async execute() { return { ok: true } },
     }))
-    const { scope, key } = await mintAgentScope(ctx, 'anima-self-x')
-    const fiber = await scope.ctx.plugin(persona, { kind: 'self' })
+    const { scope, key } = await mintAgentScope(ctx, 'anima-w-x')
+    const fiber = await scope.ctx.plugin(persona, { kind: 'waking' })
     const names = () => ctx.tools.schemas(key).map(tool => tool.name)
     expect(names()).not.toContain('working_directory')
     expect(names()).not.toContain(animaCore.PING_TOOL)
@@ -45,15 +45,18 @@ describe('persona tool hiding', () => {
     onTestFinished(() => ctx.fiber.dispose())
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(Tools)
-    await ctx.plugin(animaCore, { conversationGeneration: 1, dataDir: tempDataDir() })
-    const { scope } = await mintAgentScope(ctx, 'anima-self-y')
-    await expect(scope.ctx.plugin(persona, { kind: 'self', hideTools: ['no_such_tool'] })).resolves.toBeDefined()
+    await ctx.plugin(animaCore, { dataDir: tempDataDir() })
+    const { scope } = await mintAgentScope(ctx, 'anima-w-y')
+    await expect(scope.ctx.plugin(persona, { kind: 'waking', hideTools: ['no_such_tool'] })).resolves.toBeDefined()
   })
 })
 
-describe('viewing session kind', () => {
-  it('has persona rules that ask for one viewing_note', async () => {
+describe('viewing prompt kind', () => {
+  it('gives a close view\'s subagent her persona card and what the look is, and no tools of hers', async () => {
     const { personaText } = await import('../src/persona.ts')
-    expect(personaText('# Her', 'viewing')).toMatch(/viewing_note\(note\)/)
+    const { viewingText, VIEWING_RULES } = await import('../src/primer.ts')
+    expect(viewingText('# Her')).toBe(`# Her\n\n${VIEWING_RULES}\n`)
+    expect(VIEWING_RULES).toContain('你的眼睛，不是一段新的清醒')
+    expect(personaText('# Her', 'waking')).not.toContain('## 细看')
   })
 })
