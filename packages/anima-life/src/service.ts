@@ -991,10 +991,11 @@ export class AnimaLife extends Service {
 
   /**
    * One beat of her heart (docs/design/body.md): her self-drive. The next beat
-   * is set first, from her resting rhythm alone; nothing she does and nothing
-   * outside changes it. Awake and idle, the beat stirs her: a turn in her
-   * waking session with her state. Asleep, it beats without waking her; while
-   * she is in a turn, it starts no second one.
+   * is set first, from her state alone; nothing she does and nothing outside
+   * changes it. Awake and idle, the beat stirs her: a turn in her waking
+   * session with her state, held from outside (a pause) or not, since a pause
+   * acts on what she does, at the gate. Asleep, it beats without waking her;
+   * while she is in a turn, it starts no second one.
    */
   async beat(): Promise<void> {
     if (this.beating) return
@@ -1002,11 +1003,11 @@ export class AnimaLife extends Service {
     try {
       const core = this.ctx.anima
       const now = core.clock.now()
-      this.schedule(nextBeat(now, core.config.heartbeat.restingMinutes))
+      this.schedule(nextBeat(now, { state: core.selfState(), mood: core.config.mood, asleep: core.asleep() }, core.config.heartbeat))
       this.file.lastHeartbeatAt = now
       this.file.counts.heartbeats += 1
       this.save()
-      if (core.asleep() || this.heldBy() !== undefined) return
+      if (core.asleep()) return
       const current = this.waking.current
       if (current !== undefined && this.running.has(current)) return
       const text = this.reportText(now)

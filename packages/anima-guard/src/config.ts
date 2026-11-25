@@ -107,13 +107,12 @@ export interface Config {
   }
 }
 
-/** Default quotas: modest per-channel speech, a daily global ceiling, and platform protection. */
+/**
+ * Default quotas: platform protection only (risk control on Bilibili and QQ).
+ * How much she speaks is her tiredness, not an owner rule (R6); an owner who
+ * wants a speech limit sets one here.
+ */
 export const DEFAULT_QUOTAS: QuotaRule[] = [
-  { effect: 'express', per: 'channel', limit: 30, windowMinutes: 60 },
-  { per: 'global', limit: 200, windowMinutes: 24 * 60 },
-  { behavior: 'alarm_set', per: 'global', limit: 20, windowMinutes: 24 * 60 },
-  { behavior: 'group_wake', per: 'channel', limit: 6, windowMinutes: 60 },
-  { behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 },
   { platform: 'bili', per: 'platform', limit: 60, windowMinutes: 60 },
   { behavior: 'bili_view_closely', per: 'global', limit: 3, windowMinutes: 24 * 60 },
   { behavior: 'qq_look', per: 'channel', limit: 10, windowMinutes: 60 },

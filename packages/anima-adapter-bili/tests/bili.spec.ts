@@ -135,7 +135,8 @@ describe('Bilibili adapter', () => {
     expect(watch.text).toContain('## Subtitles (AI 中文（自动生成）)\n[0:00] 大家好 换一个画面')
     expect(watch.text).toContain('[0:15] 好看')
     expect(watch.text).toContain('- fan (42 likes, 2 replies): 太可爱了')
-    expect(ctx.anima.selfState().needs.curiosity).toBeLessThan(0.3)
+    // Watching spends energy; what it meant to her is her own appraisal (self_feel).
+    expect(ctx.anima.selfState().energy).toBeCloseTo(1 - ctx.anima.config.energy.behaviorCosts.bili_watch!, 4)
     const bad = await call(ctx, self, 'bili_watch', { bvid: 'not-a-bvid' })
     expect(bad.text).toMatch(/^Error: .*is not a bvid/)
   })

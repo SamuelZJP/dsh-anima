@@ -1,10 +1,12 @@
 /**
  * Self state (docs/design/body.md): needs, energy, mood and sleep pressure. Code moves these numbers only
- * by time and by declared behavior effects; it never reads message words. Pure.
+ * by time, by sleep and by the energy her behaviors spend; it never reads message words and never judges
+ * what an event means. What satisfied a need, and how she feels, is her appraisal (`self_feel`). Pure.
  * @module @anima/core/state
  */
 
 import { INITIAL_PRESSURE, movePressure, type SleepGenes } from './sleep.ts'
+import type { BehaviorMeta, EffectClass } from './types.ts'
 
 /** One need, defined in config. */
 export interface NeedSpec {
@@ -16,18 +18,22 @@ export interface NeedSpec {
   baseline: number
   /** Upward drift per awake hour. */
   driftPerHour: number
-  /** Behavior name (or `prefix_*`) → amount the need drops when it succeeds. */
-  satisfiedBy: Record<string, number>
 }
 
-/** Energy tuning. */
+/** Her energy (genes). */
 export interface EnergyConfig {
   /** Drain per awake hour. */
   drainPerHour: number
-  /** Drain per action turn. */
-  perTurn: number
+  /** Restore per awake hour while no turn runs (idling), on top of the drain. */
+  idleRestorePerHour: number
   /** Restore per sleeping hour. */
   restorePerHour: number
+  /** Below this, only behaviors that cost no energy run. */
+  exhausted: number
+  /** Energy one call spends, by effect class. */
+  costs: Record<EffectClass, number>
+  /** Energy one call spends, by behavior name (or `prefix_*`), over its effect class. */
+  behaviorCosts: Record<string, number>
 }
 
 /** Mood tuning. */
@@ -48,6 +54,8 @@ export interface StateModel {
   readonly sleep: SleepGenes
   /** Whether she is asleep now: her phase changes only when she falls asleep or wakes, never inside {@link advance}. */
   readonly asleep: () => boolean
+  /** Whether she is awake and no turn runs (idling); defaults to never. */
+  readonly idle?: () => boolean
 }
 
 /** Her current numbers. */
@@ -61,14 +69,24 @@ export interface SelfState {
   updatedAt: number
 }
 
-/** Default needs (DESIGN §7), starting values to be tuned from test runs. */
+/** Default needs (docs/design/body.md), starting values to be tuned from test runs. */
 export const DEFAULT_NEEDS: NeedSpec[] = [
-  { name: 'connect', description: 'being with people you care about', baseline: 0.4, driftPerHour: 0.05, satisfiedBy: { qq_say: 0.3 } },
-  { name: 'curiosity', description: 'finding out new things', baseline: 0.3, driftPerHour: 0.03, satisfiedBy: { bili_view_closely: 0.25, bili_watch: 0.15, 'bili_*': 0.05 } },
-  { name: 'expression', description: 'making or sharing something of your own', baseline: 0.3, driftPerHour: 0.02, satisfiedBy: {} },
-  { name: 'rest', description: 'stopping and resting', baseline: 0.2, driftPerHour: 0.04, satisfiedBy: { rest: 0.1 } },
-  { name: 'order', description: 'keeping your workspace, goals and memory tidy', baseline: 0.2, driftPerHour: 0.01, satisfiedBy: { 'goals_*': 0.1 } },
+  { name: 'connect', description: 'being with people you care about', baseline: 0.4, driftPerHour: 0.05 },
+  { name: 'curiosity', description: 'finding out new things', baseline: 0.3, driftPerHour: 0.03 },
+  { name: 'expression', description: 'making or sharing something of your own', baseline: 0.3, driftPerHour: 0.02 },
+  { name: 'rest', description: 'stopping and resting', baseline: 0.2, driftPerHour: 0.04 },
+  { name: 'order', description: 'keeping your workspace, goals and memory tidy', baseline: 0.2, driftPerHour: 0.01 },
 ]
+
+/** Default energy genes: a quiet waking day costs about 0.5; speaking and looking cost a little each. */
+export const DEFAULT_ENERGY: EnergyConfig = {
+  drainPerHour: 0.03,
+  idleRestorePerHour: 0.05,
+  restorePerHour: 0.15,
+  exhausted: 0.1,
+  costs: { observe: 0.005, internal: 0, workspace: 0.01, express: 0.015, initiate: 0.02, public: 0.02, irreversible: 0.02 },
+  behaviorCosts: { bili_view_closely: 0.06, bili_watch: 0.02 },
+}
 
 const clamp = (v: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, v))
 const STEP_MS = 5 * 60_000
@@ -90,9 +108,9 @@ export function initialState(model: StateModel, now: number): SelfState {
 
 /**
  * Move the state forward in time, in steps of at most five minutes, in her
- * current phase: awake, needs drift, energy drains and sleep pressure rises;
- * asleep, energy restores and sleep pressure falls; mood decays toward its
- * baseline throughout.
+ * current phase: awake, needs drift, energy drains (and restores a little
+ * while she idles) and sleep pressure rises; asleep, energy restores and sleep
+ * pressure falls; mood decays toward its baseline throughout.
  * @param state - state at `state.updatedAt`.
  * @param to - target time; earlier times leave the state unchanged.
  * @param model - state model.
@@ -103,6 +121,7 @@ export function advance(state: SelfState, to: number, model: StateModel): SelfSt
   for (const need of model.needs) next.needs[need.name] ??= need.baseline
   for (const name of Object.keys(next.needs)) if (!model.needs.some(need => need.name === name)) delete next.needs[name]
   const asleep = model.asleep()
+  const idle = !asleep && (model.idle?.() ?? false)
   let t = state.updatedAt
   while (t < to) {
     const step = Math.min(STEP_MS, to - t)
@@ -111,7 +130,7 @@ export function advance(state: SelfState, to: number, model: StateModel): SelfSt
       next.energy = clamp(next.energy + model.energy.restorePerHour * hours)
     } else {
       for (const need of model.needs) next.needs[need.name] = clamp(next.needs[need.name]! + need.driftPerHour * hours)
-      next.energy = clamp(next.energy - model.energy.drainPerHour * hours)
+      next.energy = clamp(next.energy + ((idle ? model.energy.idleRestorePerHour : 0) - model.energy.drainPerHour) * hours)
     }
     next.sleepPressure = movePressure(next.sleepPressure, hours, asleep, model.sleep)
     const decay = model.mood.halfLifeHours > 0 ? 0.5 ** (hours / model.mood.halfLifeHours) : 0
@@ -130,38 +149,51 @@ export function wokeUp(state: SelfState, model: StateModel): SelfState {
 }
 
 /**
- * Amount a need drops when a behavior succeeds; `prefix_*` keys match by prefix.
- * @param need - need spec.
- * @param behavior - tool name.
+ * Energy one call of a behavior spends: its name (or `prefix_*`) in
+ * `behaviorCosts`, else its effect class in `costs`. Physiology: what the
+ * call does to her body, never what it means.
  */
-export function satisfaction(need: NeedSpec, behavior: string): number {
-  const exact = need.satisfiedBy[behavior]
+export function energyCost(name: string, meta: Pick<BehaviorMeta, 'effect'>, energy: EnergyConfig): number {
+  const exact = energy.behaviorCosts[name]
   if (exact !== undefined) return exact
-  for (const [key, amount] of Object.entries(need.satisfiedBy)) {
-    if (key.endsWith('*') && behavior.startsWith(key.slice(0, -1))) return amount
+  for (const [key, amount] of Object.entries(energy.behaviorCosts)) {
+    if (key.endsWith('*') && name.startsWith(key.slice(0, -1))) return amount
   }
-  return 0
+  return energy.costs[meta.effect] ?? 0
+}
+
+/** Whether she is too tired for anything that costs energy. */
+export function exhausted(state: Pick<SelfState, 'energy'>, energy: EnergyConfig): boolean {
+  return state.energy < energy.exhausted
 }
 
 /**
- * Apply a successful behavior to the needs it satisfies.
- * @returns a new state, or the same object when nothing changed.
+ * Spend energy on something she did: energy falls, and sleep pressure rises
+ * with it (`sleep.perEnergy`), so a busy stretch makes her sleepy sooner.
+ * @returns a new state, or the same object when the amount is 0.
  */
-export function satisfy(state: SelfState, behavior: string, model: StateModel): SelfState {
-  let changed = false
-  const needs = { ...state.needs }
-  for (const need of model.needs) {
-    const amount = satisfaction(need, behavior)
-    if (amount === 0 || needs[need.name] === undefined) continue
-    needs[need.name] = clamp(needs[need.name]! - amount)
-    changed = true
+export function spend(state: SelfState, amount: number, model: StateModel): SelfState {
+  if (!(amount > 0)) return state
+  return {
+    ...state,
+    energy: clamp(state.energy - amount),
+    sleepPressure: clamp(state.sleepPressure + amount * model.sleep.perEnergy),
   }
-  return changed ? { ...state, needs } : state
 }
 
-/** Spend one action turn's energy. */
-export function spendTurn(state: SelfState, model: StateModel): SelfState {
-  return { ...state, energy: clamp(state.energy - model.energy.perTurn) }
+/**
+ * Set need levels she chose after her own appraisal (`self_feel`), clamped
+ * 0–1. Unknown names are left out.
+ * @returns a new state and the names that changed.
+ */
+export function setNeeds(state: SelfState, levels: readonly { name: string; level: number }[], model: StateModel): { state: SelfState; unknown: string[] } {
+  const needs = { ...state.needs }
+  const unknown: string[] = []
+  for (const { name, level } of levels) {
+    if (!model.needs.some(need => need.name === name) || !Number.isFinite(level)) unknown.push(name)
+    else needs[name] = clamp(level)
+  }
+  return { state: { ...state, needs }, unknown }
 }
 
 /**

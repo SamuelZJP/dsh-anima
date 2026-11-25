@@ -71,7 +71,7 @@ describe('/anima subcommands', () => {
     const status = (await invoke(ctx, 'status')).text ?? ''
     expect(status).toContain('Paused: no')
     expect(status).toContain('Self session: x')
-    expect(status).toContain('express: 30 per hour per channel')
+    expect(status).toContain('qq_poke: 3 per hour per channel')
   })
 
   it('offers a platform\'s subcommands while it describes itself', async () => {

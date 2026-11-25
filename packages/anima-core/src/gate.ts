@@ -1,6 +1,7 @@
 /**
  * What her body allows (docs/design/body.md): whether a behavior exists where
- * she is, whether she is awake for it, and whether its target exists.
+ * she is, whether she is awake for it, whether she has the energy for it, and
+ * whether its target exists.
  * Physiology and plumbing only; every safety limit lives outside the persona,
  * in `anima-guard`. Pure functions; the `tools/pre-execute` listener lives in the service.
  * @module @anima/core/gate
@@ -17,6 +18,8 @@ export type BodyVerdict =
 export interface BodyMoment {
   /** Whether she is asleep. */
   readonly asleep: boolean
+  /** Whether she is too tired for anything that costs energy. */
+  readonly exhausted?: boolean
   /** Whether an adapter published a channel. */
   readonly channelKnown?: (channelKey: string) => boolean
   /** Channel keys that exist, listed when a call targets an unknown one. */
@@ -30,6 +33,8 @@ export interface BodyCall {
   /** The calling session, or `undefined` when it is not an Anima session. */
   readonly session: SessionInfo | undefined
   readonly args?: Readonly<Record<string, unknown>>
+  /** Energy the call would spend. */
+  readonly energy?: number
 }
 
 /** Refusal codes of the body check. */
@@ -37,6 +42,7 @@ export const GateCode = {
   notAnimaSession: 'anima/not-anima-session',
   wrongSession: 'anima/wrong-session',
   asleep: 'anima/asleep',
+  exhausted: 'anima/exhausted',
   unknownChannel: 'anima/unknown-channel',
 } as const
 
@@ -65,7 +71,7 @@ const KIND_ZH: Record<string, string> = {
 
 /**
  * Check one call against her body. Checks, in order: Anima session, session
- * kind, awake (in a waking session), target exists.
+ * kind, awake and with energy for it (in a waking session), target exists.
  */
 export function bodyCheck(call: BodyCall, moment: BodyMoment): BodyVerdict {
   const { meta, session, name } = call
@@ -75,6 +81,9 @@ export function bodyCheck(call: BodyCall, moment: BodyMoment): BodyVerdict {
     return deny(GateCode.wrongSession, `${name} 在${KIND_ZH[session.kind] ?? session.kind}用不了；它在这些时候能用：${meta.sessions.map(kind => KIND_ZH[kind] ?? kind).join('、')}。`)
   }
   if (session.kind === 'waking' && moment.asleep) return deny(GateCode.asleep, `你睡着了：${name} 要等你醒来才能用。`)
+  if (session.kind === 'waking' && moment.exhausted === true && (call.energy ?? 0) > 0) {
+    return deny(GateCode.exhausted, `你太累了，做不动 ${name}。不费力的事还能做；精力在闲着和睡着时会恢复。`)
+  }
   const target = meta.target?.(args)
   if (target !== undefined && moment.channelKnown?.(target) === false) {
     const known = moment.knownChannels?.() ?? []

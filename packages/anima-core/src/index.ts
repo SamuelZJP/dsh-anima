@@ -11,11 +11,11 @@ import { Config as ConfigSchema, resolveConfig, type Config as CoreConfig } from
 import { AnimaCore } from './service.ts'
 
 export * from './types.ts'
-export { DEFAULT_MODEL, expandHome, resolveConfig, type ModelRoute, type ResolvedConfig } from './config.ts'
+export { DEFAULT_MODEL, expandHome, resolveConfig, type HeartGenes, type ModelRoute, type ResolvedConfig } from './config.ts'
 export { bodyCheck, GateCode, quotaExempt, visibleIn, type BodyCall, type BodyMoment, type BodyVerdict } from './gate.ts'
 export { AnimaClock, formatLocal, formatStamp, localDate, nextAtClock, parseClockTime, parseLocalDateTime, parseWhen, type ClockConfig } from './clock.ts'
 export { checkSleepGenes, INITIAL_PRESSURE, loadSleepRecord, movePressure, overwhelms, rested, sleepComes, type FellAsleepBy, type SleepGenes, type SleepRecord, type WokeBy } from './sleep.ts'
-export { advance, DEFAULT_NEEDS, describeNeeds, feel, initialState, satisfaction, satisfy, spendTurn, wokeUp, type EnergyConfig, type MoodConfig, type NeedSpec, type SelfState, type StateModel } from './state.ts'
+export { advance, DEFAULT_ENERGY, DEFAULT_NEEDS, describeNeeds, energyCost, exhausted, feel, initialState, setNeeds, spend, wokeUp, type EnergyConfig, type MoodConfig, type NeedSpec, type SelfState, type StateModel } from './state.ts'
 export { Ledger, readJson, writeJson } from './ledger.ts'
 export { describeGoal, GoalStore, type Goal, type GoalOwner, type GoalStatus } from './goals.ts'
 export type { Subcommand } from './commands.ts'

@@ -220,6 +220,15 @@ describe('her heartbeat', () => {
     expect(current().inbox).toHaveLength(2)
     expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:00'))
   })
+
+  it('stirs her while the outside holds her (a pause): the pause acts at the gate, not on her heart', async () => {
+    const { ctx, clock, current, outside } = await setup('2026-11-10T08:00')
+    outside.refuse = request => request.kind === 'reach' ? { reason: 'paused' } as never : undefined
+    clock.now = at('2026-11-10T09:00')
+    await ctx.animaLife.beat()
+    expect(current().inbox[1]).toMatch(/\[心跳\]/)
+    expect(ctx.animaLife.nextHeartbeatAt).toBe(at('2026-11-10T10:00'))
+  })
 })
 
 describe('wait', () => {

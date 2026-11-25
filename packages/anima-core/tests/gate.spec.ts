@@ -61,6 +61,13 @@ describe('bodyCheck', () => {
     expect(bodyCheck(call('memory_write', write, consolidation), asleep).allowed).toBe(true)
   })
 
+  it('refuses what costs energy when she is exhausted; free calls and sleep\'s consolidation go on', () => {
+    const tired = { ...awake, exhausted: true }
+    expect(bodyCheck({ ...call('demo_say', say, waking), energy: 0.015 }, tired)).toMatchObject({ allowed: false, code: GateCode.exhausted })
+    expect(bodyCheck({ ...call('memory_remember', remember, waking), energy: 0 }, tired)).toEqual({ allowed: true })
+    expect(bodyCheck({ ...call('memory_write', write, consolidation), energy: 0.01 }, tired)).toEqual({ allowed: true })
+  })
+
   it('refuses a target that does not exist, listing what does', () => {
     const moment: BodyMoment = { ...awake, channelKnown: key => key === 'qq:1:private:2', knownChannels: () => ['qq:1:private:2'] }
     const verdict = bodyCheck(call('qq_say', qqSay, waking, { channel: 'qq:1:private:9' }), moment)

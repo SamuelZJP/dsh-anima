@@ -16,7 +16,7 @@ export { GroupBuffers, type Glance } from './groups.ts'
 export { Inbox, inboxSummary, type HeldMessage as InboxMessage, type InboxEntry } from './inbox.ts'
 export { paceMessages, typingMs, type PacingConfig } from './pacing.ts'
 export { CONSOLIDATION_PRESET, WAKING_PRESET, WakingSessions, type ArchiveResult, type Delivery, type HostAgent, type LogEvent, type ModelChoice, type SessionHost, type SourcePerson, type WakingOptions, type WakingState } from './waking.ts'
-export { nextBeat } from './heartbeat.ts'
+export { beatMinutes, nextBeat, type HeartBody } from './heartbeat.ts'
 export { buildReport, formatSpan, type ChannelLine, type ReportInput } from './report.ts'
 export { alarmPrompts, AnimaLife, arrivalSource, DshSessionHost, VIEWING_PRESET, type HistoryLine, type HistoryProvider, type LifeOptions, type StimulusEvent, type ViewRequest } from './service.ts'
 

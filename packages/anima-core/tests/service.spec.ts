@@ -96,16 +96,39 @@ describe('config and constitution', () => {
 })
 
 describe('core service', () => {
-  it('applies satisfied needs when a behavior succeeds and persists state', async () => {
+  it('spends energy when a behavior succeeds awake, and persists state; needs stay hers', async () => {
     const dataDir = tempDataDir()
     const ctx = await setupCore({ dataDir })
     ctx.anima.setClock(() => T)
     provideSessions(ctx, { 'chat-1': waking })
     registerEcho(ctx, 'qq_say', { ...say, platform: 'qq' })
-    const before = ctx.anima.selfState().needs.connect!
+    const before = ctx.anima.selfState()
     await callAs(ctx, 'chat-1', 'qq_say')
-    expect(ctx.anima.selfState().needs.connect).toBeCloseTo(Math.max(0, before - 0.3))
-    expect(JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8')).self.needs.connect).toBeCloseTo(Math.max(0, before - 0.3))
+    const after = ctx.anima.selfState()
+    const cost = ctx.anima.config.energy.costs.express
+    expect(after.energy).toBeCloseTo(before.energy - cost)
+    expect(after.sleepPressure).toBeCloseTo(before.sleepPressure + cost * ctx.anima.config.sleep.perEnergy)
+    expect(after.needs).toEqual(before.needs)
+    expect(JSON.parse(readFileSync(join(dataDir, 'state.json'), 'utf8')).self.energy).toBeCloseTo(before.energy - cost)
+  })
+
+  it('refuses what costs energy when she is exhausted, and lets free calls run', async () => {
+    const ctx = await setupCore({ energy: { exhausted: 0.99 } as never })
+    ctx.anima.setClock(() => T)
+    provideSessions(ctx, { 'chat-1': waking })
+    registerEcho(ctx, 'qq_say', { ...say, platform: 'qq' })
+    await callAs(ctx, 'chat-1', 'qq_say')
+    expect(textOf(await callAs(ctx, 'chat-1', 'qq_say'))).toMatch(/^Error: anima\/exhausted: 你太累了/)
+    expect((await callAs(ctx, 'chat-1', 'self_feel', { valence: 0.2 })).isError).toBe(false)
+  })
+
+  it('self_feel sets her mood and the needs she appraised', async () => {
+    const ctx = await setupCore({})
+    ctx.anima.setClock(() => T)
+    provideSessions(ctx, { 'chat-1': waking })
+    const result = await callAs(ctx, 'chat-1', 'self_feel', { arousal: 0.7, needs: [{ name: 'connect', level: 0.1 }], why: 'Sam called' })
+    expect(textOf(result)).toBe('valence 0.00, arousal 0.70; connect 0.10')
+    expect(ctx.anima.selfState().needs.connect).toBeCloseTo(0.1)
   })
 
   it('sets her alarms in the session she calls from, timed on her clock', async () => {

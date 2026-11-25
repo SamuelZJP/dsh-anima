@@ -47,7 +47,7 @@ describe('the Anima plugin is the persona only', () => {
  * - `plumbing`: load, wiring and argument shape, not a decision about her.
  */
 const REFUSALS: Record<string, 'physiology' | 'fact' | 'plumbing'> = {
-  'anima/asleep': 'physiology',
+  'anima/asleep': 'physiology', 'anima/exhausted': 'physiology',
   'anima/view-no-note': 'physiology', 'anima/view-timeout': 'physiology', 'anima/no-vision': 'physiology',
   'anima/unknown-channel': 'fact', 'anima/unknown-alarm': 'fact', 'anima/unknown-memory': 'fact', 'anima/unknown-segment': 'fact',
   'anima/goal-closed': 'fact', 'anima/goal-not-found': 'fact', 'anima/no-forward': 'fact', 'anima/no-image': 'fact',

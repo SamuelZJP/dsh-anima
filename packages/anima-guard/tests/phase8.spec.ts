@@ -79,8 +79,10 @@ describe('anima/admit wakes (not tool calls)', () => {
     expect(records[0]).toMatchObject({ behavior: 'group_attention', channel: 'qq:1:group:9' })
   })
 
-  it('has a default quota for the attention window', () => {
-    expect(resolveGuardConfig({}).quotas).toContainEqual({ behavior: 'group_attention', per: 'channel', limit: 10, windowMinutes: 60 })
+  it('has no default quota on speech or attention: that is her tiredness (R6)', () => {
+    const quotas = resolveGuardConfig({}).quotas
+    expect(quotas.some(rule => rule.effect === 'express' || rule.per === 'global' && rule.behavior === undefined && rule.platform === undefined)).toBe(false)
+    expect(quotas.some(rule => rule.behavior === 'group_attention' || rule.behavior === 'group_wake' || rule.behavior === 'alarm_set')).toBe(false)
   })
 })
 
@@ -111,7 +113,8 @@ describe('limits in her prompt, told from outside', () => {
     const t = primerText('# Rin', ctx.anima.placeFacts('p', 'waking'))
     expect(t).toContain('- 外面可能拦住你的事（主人定的规矩，不是你的身体）：')
     expect(t).toContain('`qq_say`：一次最多 5 条消息。')
-    expect(t).toContain('表达类（`qq_say`、`qq_poke`）：每个频道分开算，每小时最多 30 次。')
+    expect(t).toContain('`qq_poke`：每个频道分开算，每小时最多 3 次。')
+    expect(t).not.toContain('表达类')
     expect(t).toContain('在 30 分钟里没有人找过你、你也没说过话的聊天里开口，算你主动找人：每天最多 3 次，只在主人允许的聊天里；这样的消息会先在发件箱里等 45 秒，主人可以取消。')
   })
 })

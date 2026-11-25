@@ -23,7 +23,7 @@ import type { NewActivity } from './records.ts'
 import { SELF_SECTIONS, SelfModelStore, type SelfDiff, type SelfSection } from './selfmodel.ts'
 import { readJson, writeJson } from './ledger.ts'
 import { loadSleepRecord, overwhelms, rested, sleepComes, type FellAsleepBy, type SleepRecord, type WokeBy } from './sleep.ts'
-import { advance, describeNeeds, feel, initialState, satisfy, spendTurn, wokeUp, type SelfState, type StateModel } from './state.ts'
+import { advance, describeNeeds, energyCost, exhausted, feel, initialState, setNeeds, spend, wokeUp, type SelfState, type StateModel } from './state.ts'
 import type { PlaceFacts } from './primer.ts'
 import { AnimaError, closesTurn, type AdmitRefusal, type AdmitRequest, type BehaviorMeta, type FriendRequest, type OutgoingHeld, type OwnerLine, type SessionInfo, type SessionKind } from './types.ts'
 
@@ -169,7 +169,7 @@ export class AnimaCore extends Service {
     this.constitutionCache = loadConstitution(config)
     this.selfModel = new SelfModelStore(join(config.dataDir, 'self-model.json'), join(config.dataDir, 'self-model-log.jsonl'), config.selfModel)
     this.clock = new AnimaClock(config.clock)
-    this.model = { needs: config.needs, energy: config.energy, mood: config.mood, sleep: config.sleep, asleep: () => this.sleepRecord.asleep }
+    this.model = { needs: config.needs, energy: config.energy, mood: config.mood, sleep: config.sleep, asleep: () => this.sleepRecord.asleep, idle: () => !this.busy() }
     this.goals = new GoalStore(join(config.dataDir, 'goals.json'))
     this.statePath = join(config.dataDir, 'state.json')
     const now = this.clock.now()
@@ -365,12 +365,13 @@ export class AnimaCore extends Service {
     const meta = this.behaviorTable.get(name)
     if (meta === undefined) return { allowed: true }
     const parsed = args !== null && typeof args === 'object' ? args as Record<string, unknown> : {}
-    return bodyCheck({ name, meta, session: sessionId === undefined ? undefined : this.describeSession(sessionId), args: parsed }, this.bodyMoment())
+    return bodyCheck({ name, meta, session: sessionId === undefined ? undefined : this.describeSession(sessionId), args: parsed, energy: this.energyOf(name, meta) }, this.bodyMoment())
   }
 
   private bodyMoment(): BodyMoment {
     return {
       asleep: this.asleep(),
+      exhausted: exhausted(this.selfState(), this.config.energy),
       // Default deny: without a channel resolver no target is known.
       channelKnown: key => this.state.channels?.(key) !== undefined,
       knownChannels: () => this.state.channelList?.() ?? [],
@@ -389,17 +390,25 @@ export class AnimaCore extends Service {
     return this.self
   }
 
-  /** Charge one action turn's energy. */
-  spendTurn(): void {
-    this.self = spendTurn(this.selfState(), this.model)
-    this.save()
+  /** Energy one call of a behavior spends (`energy.costs`, `energy.behaviorCosts`). */
+  energyOf(name: string, meta: BehaviorMeta): number {
+    return energyCost(name, meta, this.config.energy)
+  }
+
+  /** Spend energy on something she did awake: energy falls and sleep pressure rises with it. */
+  private spendOn(name: string, meta: BehaviorMeta): void {
+    const next = spend(this.selfState(), this.energyOf(name, meta), this.model)
+    if (next !== this.self) {
+      this.self = next
+      this.save()
+    }
   }
 
   /** Self-state lines for the situation report. */
   stateText(): string[] {
     const state = this.selfState()
     return [
-      `sleep pressure ${state.sleepPressure.toFixed(2)}; energy ${state.energy.toFixed(2)}; mood valence ${state.mood.valence.toFixed(2)}, arousal ${state.mood.arousal.toFixed(2)}`,
+      `sleep pressure ${state.sleepPressure.toFixed(2)}; energy ${state.energy.toFixed(2)}${exhausted(state, this.config.energy) ? ' (exhausted)' : ''}; mood valence ${state.mood.valence.toFixed(2)}, arousal ${state.mood.arousal.toFixed(2)}`,
       'needs, highest first:',
       ...describeNeeds(state, this.model).map(line => `  ${line}`),
     ]
@@ -409,20 +418,13 @@ export class AnimaCore extends Service {
     writeJson(this.statePath, { self: this.self, sleep: this.sleepRecord } satisfies StateFile)
   }
 
-  private onBehaviorSuccess(name: string): void {
-    const next = satisfy(this.selfState(), name, this.model)
-    if (next !== this.self) {
-      this.self = next
-      this.save()
-    }
-  }
 
   // ---- behaviors ----
 
   /**
    * Register a behavior: a DSH tool plus metadata. The tool is offered only in
    * sessions and modes it fits, every call passes the body check, and a
-   * success applies the needs it satisfies (config `needs[].satisfiedBy`). The
+   * success in her waking session spends its energy (physiology). The
    * registration belongs to the calling plugin and is removed when it unloads.
    * @param definition - the tool.
    * @param meta - behavior metadata.
@@ -441,7 +443,7 @@ export class AnimaCore extends Service {
         const value = await definition.execute(args, exec)
         // A closing behavior ends the turn only once it succeeded (DESIGN §6, Turn shape).
         if (closesTurn(meta, args as Record<string, unknown>)) exec.concludeTurn()
-        this.onBehaviorSuccess(name)
+        if (this.describeSession(exec.agent?.id ?? '')?.kind === 'waking') this.spendOn(name, meta)
         const event: BehaviorEvent = { name, meta, args: args as Record<string, unknown>, sessionId: exec.agent?.id, at: this.clock.now() }
         this.ctx.emit('anima/behavior', event)
         return value
@@ -655,10 +657,22 @@ export class AnimaCore extends Service {
 
     this.registerBehavior(defineTool({
       name: 'self_feel',
-      description: 'Set your current mood after something happened. Valence -1 (bad) to 1 (good), arousal 0 (calm) to 1 (excited). It drifts back on its own.',
+      description: 'Register how you feel after something happened: your mood (valence -1 bad to 1 good, arousal 0 calm to 1 excited), and any need it fed or left hungrier (0 satisfied to 1 strong). Mood drifts back and needs drift up on their own.',
       parameters: {
         valence: { type: 'number', description: 'New valence, -1 to 1.' },
         arousal: { type: 'number', description: 'New arousal, 0 to 1.' },
+        needs: {
+          type: 'array',
+          description: 'Needs to set: each with its name and new level, 0 (satisfied) to 1 (strong).',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string', enum: this.config.needs.map(need => need.name), required: true, description: 'Need name.' },
+              level: { type: 'number', required: true, description: 'New level, 0 to 1.' },
+            },
+          },
+        },
         why: { type: 'string', description: 'What made you feel this way.' },
       },
       output: {
@@ -666,9 +680,15 @@ export class AnimaCore extends Service {
         render: (_args, value) => [{ type: 'text', text: value.mood }],
       },
       execute: async (args) => {
-        this.self = feel(this.selfState(), { valence: args.valence, arousal: args.arousal })
+        let next = feel(this.selfState(), { valence: args.valence, arousal: args.arousal })
+        const levels = (args.needs ?? []) as { name: string; level: number }[]
+        const set = setNeeds(next, levels, this.model)
+        next = set.state
+        this.self = next
         this.save()
-        return { mood: `valence ${this.self.mood.valence.toFixed(2)}, arousal ${this.self.mood.arousal.toFixed(2)}` }
+        const needs = levels.filter(item => !set.unknown.includes(item.name)).map(item => `${item.name} ${(next.needs[item.name] ?? 0).toFixed(2)}`)
+        const unknown = set.unknown.length === 0 ? '' : `; no such need: ${set.unknown.join(', ')}`
+        return { mood: `valence ${next.mood.valence.toFixed(2)}, arousal ${next.mood.arousal.toFixed(2)}${needs.length === 0 ? '' : `; ${needs.join(', ')}`}${unknown}` }
       },
     }), self)
 

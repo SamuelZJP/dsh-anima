@@ -1,19 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { AnimaClock, formatLocal, parseWhen } from '../src/clock.ts'
 import { resolveConfig } from '../src/config.ts'
-import { advance, DEFAULT_NEEDS, feel, initialState, satisfy, spendTurn, wokeUp, type StateModel } from '../src/state.ts'
+import { advance, DEFAULT_ENERGY, DEFAULT_NEEDS, energyCost, exhausted, feel, initialState, setNeeds, spend, wokeUp, type StateModel } from '../src/state.ts'
 import { Ledger } from '../src/ledger.ts'
 import { GoalStore } from '../src/goals.ts'
 
 const at = (text: string) => new Date(text).getTime()
-const sleep = { risePerHour: 0.05, fallPerHour: 0.1, fallAsleepAbove: 0.6, overwhelmAbove: 0.95, wakeBelow: 0.1 }
-const phase = { asleep: false }
+const sleep = { risePerHour: 0.05, perEnergy: 0.5, fallPerHour: 0.1, fallAsleepAbove: 0.6, overwhelmAbove: 0.95, wakeBelow: 0.1 }
+const phase = { asleep: false, idle: false }
 const model: StateModel = {
   needs: DEFAULT_NEEDS,
-  energy: { drainPerHour: 0.04, perTurn: 0.03, restorePerHour: 0.15 },
+  energy: { ...DEFAULT_ENERGY, drainPerHour: 0.04, idleRestorePerHour: 0.06, restorePerHour: 0.15 },
   mood: { valence: 0, arousal: 0.3, halfLifeHours: 3 },
   sleep,
   asleep: () => phase.asleep,
+  idle: () => phase.idle,
 }
 
 describe('clock', () => {
@@ -107,15 +108,47 @@ describe('self state', () => {
     expect(later.mood.arousal).toBeCloseTo(0.3 + 0.7 / 2)
   })
 
-  it('lowers satisfied needs, by exact name or prefix', () => {
-    const state = { ...initialState(model, morning), needs: { connect: 0.8, curiosity: 0.3, expression: 0.3, rest: 0.2, order: 0.05 } }
-    expect(satisfy(state, 'qq_say', model).needs.connect).toBeCloseTo(0.5)
-    expect(satisfy(state, 'goals_add', model).needs.order).toBe(0)
-    expect(satisfy(state, 'anima_ping', model)).toBe(state)
+  it('restores a little energy while she idles awake', () => {
+    phase.idle = true
+    try {
+      const state = advance({ ...initialState(model, morning), energy: 0.5 }, morning + 2 * 3_600_000, model)
+      expect(state.energy).toBeCloseTo(0.5 + 2 * (0.06 - 0.04))
+    } finally {
+      phase.idle = false
+    }
   })
 
-  it('spends energy per action turn', () => {
-    expect(spendTurn(initialState(model, morning), model).energy).toBeCloseTo(0.97)
+  it('costs energy by behavior name, prefix, then effect class', () => {
+    const energy = { ...DEFAULT_ENERGY, behaviorCosts: { bili_view_closely: 0.06, 'qq_*': 0.01 } }
+    expect(energyCost('bili_view_closely', { effect: 'observe' }, energy)).toBe(0.06)
+    expect(energyCost('qq_say', { effect: 'express' }, energy)).toBe(0.01)
+    expect(energyCost('demo_say', { effect: 'express' }, energy)).toBe(DEFAULT_ENERGY.costs.express)
+    expect(energyCost('end_turn', { effect: 'internal' }, energy)).toBe(0)
+  })
+
+  it('spending energy raises sleep pressure; exhausted below the gene', () => {
+    const state = initialState(model, morning)
+    const spent = spend(state, 0.2, model)
+    expect(spent.energy).toBeCloseTo(0.8)
+    expect(spent.sleepPressure).toBeCloseTo(0.15 + 0.2 * 0.5)
+    expect(spend(state, 0, model)).toBe(state)
+    expect(exhausted({ energy: 0.09 }, DEFAULT_ENERGY)).toBe(true)
+    expect(exhausted({ energy: 0.1 }, DEFAULT_ENERGY)).toBe(false)
+  })
+
+  it('sets needs she appraised, clamped; unknown names are reported', () => {
+    const state = initialState(model, morning)
+    const { state: next, unknown } = setNeeds(state, [{ name: 'connect', level: 0.1 }, { name: 'rest', level: 3 }, { name: 'hunger', level: 0.5 }], model)
+    expect(next.needs.connect).toBe(0.1)
+    expect(next.needs.rest).toBe(1)
+    expect(next.needs).not.toHaveProperty('hunger')
+    expect(unknown).toEqual(['hunger'])
+  })
+
+  it('never lowers a need for a behavior: needs only drift', () => {
+    const state = advance(initialState(model, morning), morning + 3_600_000, model)
+    for (const need of DEFAULT_NEEDS) expect(state.needs[need.name]).toBeGreaterThanOrEqual(need.baseline)
+    expect(DEFAULT_NEEDS.some(need => 'satisfiedBy' in need)).toBe(false)
   })
 
   it('ignores time going backwards and follows a changed need set', () => {
@@ -138,7 +171,8 @@ describe('ledger', () => {
 describe('config defaults', () => {
   it('fills the defaults: her genes, no clock times', () => {
     const config = resolveConfig({})
-    expect(config.sleep).toEqual({ risePerHour: 0.055, fallPerHour: 0.11, fallAsleepAbove: 0.6, overwhelmAbove: 0.98, wakeBelow: 0.1 })
+    expect(config.sleep).toEqual({ risePerHour: 0.045, perEnergy: 0.3, fallPerHour: 0.11, fallAsleepAbove: 0.6, overwhelmAbove: 0.98, wakeBelow: 0.1 })
+    expect(config.energy).toEqual(DEFAULT_ENERGY)
     expect(config).not.toHaveProperty('rhythm')
     expect(config).not.toHaveProperty('modes')
     expect(config.heartbeat.restingMinutes).toBe(60)
@@ -155,6 +189,9 @@ describe('config defaults', () => {
     expect(() => resolveConfig({ sleep: { wakeBelow: 0.7 } } as never)).toThrow(/anima\/config-invalid: sleep: wakeBelow/)
     expect(() => resolveConfig({ selfModel: { changesPerDay: 3 } } as never)).toThrow(/anima\/config-removed: selfModel\.changesPerDay/)
     expect(() => resolveConfig({ needs: [DEFAULT_NEEDS[0]!, DEFAULT_NEEDS[0]!] })).toThrow(/defined twice/)
+    expect(() => resolveConfig({ needs: [{ ...DEFAULT_NEEDS[0]!, satisfiedBy: { qq_say: 0.3 } }] } as never)).toThrow(/anima\/config-removed: needs\[0\]\.satisfiedBy is gone/)
+    expect(() => resolveConfig({ energy: { perTurn: 0.03 } } as never)).toThrow(/anima\/config-removed: energy\.perTurn is gone/)
+    expect(() => resolveConfig({ heartbeat: { restingMinutes: 10 } } as never)).toThrow(/anima\/config-invalid: heartbeat/)
   })
 })
 

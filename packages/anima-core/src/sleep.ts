@@ -12,6 +12,8 @@ import { AnimaError } from './types.ts'
 export interface SleepGenes {
   /** Pressure gained per awake hour. */
   risePerHour: number
+  /** Pressure gained per unit of energy she spends: a busy stretch makes her sleepy sooner. */
+  perEnergy: number
   /** Pressure lost per sleeping hour. */
   fallPerHour: number
   /** Above this, sleep comes when she goes to bed. */
