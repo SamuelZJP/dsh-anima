@@ -5,6 +5,7 @@
 import { useState, type ReactNode } from 'react'
 import { action } from './api.ts'
 import { percent } from './format.ts'
+import { t } from './i18n.ts'
 
 export function Bar({ value, tone }: { value: number; tone?: 'warn' | 'bad' | undefined }) {
   return <div className={`anima-bar${tone === undefined ? '' : ` ${tone}`}`}><span style={{ width: percent(value, 1) }} /></div>
@@ -34,10 +35,10 @@ export function Confirm({ label, question, reason, danger, busy, onConfirm }: {
   return (
     <div className="anima-confirm" role="group" aria-label={question}>
       <div>{question}</div>
-      {reason === undefined ? null : <input className="anima-input" style={{ minWidth: 0, width: '100%' }} value={text} onChange={e => setText(e.target.value)} aria-label="Reason" />}
+      {reason === undefined ? null : <input className="anima-input" style={{ minWidth: 0, width: '100%' }} value={text} onChange={e => setText(e.target.value)} aria-label={t('common.reason')} />}
       <div className="anima-row" style={{ marginTop: 4, marginBottom: 0 }}>
         <button type="button" className={`anima-btn small ${danger === true ? 'danger' : 'primary'}`} disabled={busy} onClick={() => { setOpen(false); onConfirm(text) }}>{label}</button>
-        <button type="button" className="anima-btn small" onClick={() => setOpen(false)}>Cancel</button>
+        <button type="button" className="anima-btn small" onClick={() => setOpen(false)}>{t('common.cancel')}</button>
       </div>
     </div>
   )

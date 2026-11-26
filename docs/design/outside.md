@@ -71,6 +71,7 @@ An Anima entry in DSH's web UI sidebar with tabs: Status, Persona, Memory, Goals
 - **Browser half:** a bundle on DSH's client slots, built with esbuild.
 - **Owner surface:** every view and action is a named owner view or action on `anima-guard`. The page and the commands call the same ones.
 - **Settings** save through DSH's config editor into the active profile's patch.
+- **Language:** the page's own copy is Chinese by default, with an English switch in its header kept in the browser's localStorage. Values from the Host (ids, codes, error hints, her text) show as they are.
 
 ## DSH
 

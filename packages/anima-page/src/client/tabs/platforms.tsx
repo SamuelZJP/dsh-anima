@@ -2,6 +2,7 @@
 import { view } from '../api.ts'
 import { clockTime, healthClass } from '../format.ts'
 import { usePoll } from '../hooks.ts'
+import { t, word } from '../i18n.ts'
 import type { PlatformEntry } from '../types.ts'
 import { Confirm, Pill, Problem, useAction } from '../ui.tsx'
 
@@ -26,13 +27,13 @@ function BiliLogin({ entry, reload }: { entry: PlatformEntry; reload: () => void
     <div style={{ marginTop: 10 }}>
       {qr === null || qr === undefined ? (
         <div className="anima-row">
-          <button type="button" className="anima-btn primary" disabled={act.busy} onClick={() => void act.run('bili.login', {}, () => 'Scan the QR below with the Bilibili app, logged in to HER account.')}>Log in with QR</button>
-          {entry.view.details.loggedIn === true ? <Confirm label="Log out" danger question="Log her out of Bilibili? Her cookies are deleted." busy={act.busy}
-            onConfirm={() => void act.run<{ removed: boolean }>('bili.logout', {}, v => v.removed ? 'Logged out.' : 'She was not logged in.')} /> : null}
+          <button type="button" className="anima-btn primary" disabled={act.busy} onClick={() => void act.run('bili.login', {}, () => t('platforms.scanDone'))}>{t('platforms.login')}</button>
+          {entry.view.details.loggedIn === true ? <Confirm label={t('platforms.logout')} danger question={t('platforms.logoutQuestion')} busy={act.busy}
+            onConfirm={() => void act.run<{ removed: boolean }>('bili.logout', {}, v => v.removed ? t('platforms.loggedOut') : t('platforms.notLoggedIn'))} /> : null}
         </div>
       ) : (
         <div>
-          <p>Scan with the Bilibili app, logged in to <b>her</b> account, then confirm on the phone. Expires at {clockTime(qr.expiresAt)}.</p>
+          <p>{t('platforms.scan', { at: clockTime(qr.expiresAt) })}</p>
           {/* The SVG comes from the adapter's own QR encoder (no scripts). */}
           <div className="anima-qr" dangerouslySetInnerHTML={{ __html: qr.svg }} />
         </div>
@@ -47,11 +48,11 @@ export function PlatformsTab() {
   return (
     <>
       <Problem error={platforms.error} />
-      <p className="anima-muted">The local channel (DSH web UI) is always available. Platform rows come from enabled adapters.</p>
-      {(platforms.data ?? []).length === 0 ? <p className="anima-muted">No platform adapters are enabled.</p> : null}
+      <p className="anima-muted">{t('platforms.note')}</p>
+      {(platforms.data ?? []).length === 0 ? <p className="anima-muted">{t('platforms.none')}</p> : null}
       {(platforms.data ?? []).map(entry => (
         <div key={entry.platform} className="anima-card anima-section">
-          <div className="anima-row"><b>{entry.title}</b><Pill tone={healthClass(entry.view.health)}>{entry.view.health}</Pill><span>{entry.view.summary}</span></div>
+          <div className="anima-row"><b>{entry.title}</b><Pill tone={healthClass(entry.view.health)}>{word(entry.view.health)}</Pill><span>{entry.view.summary}</span></div>
           <Details details={entry.view.details} />
           {entry.platform === 'bili' ? <BiliLogin entry={entry} reload={platforms.reload} /> : null}
         </div>

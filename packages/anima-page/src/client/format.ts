@@ -2,6 +2,7 @@
  * Pure formatting helpers for the Anima page (unit-tested in Node).
  * @module @anima/page/client/format
  */
+import { t } from './i18n.ts'
 
 /** Local `YYYY-MM-DD HH:mm` of an epoch ms (the page's own clock). */
 export function stamp(ms: number | null | undefined): string {
@@ -56,8 +57,8 @@ export function parseConfigText(text: string): { value: Record<string, unknown> 
   try {
     value = JSON.parse(text)
   } catch (error: unknown) {
-    return { error: `Not valid JSON: ${error instanceof Error ? error.message : String(error)}` }
+    return { error: t('format.notJson', { error: error instanceof Error ? error.message : String(error) }) }
   }
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return { error: 'The config must be a JSON object.' }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return { error: t('format.notObject') }
   return { value: value as Record<string, unknown> }
 }

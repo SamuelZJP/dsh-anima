@@ -12,6 +12,7 @@ const CSS = `
 .anima-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
 .anima-head h1 { font-size: 20px; font-weight: 600; margin: 0; }
 .anima-sub { color: var(--dsw-alias-label-secondary); }
+.anima-lang { margin-left: auto; }
 .anima-tabs { display: flex; gap: 2px; flex-wrap: wrap; border-bottom: 0.5px solid var(--dsw-alias-border-l2); margin-bottom: 16px; }
 .anima-tab { appearance: none; border: 0; background: none; color: var(--dsw-alias-label-secondary); padding: 8px 12px; font: inherit; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .anima-tab:hover { color: var(--dsw-alias-label-primary); }

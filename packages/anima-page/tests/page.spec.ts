@@ -169,7 +169,20 @@ describe('page formatting helpers', () => {
     expect(healthClass('down')).toBe('bad')
     expect(rankedCounts({ a: 1, b: 3, c: 1 })).toEqual([['b', 3], ['a', 1], ['c', 1]])
     expect(parseConfigText('{"a":1}')).toEqual({ value: { a: 1 } })
-    expect(parseConfigText('[1]')).toEqual({ error: 'The config must be a JSON object.' })
+    expect(parseConfigText('[1]')).toEqual({ error: '配置必须是 JSON 对象。' })
     expect('error' in parseConfigText('{')).toBe(true)
+  })
+})
+
+describe('page language', () => {
+  it('defaults to Chinese, switches to English and fills placeholders', async () => {
+    const { lang, setLang, t, word } = await import('../src/client/i18n.ts')
+    expect(lang()).toBe('zh')
+    expect(t('memory.forgot', { id: 'm1' })).toBe('已遗忘 m1。')
+    expect(word('refused')).toBe('拒绝')
+    setLang('en')
+    expect(t('memory.forgot', { id: 'm1' })).toBe('Forgot m1.')
+    expect(word('refused')).toBe('refused')
+    setLang('zh')
   })
 })
