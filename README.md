@@ -93,3 +93,7 @@ pnpm dsh --profile <profile>
 | [`docs/design/`](docs/design/) | 生活、记忆、身体、人格、渠道、外部护栏的分项设计 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 后续阶段 |
 | [`docs/history/`](docs/history/) | 第一版设计与各阶段记录 |
+
+## 协议
+
+[MIT](LICENSE)。
